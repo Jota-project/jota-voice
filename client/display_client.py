@@ -39,6 +39,9 @@ class DisplayClient:
         state: Optional[str] = None
         text: str = ""
 
+        if not isinstance(event.data, dict):
+            return
+
         if event.type == "recording_started":
             state = "listening"
         elif event.type == "transcription":
@@ -61,7 +64,7 @@ class DisplayClient:
 
     async def _post(self, state: str, text: str) -> None:
         payload = json.dumps({"state": state, "text": text}).encode()
-        url = self._cfg.url + "/state"
+        url = self._cfg.url.rstrip("/") + "/state"
         timeout = self._cfg.timeout_s
 
         def _do_post() -> None:
@@ -74,7 +77,7 @@ class DisplayClient:
             with urllib.request.urlopen(req, timeout=timeout):
                 pass
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             await loop.run_in_executor(None, _do_post)
         except Exception as exc:
