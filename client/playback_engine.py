@@ -13,10 +13,13 @@ Dependencias: pyaudio (solo en hardware Termux/ARM), asyncio, event_bus.
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pyaudio
 
 from client.event_bus import EventBus, VoiceEvent
+
+log = logging.getLogger(__name__)
 
 # Parámetros fijos del stream TTS
 _SAMPLE_RATE = 24000
@@ -44,6 +47,7 @@ class PlaybackEngine:
         # Estado de texto
         self._text_buffer: list[str] = []
         self._text_cursor: float = 0.0
+        self._play_lock: asyncio.Lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # API pública
@@ -62,40 +66,40 @@ class PlaybackEngine:
         if not audio:
             return
 
-        # Asegurar que el stream está abierto
-        self._ensure_stream()
+        async with self._play_lock:
+            # Asegurar que el stream está abierto
+            self._ensure_stream()
 
-        audio_duration = len(audio) / (_SAMPLE_RATE * _SAMPLE_WIDTH)
+            audio_duration = len(audio) / (_SAMPLE_RATE * _SAMPLE_WIDTH)
 
-        # Calcular velocidad de avance de texto
-        total_chars = sum(len(t) for t in self._text_buffer)
-        pending_chars = total_chars - int(self._text_cursor)
-        if pending_chars > 0 and audio_duration > 0:
-            chars_per_second = pending_chars / audio_duration
-        else:
-            chars_per_second = 0.0
+            # Lanzar la escritura de audio como tarea concurrente
+            loop = asyncio.get_running_loop()
+            write_task = loop.run_in_executor(None, self._stream.write, audio)
 
-        # Lanzar la escritura de audio como tarea concurrente
-        loop = asyncio.get_running_loop()
-        write_task = loop.run_in_executor(None, self._stream.write, audio)
-
-        # Loop de ticks de texto mientras el audio se reproduce
-        elapsed = 0.0
-        while elapsed < audio_duration:
-            await asyncio.sleep(_TICK)
-            elapsed += _TICK
-            if chars_per_second > 0:
-                self._text_cursor = min(
-                    self._text_cursor + chars_per_second * _TICK,
-                    float(total_chars),
+            # Loop de ticks de texto anclado al tiempo real
+            t0 = loop.time()
+            while True:
+                await asyncio.sleep(_TICK)
+                real_elapsed = loop.time() - t0
+                if real_elapsed >= audio_duration:
+                    break
+                # Recalcular chars/s en cada tick (tokens nuevos pueden llegar mid-chunk)
+                total_chars = sum(len(t) for t in self._text_buffer)
+                pending_chars = total_chars - int(self._text_cursor)
+                remaining_time = max(audio_duration - real_elapsed, _TICK)
+                cps = pending_chars / remaining_time if pending_chars > 0 else 0.0
+                if cps > 0:
+                    self._text_cursor = min(
+                        self._text_cursor + cps * _TICK,
+                        float(total_chars),
+                    )
+                visible = "".join(self._text_buffer)[: int(self._text_cursor)]
+                self._bus.publish(
+                    VoiceEvent(type="display_text_update", data={"text": visible})
                 )
-            visible = "".join(self._text_buffer)[: int(self._text_cursor)]
-            self._bus.publish(
-                VoiceEvent(type="display_text_update", data={"text": visible})
-            )
 
-        # Esperar que el write termine antes de retornar
-        await write_task
+            # Esperar que el write termine antes de retornar
+            await write_task
 
     async def drain(self) -> None:
         """
@@ -118,8 +122,8 @@ class PlaybackEngine:
             try:
                 self._stream.stop_stream()
                 self._stream.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("PlaybackEngine.close(): error al cerrar stream: %s", exc)
             finally:
                 self._stream = None
 
