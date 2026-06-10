@@ -178,6 +178,7 @@ async def _responding(
                 text = gw_event.data.get("text", "")
                 bus.publish(VoiceEvent(type="transcription", data={"text": text}))
                 log.info("RESPONDING: transcription → %r", text)
+                await gateway.send_text(text)  # disparar orquestador
 
             elif gw_event.type == "transcription_partial":
                 text = gw_event.data.get("text", "")

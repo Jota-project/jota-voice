@@ -1,9 +1,8 @@
 import asyncio
-import base64
 import json
 import logging
 from dataclasses import dataclass
-from typing import AsyncGenerator, Optional, Any, AsyncIterator
+from typing import AsyncGenerator, Optional, Any
 
 import websockets
 
@@ -32,7 +31,11 @@ class GatewayClient:
         except asyncio.TimeoutError:
             log.error("Gateway: timeout conectando a %s (%.1fs)", self._cfg.ws_url, self._cfg.connect_timeout_s)
             raise
-        handshake = {"type": "handshake", "client_key": self._cfg.client_key}
+        handshake = {
+            "client_key": self._cfg.client_key,
+            "input_mode": "audio",
+            "output_mode": ["audio", "text", "status"],
+        }
         await self._ws.send(json.dumps(handshake))
         log.debug("Gateway conectado a %s", self._cfg.ws_url)
 
@@ -55,13 +58,18 @@ class GatewayClient:
         await self._ws.send(json.dumps({"type": "end"}))
         log.debug("Gateway: enviado end")
 
+    async def send_text(self, text: str) -> None:
+        """Envía la transcripción confirmada al gateway para disparar el orquestador."""
+        if self._ws is None:
+            raise RuntimeError("GatewayClient: no conectado")
+        await self._ws.send(json.dumps({"type": "send", "text": text}))
+        log.debug("Gateway: enviado send %r", text[:60])
+
     async def receive(self) -> AsyncGenerator[GatewayEvent, None]:
         try:
             async for message in self._ws:
                 if isinstance(message, bytes):
-                    # Gateway envía audio TTS como JSON con base64, no como bytes crudos.
-                    # Si aun así llegan bytes, los ignoramos silenciosamente.
-                    log.debug("Gateway: frame binario inesperado (%d bytes), ignorado", len(message))
+                    yield GatewayEvent(type="tts_chunk", data={"audio": message})
                     continue
                 try:
                     data = json.loads(message)
@@ -71,8 +79,9 @@ class GatewayClient:
                 event_type = data.get("type", "")
                 if event_type == "done":
                     return
-                if event_type == "tts_chunk" and "audio" in data:
-                    data = dict(data, audio=base64.b64decode(data["audio"]))
+                # El gateway envía "token" para LLM; normalizamos al tipo interno.
+                if event_type == "token":
+                    event_type = "llm_token"
                 yield GatewayEvent(type=event_type, data=data)
         except websockets.exceptions.ConnectionClosed as exc:
             log.warning("Gateway: conexión cerrada inesperadamente: %s", exc)
