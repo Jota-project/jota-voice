@@ -21,7 +21,10 @@ _HERE = Path(__file__).resolve().parent  # .../client
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-import pyaudio
+try:
+    import pyaudio
+except ImportError:
+    sys.exit("pyaudio no encontrado. Instálalo con: pip install pyaudio")
 
 from config import load_config
 from event_bus import EventBus
