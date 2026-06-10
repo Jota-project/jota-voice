@@ -17,12 +17,12 @@ import logging
 
 import numpy as np
 
-from client.audio_capture import AudioCapture
-from client.config import Config
-from client.event_bus import EventBus, VoiceEvent
-from client.gateway_client import GatewayClient
-from client.oww_client import OWWClient
-from client.playback_engine import PlaybackEngine
+from audio_capture import AudioCapture
+from config import Config
+from event_bus import EventBus, VoiceEvent
+from gateway_client import GatewayClient
+from oww_client import OWWClient
+from playback_engine import PlaybackEngine
 
 log = logging.getLogger(__name__)
 

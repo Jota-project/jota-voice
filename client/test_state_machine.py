@@ -68,18 +68,15 @@ def _install_stubs() -> None:
 
 _install_stubs()
 
-# Asegurar que tanto el raíz del proyecto como client/ estén en sys.path
-_here = os.path.dirname(__file__)                          # .../client
-_root = os.path.dirname(_here)                            # .../jota-voice
-if _root not in sys.path:
-    sys.path.insert(0, _root)
+# Añadir client/ al sys.path para importar módulos locales
+_here = os.path.dirname(__file__)  # .../client
 if _here not in sys.path:
     sys.path.insert(0, _here)
 
-# Ahora importar módulos del proyecto
-from client.event_bus import EventBus, VoiceEvent          # noqa: E402
-from client.config import Config, GatewayConfig, AudioConfig, OWWConfig  # noqa: E402
-from client.gateway_client import GatewayEvent             # noqa: E402
+# Importar módulos del proyecto
+from event_bus import EventBus, VoiceEvent          # noqa: E402
+from config import Config, GatewayConfig, AudioConfig, OWWConfig  # noqa: E402
+from gateway_client import GatewayEvent             # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +215,7 @@ async def _run_e2e_test() -> None:
 
     watcher_task = asyncio.create_task(_watcher())
 
-    from client.state_machine import run as sm_run
+    from state_machine import run as sm_run
 
     sm_task = asyncio.create_task(sm_run(cfg, bus, audio, oww, gateway, playback))
 
@@ -354,7 +351,7 @@ async def _run_error_test() -> None:
 
     collector_task = asyncio.create_task(_collector())
 
-    from client.state_machine import run as sm_run
+    from state_machine import run as sm_run
 
     sm_task = asyncio.create_task(sm_run(cfg, bus, audio, oww, gateway, playback))
 

@@ -51,13 +51,14 @@ def _install_pyaudio_stub() -> None:
 
 _install_pyaudio_stub()
 
-# Ahora podemos importar el módulo bajo prueba
-# Necesitamos que client/ sea paquete o ajustar sys.path
+# Añadir client/ al sys.path para importar módulos locales
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+_HERE = os.path.dirname(__file__)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
-from client.event_bus import EventBus, VoiceEvent  # noqa: E402
-from client.playback_engine import PlaybackEngine   # noqa: E402
+from event_bus import EventBus, VoiceEvent  # noqa: E402
+from playback_engine import PlaybackEngine   # noqa: E402
 
 
 # ---------------------------------------------------------------------------

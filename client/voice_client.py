@@ -17,15 +17,9 @@ import signal
 import sys
 from pathlib import Path
 
-# Asegurar que tanto el directorio raíz del proyecto como client/ estén en
-# sys.path. Esto permite:
-#   - from config import ...          (módulos dentro de client/)
-#   - from client.xxx import ...      (state_machine, playback_engine)
-_HERE = Path(__file__).resolve().parent          # .../client
-_ROOT = _HERE.parent                              # .../jota-voice
-for _p in (_ROOT, _HERE):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
+_HERE = Path(__file__).resolve().parent  # .../client
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
 
 import pyaudio
 

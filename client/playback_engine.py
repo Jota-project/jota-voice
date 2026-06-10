@@ -17,7 +17,7 @@ import logging
 
 import pyaudio
 
-from client.event_bus import EventBus, VoiceEvent
+from event_bus import EventBus, VoiceEvent
 
 log = logging.getLogger(__name__)
 
