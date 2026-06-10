@@ -34,14 +34,18 @@ class OWWClient:
         self._reader, self._writer = await asyncio.open_connection(
             self._cfg.host, self._cfg.port
         )
+        try:
+            await self._send_json(
+                {
+                    "type": "audio-start",
+                    "data": {"rate": 16000, "width": 2, "channels": 1},
+                    "data_length": 0,
+                }
+            )
+        except Exception:
+            await self.disconnect()
+            raise
         self._connected = True
-        await self._send_json(
-            {
-                "type": "audio-start",
-                "data": {"rate": 16000, "width": 2, "channels": 1},
-                "data_length": 0,
-            }
-        )
         log.debug("OWW conectado a %s:%d", self._cfg.host, self._cfg.port)
 
     async def disconnect(self) -> None:
@@ -58,6 +62,8 @@ class OWWClient:
 
     async def send_audio(self, pcm_int16: bytes) -> None:
         """Send one chunk of raw PCM-16 audio to the wakeword service."""
+        if not self._connected or self._writer is None:
+            raise ConnectionError("OWWClient: no conectado")
         header = {
             "type": "audio-chunk",
             "data": {"rate": 16000, "width": 2, "channels": 1, "timestamp": 0},
@@ -76,6 +82,7 @@ class OWWClient:
         while True:
             line = await self._reader.readline()
             if not line:
+                self._connected = False
                 raise ConnectionError("OWW cerró la conexión")
             try:
                 msg = json.loads(line.decode().strip())
@@ -93,6 +100,8 @@ class OWWClient:
     async def connect_with_backoff(self) -> None:
         """Attempt ``connect()`` repeatedly, using exponential-ish back-off delays."""
         backoff = list(self._cfg.reconnect_backoff_s)
+        if not backoff:
+            raise ValueError("OWWConfig.reconnect_backoff_s no puede estar vacío")
         idx = 0
         while True:
             try:
