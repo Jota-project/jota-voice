@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
 
 import numpy as np
 
@@ -71,7 +70,7 @@ async def _idle(
         while True:
             frame = await q.get()  # float32 bytes
             pcm16 = (
-                np.frombuffer(frame, np.float32).clip(-1.0, 1.0) * 32768.0
+                np.frombuffer(frame, np.float32).clip(-1.0, 1.0) * 32767.0
             ).astype(np.int16).tobytes()
             await oww.send_audio(pcm16)
 
@@ -123,14 +122,15 @@ async def _recording(
 
     # 4. Enviar audio nuevo hasta silencio o timeout
     q = audio.get_queue()
-    silence_frames_needed = int(
+    silence_frames_needed = max(1, int(
         cfg.audio.silence_timeout_s * cfg.audio.sample_rate / cfg.audio.frames_per_buffer
-    )
+    ))
     silence_count = 0
-    deadline = asyncio.get_event_loop().time() + cfg.audio.recording_timeout_s
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + cfg.audio.recording_timeout_s
 
-    while asyncio.get_event_loop().time() < deadline:
-        remaining = deadline - asyncio.get_event_loop().time()
+    while loop.time() < deadline:
+        remaining = deadline - loop.time()
         try:
             frame = await asyncio.wait_for(q.get(), timeout=min(remaining, 0.1))
         except asyncio.TimeoutError:
