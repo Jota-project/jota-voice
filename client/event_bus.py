@@ -9,10 +9,10 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Literal
+from typing import AsyncGenerator, AsyncIterator, Literal
 
 
-@dataclass
+@dataclass(frozen=True)
 class VoiceEvent:
     type: Literal[
         # Ciclo de vida
@@ -53,7 +53,7 @@ class EventBus:
         for q in self._queues:
             q.put_nowait(event)
 
-    async def subscribe(self) -> AsyncIterator[VoiceEvent]:
+    async def subscribe(self) -> AsyncGenerator[VoiceEvent, None]:
         """
         Devuelve un iterador async independiente que recibe todos los eventos
         publicados desde el momento de la suscripción.

@@ -22,12 +22,16 @@ async def _run_test() -> None:
     events_to_publish = [
         VoiceEvent(type="wake_word_detected", data={"confidence": 0.99}),
         VoiceEvent(type="recording_started", data={}),
+        VoiceEvent(type="recording_ended", data={"duration": 3.2}),
         VoiceEvent(type="transcription_partial", data={"text": "hola"}),
         VoiceEvent(type="transcription", data={"text": "hola jota"}),
         VoiceEvent(type="llm_token", data={"token": "Buenos"}),
+        VoiceEvent(type="tts_chunk", data={"audio_chunk": b"pcm_data"}),
         VoiceEvent(type="playback_started", data={}),
         VoiceEvent(type="playback_ended", data={}),
         VoiceEvent(type="state_changed", data={"from": "SPEAKING", "to": "IDLE"}),
+        VoiceEvent(type="display_text_update", data={"text": "¿En qué te ayudo?"}),
+        VoiceEvent(type="error", data={"message": "Audio device error", "code": "AUDIO_ERR"}),
     ]
 
     received_a: list[VoiceEvent] = []
