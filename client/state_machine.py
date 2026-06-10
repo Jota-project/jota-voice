@@ -281,23 +281,12 @@ async def run(
             await _responding(bus, gateway, playback)
         except asyncio.CancelledError:
             log.info("StateMachine: cancelado en RESPONDING")
-            try:
-                await gateway.disconnect()
-            except Exception:
-                pass
-            playback.reset()
             raise
         except Exception as exc:
             log.error("Error en estado %s: %s", state, exc)
             bus.publish(VoiceEvent(type="error", data={"message": str(exc)}))
-            try:
-                await gateway.disconnect()
-            except Exception:
-                pass
-            playback.reset()
-            continue  # → volver a IDLE
         finally:
-            # Desconectar gateway siempre al salir de RESPONDING
+            # Desconectar gateway y resetear playback siempre al salir de RESPONDING
             try:
                 await gateway.disconnect()
             except Exception:
