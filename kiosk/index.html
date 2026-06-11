@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="/manifest.json">
+<title>Jota</title>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --green:  #4ade80;
+  --blue:   #60a5fa;
+  --violet: #c4b5fd;
+  --fg:     #f1f5f9;
+  --fg-dim: #475569;
+  --bg:     #000;
+  --ease:   cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+html, body {
+  width: 100%; height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif;
+  overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ── layout raíz ── */
+#root {
+  width: 100vw;
+  height: 100dvh;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: stretch;
+  padding: env(safe-area-inset-top,0) env(safe-area-inset-right,0)
+           env(safe-area-inset-bottom,0) env(safe-area-inset-left,0);
+}
+
+/* vertical: orb arriba, texto abajo */
+@media (orientation: portrait) {
+  #root { grid-template-columns: none; grid-template-rows: auto 1fr; }
+}
+
+/* ── columna izquierda: orb ── */
+#sidebar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2.5rem;
+}
+@media (orientation: portrait) {
+  #sidebar { padding: 3rem 2rem 1.5rem; }
+}
+
+/* ── orb ── */
+#orb-wrap {
+  position: relative;
+  width: clamp(56px, 14vmin, 80px);
+  height: clamp(56px, 14vmin, 80px);
+}
+
+#orb {
+  width: 100%; height: 100%;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #1e293b, #0a0f1a);
+  transition: background .6s var(--ease), box-shadow .6s var(--ease);
+  position: relative; z-index: 1;
+}
+#orb::before, #orb::after {
+  content: '';
+  position: absolute; inset: -8px;
+  border-radius: 50%;
+  border: 1.5px solid transparent;
+  transition: border-color .6s var(--ease);
+}
+#orb::after { inset: -18px; border-width: 1px; }
+
+.s-listening #orb {
+  background: radial-gradient(circle at 35% 35%, #14532d, #052e16);
+  box-shadow: 0 0 28px 4px rgba(74,222,128,.2), 0 0 70px 10px rgba(74,222,128,.07);
+  animation: breathe 1.8s ease-in-out infinite;
+}
+.s-listening #orb::before { border-color: rgba(74,222,128,.4); }
+.s-listening #orb::after  { border-color: rgba(74,222,128,.12); animation: spin 4s linear infinite; }
+
+.s-thinking #orb {
+  background: radial-gradient(circle at 35% 35%, #1e3a5f, #080f1e);
+  box-shadow: 0 0 28px 4px rgba(96,165,250,.2), 0 0 70px 10px rgba(96,165,250,.07);
+  animation: pulse .9s ease-in-out infinite alternate;
+}
+.s-thinking #orb::before { border-color: rgba(96,165,250,.4); animation: spin 2s linear infinite; }
+.s-thinking #orb::after  { border-color: rgba(96,165,250,.12); animation: spin-rev 3.5s linear infinite; }
+
+.s-response #orb {
+  background: radial-gradient(circle at 35% 35%, #3b0764, #12021f);
+  box-shadow: 0 0 36px 6px rgba(196,181,253,.25), 0 0 90px 14px rgba(196,181,253,.08);
+}
+.s-response #orb::before { border-color: rgba(196,181,253,.5); }
+.s-response #orb::after  { border-color: rgba(196,181,253,.18); }
+
+@keyframes breathe { 0%,100%{transform:scale(1)} 50%{transform:scale(1.09)} }
+@keyframes pulse   { from{transform:scale(.94)} to{transform:scale(1.06)} }
+@keyframes spin     { to{transform:rotate(360deg)} }
+@keyframes spin-rev { to{transform:rotate(-360deg)} }
+
+/* barras de sonido */
+#bars {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  gap: 3px; opacity: 0; transition: opacity .3s;
+}
+.s-listening #bars { opacity: 1; }
+.bar {
+  width: 3px; border-radius: 2px;
+  background: var(--green); height: 5px;
+}
+.s-listening .bar { animation: bar .8s ease-in-out infinite alternate; }
+.bar:nth-child(1){animation-delay:0s;   --h:7px}
+.bar:nth-child(2){animation-delay:.15s; --h:15px}
+.bar:nth-child(3){animation-delay:.3s;  --h:21px}
+.bar:nth-child(4){animation-delay:.15s; --h:15px}
+.bar:nth-child(5){animation-delay:0s;   --h:7px}
+@keyframes bar { to{height:var(--h)} }
+
+/* ── columna derecha: texto ── */
+#main {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1.4rem;
+  padding: 2rem 2.5rem 2rem 0;
+  min-width: 0;
+  overflow: hidden;
+}
+@media (orientation: portrait) {
+  #main { padding: 0 2rem 3rem; justify-content: flex-start; }
+}
+
+/* burbuja genérica */
+.bubble {
+  display: flex;
+  flex-direction: column;
+  gap: .45rem;
+  opacity: 0;
+  transform: translateY(10px);
+  transition: opacity .45s var(--ease), transform .45s var(--ease);
+  pointer-events: none;
+}
+.bubble.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.bubble-label {
+  font-size: .6rem;
+  letter-spacing: .22em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+.bubble-text {
+  font-size: clamp(1.15rem, 3vw, 1.75rem);
+  font-weight: 300;
+  line-height: 1.55;
+  overflow-y: auto;
+  max-height: 35vh;
+  scrollbar-width: none;
+}
+.bubble-text::-webkit-scrollbar { display: none; }
+
+/* burbuja del usuario */
+#user-bubble .bubble-label { color: var(--fg-dim); }
+#user-bubble .bubble-text  { color: #64748b; font-size: clamp(.95rem, 2.2vw, 1.3rem); }
+
+/* burbuja de jota */
+#jota-bubble .bubble-label { color: var(--violet); }
+#jota-bubble .bubble-text  { color: var(--fg); }
+
+/* divisor */
+#divider {
+  height: 1px;
+  background: transparent;
+  transition: background .4s var(--ease);
+  flex-shrink: 0;
+}
+.s-response #divider { background: #1e293b; }
+
+/* puntos de espera */
+#dots {
+  display: flex; gap: 8px; align-items: center;
+  opacity: 0; transition: opacity .3s var(--ease);
+  height: 1.5rem;
+}
+.s-thinking #dots { opacity: 1; }
+.dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--blue); opacity: .25;
+  animation: dot 1.3s ease-in-out infinite;
+}
+.dot:nth-child(1){animation-delay:0s}
+.dot:nth-child(2){animation-delay:.2s}
+.dot:nth-child(3){animation-delay:.4s}
+@keyframes dot { 0%,80%,100%{transform:scale(.8);opacity:.25} 40%{transform:scale(1.25);opacity:1} }
+</style>
+</head>
+<body>
+<div id="root" class="s-idle">
+
+  <div id="sidebar">
+    <div id="orb-wrap">
+      <div id="orb">
+        <div id="bars">
+          <div class="bar"></div><div class="bar"></div><div class="bar"></div>
+          <div class="bar"></div><div class="bar"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="main">
+    <div id="user-bubble" class="bubble">
+      <div class="bubble-label">tú</div>
+      <div class="bubble-text" id="user-text"></div>
+    </div>
+
+    <div id="dots">
+      <div class="dot"></div><div class="dot"></div><div class="dot"></div>
+    </div>
+
+    <div id="divider"></div>
+
+    <div id="jota-bubble" class="bubble">
+      <div class="bubble-label">jota</div>
+      <div class="bubble-text" id="jota-text"></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const root       = document.getElementById('root');
+const userBubble = document.getElementById('user-bubble');
+const jotaBubble = document.getElementById('jota-bubble');
+const userText   = document.getElementById('user-text');
+const jotaText   = document.getElementById('jota-text');
+
+let lastTranscript = '';
+
+function show(el, text) {
+  el.querySelector('.bubble-text').textContent = text;
+  el.classList.add('show');
+}
+function hide(el) {
+  el.classList.remove('show');
+}
+
+function setState(state, text) {
+  root.className = `s-${state}`;
+
+  if (state === 'idle') {
+    hide(userBubble);
+    hide(jotaBubble);
+    lastTranscript = '';
+    return;
+  }
+
+  if (state === 'listening') {
+    hide(userBubble);
+    hide(jotaBubble);
+    return;
+  }
+
+  if (state === 'thinking') {
+    // text = lo que dijo el usuario
+    lastTranscript = text || lastTranscript;
+    if (lastTranscript) show(userBubble, lastTranscript);
+    hide(jotaBubble);
+    return;
+  }
+
+  if (state === 'response') {
+    // mantener transcript visible arriba, mostrar respuesta abajo
+    if (lastTranscript) show(userBubble, lastTranscript);
+    if (text) show(jotaBubble, text);
+    return;
+  }
+}
+
+function connect() {
+  const es = new EventSource('/events');
+  es.onmessage = e => {
+    try {
+      const d = JSON.parse(e.data);
+      setState(d.state || 'idle', d.text || '');
+    } catch {}
+  };
+  es.onerror = () => { es.close(); setTimeout(connect, 2000); };
+}
+
+if ('wakeLock' in navigator) {
+  const req = () => navigator.wakeLock.request('screen').catch(() => {});
+  req();
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') req();
+  });
+}
+
+connect();
+</script>
+</body>
+</html>

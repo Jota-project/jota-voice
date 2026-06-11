@@ -1,0 +1,29 @@
+gateway:
+  host: "192.168.1.106"        # IP de green-house (o nombre DNS)
+  port: 8004
+  path: "/ws/stream"
+  client_key: "RELLENAR"       # crear en jota-db
+  connect_timeout_s: 10
+
+oww:
+  host: "192.168.1.109"        # worker-01 — donde corre wyoming-openwakeword
+  port: 10401
+  wake_words:
+    - "ok_nabu"
+  reconnect_backoff_s: [5, 10, 20, 60]
+
+audio:
+  sample_rate: 16000
+  channels: 1
+  frames_per_buffer: 512       # ~32ms @ 16kHz
+  preroll_seconds: 1.5
+  silence_timeout_s: 1.5       # silencio tras voz → fin de grabación
+  recording_timeout_s: 15.0   # timeout absoluto de grabación
+  vad_rms_threshold: 200       # energía RMS por debajo = silencio
+
+display:
+  url: "http://127.0.0.1:8766" # jota-display local
+  timeout_s: 2.0               # best-effort, no crítico
+
+logging:
+  level: "INFO"
