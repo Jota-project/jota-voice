@@ -31,9 +31,13 @@ class OWWClient:
 
     async def connect(self) -> None:
         """Open TCP connection and send audio-start handshake."""
-        self._reader, self._writer = await asyncio.open_connection(
-            self._cfg.host, self._cfg.port
-        )
+        try:
+            self._reader, self._writer = await asyncio.wait_for(
+                asyncio.open_connection(self._cfg.host, self._cfg.port),
+                timeout=10.0,
+            )
+        except asyncio.TimeoutError:
+            raise OSError(f"OWW: timeout conectando a {self._cfg.host}:{self._cfg.port}")
         try:
             await self._send_json(
                 {
@@ -67,7 +71,7 @@ class OWWClient:
         header = {
             "type": "audio-chunk",
             "data": {"rate": 16000, "width": 2, "channels": 1, "timestamp": 0},
-            "data_length": len(pcm_int16),
+            "payload_length": len(pcm_int16),
         }
         await self._send_json(header)
         self._writer.write(pcm_int16)
@@ -79,23 +83,38 @@ class OWWClient:
         Skips any detection whose name is not in ``cfg.wake_words``.
         Raises ``ConnectionError`` if the server closes the connection.
         """
-        while True:
-            line = await self._reader.readline()
-            if not line:
-                self._connected = False
-                raise ConnectionError("OWW cerró la conexión")
-            try:
-                msg = json.loads(line.decode().strip())
-            except json.JSONDecodeError:
-                continue
-            if msg.get("data_length", 0) > 0:
-                await self._reader.readexactly(msg["data_length"])
-            if msg.get("type") == "detection":
-                name = msg.get("data", {}).get("name", "")
-                if name in self._cfg.wake_words:
-                    log.info("Wake word detectado: %s", name)
-                    return name
-                log.debug("Detección ignorada (no configurada): %s", name)
+        try:
+            while True:
+                line = await self._reader.readline()
+                if not line:
+                    raise ConnectionError("OWW cerró la conexión")
+                try:
+                    msg = json.loads(line.decode().strip())
+                except json.JSONDecodeError:
+                    continue
+                if msg.get("data_length", 0) > 0:
+                    data_bytes = await self._reader.readexactly(msg["data_length"])
+                    try:
+                        msg.setdefault("data", {}).update(json.loads(data_bytes))
+                    except json.JSONDecodeError:
+                        pass
+                if msg.get("payload_length", 0) > 0:
+                    await self._reader.readexactly(msg["payload_length"])
+                if msg.get("type") == "detection":
+                    name = msg.get("data", {}).get("name", "")
+                    # OWW envía "ok_nabu_v0.1"; config tiene "ok_nabu" — tolerar versión
+                    matched = next(
+                        (ww for ww in self._cfg.wake_words
+                         if name == ww or name.startswith(ww + "_")),
+                        None,
+                    )
+                    if matched:
+                        log.info("Wake word detectado: %s", name)
+                        return matched
+                    log.debug("Detección ignorada (no configurada): %s", name)
+        except (OSError, asyncio.IncompleteReadError, ConnectionError):
+            self._connected = False
+            raise
 
     async def connect_with_backoff(self) -> None:
         """Attempt ``connect()`` repeatedly, using exponential-ish back-off delays."""
