@@ -1,0 +1,20 @@
+# Config de usuario (no versionar)
+config.yaml
+.env.local
+jota-env.sh
+
+# Entornos virtuales
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Dispositivos (solo example.env se versiona)
+devices/*.env
+!devices/example.env
+
+# Cache de APKs del bootstrap (local del Mac)
+~/.jota-voice/
+
+# pytest
+.pytest_cache/
