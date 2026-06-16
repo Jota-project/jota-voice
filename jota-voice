@@ -124,6 +124,17 @@ cmd_init() {
         [ "$resp" = "s" ] || [ "$resp" = "S" ] && _add_host
     fi
 
+    # 2b. Display URL
+    echo ""
+    _info "¿URL del display? (default: http://127.0.0.1:8766)"
+    printf "  Display URL [http://127.0.0.1:8766]: "
+    read -r DISPLAY_URL
+    DISPLAY_URL="${DISPLAY_URL:-http://127.0.0.1:8766}"
+    if [ "$DISPLAY_URL" != "http://127.0.0.1:8766" ]; then
+        sed -i '' "s|url: \"http://127.0.0.1:8766\"|url: \"$DISPLAY_URL\"|" "$REPO_DIR/config.yaml"
+        _ok "Display URL actualizada"
+    fi
+
     # 3. Dispositivo
     echo ""
     _info "Configuración del dispositivo"
