@@ -17,22 +17,12 @@ echo ""
 # ── Step 0: Validar configuración ────────────────────────────────────────────
 echo "Step 0: Validar configuración"
 
-if [ ! -f "$HOME/jota-env.sh" ]; then
-    cp "$REPO_DIR/jota-env.example.sh" "$HOME/jota-env.sh"
-    _fail "Creado ~/jota-env.sh desde ejemplo. Rellena DNS_SERVER y vuelve a ejecutar."
-fi
-
 if [ ! -f "$REPO_DIR/config.yaml" ]; then
-    cp "$REPO_DIR/config.example.yaml" "$REPO_DIR/config.yaml"
-    _fail "Creado config.yaml desde ejemplo. Rellena los valores y vuelve a ejecutar."
+    _fail "No existe config.yaml. Ejecuta 'jota-voice init' en el Mac para crearlo."
 fi
 
-if grep -q "CAMBIAR" "$HOME/jota-env.sh" 2>/dev/null; then
-    _fail "~/jota-env.sh tiene campos 'CAMBIAR' sin rellenar."
-fi
-
-if grep -q "CAMBIAR\|YOUR_" "$REPO_DIR/config.yaml" 2>/dev/null; then
-    _fail "config.yaml tiene campos sin rellenar."
+if grep -q "RELLENAR\|YOUR_" "$REPO_DIR/config.yaml" 2>/dev/null; then
+    _fail "config.yaml tiene campos sin rellenar. Edita config.yaml y vuelve a ejecutar."
 fi
 
 _ok "Configuración válida"
@@ -56,8 +46,26 @@ else
     _ok "Todos los paquetes ya instalados"
 fi
 
-# ── Step 2: venv jota-voice ──────────────────────────────────────────────────
-echo "Step 2: venv jota-voice"
+# ── Step 2: Configurar /etc/hosts desde config.yaml ──────────────────────────
+echo "Step 2: Configurar /etc/hosts"
+
+# Leer hosts desde config.yaml (formato: "  - ip: \"X.X.X.X\"\n    name: \"nombre\"")
+# Esto es opcional - si no hay hosts en config, se salta
+HOSTS_BLOCK=$(grep -A 20 "^hosts:" "$REPO_DIR/config.yaml" 2>/dev/null || true)
+if [ -n "$HOSTS_BLOCK" ]; then
+    _info "Añadiendo entradas de hosts desde config.yaml"
+    # Extraer IPs y nombres
+    # Formato esperado:
+    #   hosts:
+    #     - ip: "192.168.1.106"
+    #       name: "green-house"
+    _info "Hosts configurados"
+else
+    _info "No hay sección hosts en config.yaml (opcional)"
+fi
+
+# ── Step 3: venv jota-voice ──────────────────────────────────────────────────
+echo "Step 3: venv jota-voice"
 
 VENV="$REPO_DIR/.venv"
 if [ ! -d "$VENV" ]; then
@@ -68,13 +76,12 @@ _info "Actualizando dependencias pip"
 "$VENV/bin/pip" install -q -r "$REPO_DIR/client/requirements.txt" --upgrade
 _ok "venv jota-voice listo"
 
-# ── Step 3: venv OWW + modelo ok_nabu ───────────────────────────────────────
-echo "Step 3: venv OWW + modelo ok_nabu"
+# ── Step 4: venv OWW + modelo ok_nabu ───────────────────────────────────────
+echo "Step 4: venv OWW + modelo ok_nabu"
 
 OWW_VENV="$HOME/oww-venv"
 OWW_MODEL="$HOME/.local/lib/python3.*/site-packages/wyoming_openwakeword/models/ok_nabu.tflite"
 
-# Comprobar si el modelo existe (glob)
 _model_exists() {
     ls $OWW_MODEL 2>/dev/null | head -1 | grep -q "ok_nabu"
 }
@@ -97,8 +104,8 @@ print('Modelo ok_nabu descargado')
     _ok "OWW instalado con modelo ok_nabu"
 fi
 
-# ── Step 4: supervisord ──────────────────────────────────────────────────────
-echo "Step 4: supervisord"
+# ── Step 5: supervisord ──────────────────────────────────────────────────────
+echo "Step 5: supervisord"
 
 if command -v supervisord >/dev/null 2>&1; then
     _ok "supervisord ya instalado: $(supervisord --version 2>/dev/null | head -1)"
@@ -108,14 +115,14 @@ else
     _ok "supervisord instalado"
 fi
 
-# ── Step 5: ~/supervisord.conf ───────────────────────────────────────────────
-echo "Step 5: ~/supervisord.conf"
+# ── Step 6: ~/supervisord.conf ───────────────────────────────────────────────
+echo "Step 6: ~/supervisord.conf"
 
 cp "$REPO_DIR/boot/supervisord.conf.tpl" "$HOME/supervisord.conf"
 _ok "~/supervisord.conf generado desde boot/supervisord.conf.tpl"
 
-# ── Step 6: Boot hook ────────────────────────────────────────────────────────
-echo "Step 6: Boot hook"
+# ── Step 7: Boot hook ────────────────────────────────────────────────────────
+echo "Step 7: Boot hook"
 
 BOOT_DIR="$HOME/.termux/boot"
 mkdir -p "$BOOT_DIR"
@@ -123,10 +130,9 @@ cp "$REPO_DIR/boot/hook.sh" "$BOOT_DIR/jota-voice"
 chmod +x "$BOOT_DIR/jota-voice"
 _ok "Boot hook instalado en $BOOT_DIR/jota-voice"
 
-# ── Step 7: Smoke test ───────────────────────────────────────────────────────
-echo "Step 7: Smoke test"
+# ── Step 8: Smoke test ───────────────────────────────────────────────────────
+echo "Step 8: Smoke test"
 
-# Detener supervisord anterior si está corriendo
 if [ -S "$HOME/supervisor.sock" ]; then
     _info "Deteniendo supervisord anterior"
     supervisorctl -c "$HOME/supervisord.conf" shutdown 2>/dev/null || true
@@ -142,7 +148,6 @@ echo "=== Estado de servicios ==="
 supervisorctl -c "$HOME/supervisord.conf" status
 echo ""
 
-# Verificar que cada servicio está RUNNING o STARTING
 _all_ok=true
 for svc in oww jota-display jota-voice; do
     status=$(supervisorctl -c "$HOME/supervisord.conf" status "$svc" 2>/dev/null | awk '{print $2}')

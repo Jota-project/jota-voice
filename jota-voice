@@ -78,6 +78,98 @@ cmd_devices() {
     done
 }
 
+cmd_init() {
+    echo ""
+    echo "=== jota-voice init ==="
+    echo ""
+
+    # 1. Config.yaml
+    if [ -f "$REPO_DIR/config.yaml" ]; then
+        _ok "config.yaml ya existe"
+    else
+        if [ ! -f "$REPO_DIR/config.example.yaml" ]; then
+            _err "No existe config.example.yaml"
+            exit 1
+        fi
+        cp "$REPO_DIR/config.example.yaml" "$REPO_DIR/config.yaml"
+        _ok "Creado config.yaml desde config.example.yaml"
+        echo ""
+        echo "  EDIT config.yaml y rellena los valores antes de continuar."
+        echo "  Depois ejecuta: jota-voice setup"
+        exit 0
+    fi
+
+    # 2. Hosts (opcional)
+    echo ""
+    _info "¿Quieres añadir entradas de hosts para resolucion de nombres?"
+    _info "Ejemplo: worker-01 -> 192.168.1.109"
+    printf "¿Añadir hosts? [s/N]: "
+    read -r resp
+    if [ "$resp" = "s" ] || [ "$resp" = "S" ]; then
+        _add_host() {
+            printf "  IP (ej: 192.168.1.106): "
+            read -r _ip
+            printf "  Nombre (ej: green-house): "
+            read -r _name
+            if [ -n "$_ip" ] && [ -n "$_name" ]; then
+                # Añadir al config.yaml
+                sed -i '' "/^hosts:/a\\  - ip: \"$_ip\"\\n    name: \"$_name\"" "$REPO_DIR/config.yaml" 2>/dev/null || \
+                echo "  - ip: \"$_ip\"\n    name: \"$_name\"" >> "$REPO_DIR/config.yaml"
+                _ok "$_name -> $_ip"
+            fi
+        }
+        _add_host
+        printf "¿Añadir otro? [s/N]: "
+        read -r resp
+        [ "$resp" = "s" ] || [ "$resp" = "S" ] && _add_host
+    fi
+
+    # 3. Dispositivo
+    echo ""
+    _info "Configuración del dispositivo"
+    printf "  Nombre del dispositivo (ej: salon, cocina): "
+    read -r DEVICE_NAME
+    [ -z "$DEVICE_NAME" ] && { _err "Nombre no puede estar vacío"; exit 1; }
+
+    local device_file="$DEVICES_DIR/${DEVICE_NAME}.env"
+    if [ -f "$device_file" ]; then
+        _ok "Dispositivo $DEVICE_NAME ya existe"
+    else
+        printf "  IP del teléfono: "
+        read -r PHONE_HOST
+        printf "  Puerto SSH [8022]: "
+        read -r PHONE_PORT
+        PHONE_PORT="${PHONE_PORT:-8022}"
+        printf "  Contraseña SSH: "
+        read -rs PHONE_PASS
+        echo ""
+
+        cat > "$device_file" << EOF
+DEVICE_NAME="${DEVICE_NAME}"
+PHONE_HOST="${PHONE_HOST}"
+PHONE_PORT="${PHONE_PORT}"
+PHONE_PASS="${PHONE_PASS}"
+PHONE_DIR="/data/data/com.termux/files/home/jota-voice"
+EOF
+        _ok "Creado $device_file"
+    fi
+
+    # 4. Verificar SSH
+    echo ""
+    _info "Verificando conexión SSH..."
+    _load_device "$DEVICE_NAME"
+    if _ssh "echo 'SSH OK'" 2>/dev/null; then
+        _ok "SSH conecta correctamente"
+    else
+        _err "SSH no conecta. Verifica la contraseña y la IP."
+    fi
+
+    echo ""
+    _ok "Init completado"
+    echo ""
+    echo "  Próximo paso: jota-voice setup"
+}
+
 # ── Comandos con dispositivo ──────────────────────────────────────────────────
 
 cmd_setup() {
@@ -162,7 +254,7 @@ run_all() {
 usage() {
     cat << 'EOF'
 Uso:
-  jota-voice bootstrap             # Setup USB inicial via ADB (una vez)
+  jota-voice init                  # Setup inicial (config.yaml + dispositivo)
   jota-voice devices               # Lista dispositivos configurados
 
   # Un dispositivo (nombre opcional):
@@ -187,7 +279,7 @@ EOF
 
 # Comandos globales (sin dispositivo)
 case "$1" in
-    bootstrap) shift; cmd_bootstrap "$@"; exit $? ;;
+    init) cmd_init; exit 0 ;;
     devices)   cmd_devices; exit 0 ;;
     --all)
         shift
@@ -199,7 +291,7 @@ esac
 
 # Determinar si el primer argumento es un nombre de dispositivo o un comando
 FIRST="$1"
-KNOWN_CMDS="setup status logs restart update adb-port"
+KNOWN_CMDS="init setup status logs restart update adb-port"
 
 _is_command() {
     echo "$KNOWN_CMDS" | tr ' ' '\n' | grep -qx "$1"
