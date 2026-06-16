@@ -42,7 +42,7 @@ _check_sshpass() {
 }
 
 _ssh() {
-    sshpass -p "$PHONE_PASS" ssh -o StrictHostKeyChecking=no -p "$PHONE_PORT" "$PHONE_HOST" "$@"
+    sshpass -p "$PHONE_PASS" ssh -o StrictHostKeyChecking=no -p "$PHONE_PORT" "$PHONE_USER@$PHONE_HOST" "$@"
 }
 
 _rsync() {
@@ -189,7 +189,7 @@ cmd_setup() {
     _ssh "pkg install -y rsync"
     _info "[$DEVICE_NAME] Sincronizando repo..."
     _ssh "mkdir -p $PHONE_DIR"
-    _rsync "$REPO_DIR/" "$PHONE_HOST:$PHONE_DIR/"
+    _rsync "$REPO_DIR/" "$PHONE_USER@$PHONE_HOST:$PHONE_DIR/"
     _info "[$DEVICE_NAME] Ejecutando install.sh..."
     _ssh "bash $PHONE_DIR/install.sh"
 }
