@@ -271,7 +271,8 @@ function setState(state, text) {
   }
 
   if (state === 'listening') {
-    hide(userBubble);
+    if (text) show(userBubble, text);
+    else hide(userBubble);
     hide(jotaBubble);
     return;
   }
