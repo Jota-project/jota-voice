@@ -88,6 +88,7 @@ from gateway_client import GatewayClient
 from playback_engine import PlaybackEngine
 from display_client import DisplayClient
 from state_machine import run as sm_run
+import control_server
 
 
 def _setup_logging(level: str) -> None:
@@ -128,12 +129,19 @@ async def main(config_path: str) -> None:
     await audio.start()
     log.info("AudioCapture iniciado")
 
+    cancel_event = asyncio.Event()
+
     # --- Task background permanente: DisplayClient ---
     display_task = asyncio.create_task(display.run(), name="display")
 
+    # --- Task background: ControlServer (señal cancel para jota-display) ---
+    control_task = asyncio.create_task(
+        control_server.run(cfg.control, cancel_event), name="control_server"
+    )
+
     # --- Task principal: StateMachine ---
     sm_task = asyncio.create_task(
-        sm_run(cfg, bus, audio, oww, gateway, playback), name="state_machine"
+        sm_run(cfg, bus, audio, oww, gateway, playback, cancel_event), name="state_machine"
     )
 
     # stop_event.wait() es una coroutine; hay que envolverla en task para
@@ -154,9 +162,10 @@ async def main(config_path: str) -> None:
         # Cancelar state machine y display si siguen vivos
         sm_task.cancel()
         display_task.cancel()
+        control_task.cancel()
         stop_task.cancel()
 
-        await asyncio.gather(sm_task, display_task, stop_task, return_exceptions=True)
+        await asyncio.gather(sm_task, display_task, control_task, stop_task, return_exceptions=True)
 
         # Teardown de recursos en orden inverso a su creación
         await audio.stop()
