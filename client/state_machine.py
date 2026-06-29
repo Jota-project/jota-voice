@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Optional
 
 import numpy as np
 
@@ -30,6 +31,16 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # State helpers
 # ---------------------------------------------------------------------------
+
+class _TurnCancelled(Exception):
+    """Lanzada cuando cancel_event gana la race en RECORDING o RESPONDING."""
+
+
+async def _safe_send_cancel(gateway: GatewayClient) -> None:
+    try:
+        await gateway.send_cancel()
+    except Exception:
+        pass
 
 async def _idle(
     cfg: Config,
@@ -106,65 +117,68 @@ async def _recording(
     gateway: GatewayClient,
     playback: PlaybackEngine,
     cfg: Config,
+    cancel_event: asyncio.Event,
 ) -> None:
-    """
-    Estado RECORDING: captura la petición del usuario y la envía al gateway.
+    cancel_event.clear()
 
-    1. Publica wake_word_detected + recording_started.
-    2. Conecta al gateway (con timeout de config).
-    3. Envía pre-roll.
-    4. Envía audio nuevo hasta silencio o timeout.
-    5. Envía end + publica recording_ended.
-    """
-    # 1. Publicar eventos
     bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": wake_word}))
     bus.publish(VoiceEvent(type="recording_started", data={}))
 
-    # 2. Conectar gateway con timeout
     await asyncio.wait_for(
         gateway.connect(),
         timeout=cfg.gateway.connect_timeout_s,
     )
     log.debug("RECORDING: gateway conectado")
 
-    # 3. Enviar pre-roll
     preroll = audio.get_preroll()
     if preroll:
         await gateway.send_audio(preroll)
         log.debug("RECORDING: pre-roll enviado (%d bytes)", len(preroll))
 
-    # 4. Enviar audio nuevo hasta silencio o timeout
-    q = audio.get_queue()
-    silence_frames_needed = max(1, int(
-        cfg.audio.silence_timeout_s * cfg.audio.sample_rate / cfg.audio.frames_per_buffer
-    ))
-    silence_count = 0
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + cfg.audio.recording_timeout_s
+    async def _capture_loop() -> None:
+        q = audio.get_queue()
+        silence_frames_needed = max(1, int(
+            cfg.audio.silence_timeout_s * cfg.audio.sample_rate / cfg.audio.frames_per_buffer
+        ))
+        silence_count = 0
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + cfg.audio.recording_timeout_s
 
-    while loop.time() < deadline:
-        remaining = deadline - loop.time()
-        try:
-            frame = await asyncio.wait_for(q.get(), timeout=min(remaining, 0.1))
-        except asyncio.TimeoutError:
-            continue
-
-        await gateway.send_audio(frame)
-
-        if audio.is_silence(frame):
-            silence_count += 1
-            if silence_count >= silence_frames_needed:
-                log.info("RECORDING: fin por silencio (%d frames)", silence_count)
-                break
-        else:
-            silence_count = 0
-    else:
+        while loop.time() < deadline:
+            remaining = deadline - loop.time()
+            try:
+                frame = await asyncio.wait_for(q.get(), timeout=min(remaining, 0.1))
+            except asyncio.TimeoutError:
+                continue
+            await gateway.send_audio(frame)
+            if audio.is_silence(frame):
+                silence_count += 1
+                if silence_count >= silence_frames_needed:
+                    log.info("RECORDING: fin por silencio (%d frames)", silence_count)
+                    return
+            else:
+                silence_count = 0
         log.info("RECORDING: timeout absoluto alcanzado (%.1fs)", cfg.audio.recording_timeout_s)
 
-    # Notificación inmediata: señal de que el sistema ha capturado la petición
-    await playback.play_notification()
+    capture_task = asyncio.create_task(_capture_loop())
+    cancel_task = asyncio.create_task(cancel_event.wait())
 
-    # 5. Señal de fin
+    done, pending = await asyncio.wait(
+        [capture_task, cancel_task],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    for t in pending:
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+
+    if cancel_task in done:
+        await _safe_send_cancel(gateway)
+        raise _TurnCancelled()
+
+    await playback.play_notification()
     await gateway.send_end()
     bus.publish(VoiceEvent(type="recording_ended", data={}))
     log.debug("RECORDING: end enviado")
@@ -174,17 +188,8 @@ async def _responding(
     bus: EventBus,
     gateway: GatewayClient,
     playback: PlaybackEngine,
+    cancel_event: asyncio.Event,
 ) -> None:
-    """
-    Estado RESPONDING: recibe respuesta del gateway y la reproduce.
-
-    - transcription / transcription_partial → publica VoiceEvent.
-    - llm_token → PlaybackEngine.push_token() + publica VoiceEvent.
-    - tts_chunk → PlaybackEngine.play_chunk() + publica VoiceEvent.
-      (playback_started solo al primer chunk).
-    - Timeout global 30s → error + abortar.
-    - WS cierra → PlaybackEngine.drain() → playback_ended → IDLE.
-    """
     playback_started = False
 
     async def _receive_loop() -> None:
@@ -194,7 +199,7 @@ async def _responding(
                 text = gw_event.data.get("text", "")
                 bus.publish(VoiceEvent(type="transcription", data={"text": text}))
                 log.info("RESPONDING: transcription → %r", text)
-                await gateway.send_text(text)  # disparar orquestador
+                await gateway.send_text(text)
 
             elif gw_event.type == "transcription_partial":
                 text = gw_event.data.get("text", "")
@@ -215,12 +220,35 @@ async def _responding(
             else:
                 log.debug("RESPONDING: evento desconocido de gateway: %r", gw_event.type)
 
-    try:
-        await asyncio.wait_for(_receive_loop(), timeout=30.0)
-    except asyncio.TimeoutError:
-        log.warning("RESPONDING: timeout 30s")
-        bus.publish(VoiceEvent(type="error", data={"message": "Timeout en estado RESPONDING"}))
-        return
+    receive_task = asyncio.create_task(
+        asyncio.wait_for(_receive_loop(), timeout=30.0)
+    )
+    cancel_task = asyncio.create_task(cancel_event.wait())
+
+    done, pending = await asyncio.wait(
+        [receive_task, cancel_task],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    for t in pending:
+        t.cancel()
+        try:
+            await t
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+
+    if cancel_task in done:
+        await _safe_send_cancel(gateway)
+        playback.reset()
+        raise _TurnCancelled()
+
+    if not receive_task.cancelled():
+        exc = receive_task.exception()
+        if exc is not None:
+            if isinstance(exc, asyncio.TimeoutError):
+                log.warning("RESPONDING: timeout 30s")
+                bus.publish(VoiceEvent(type="error", data={"message": "Timeout en estado RESPONDING"}))
+                return
+            raise exc
 
     await playback.drain()
     bus.publish(VoiceEvent(type="playback_ended", data={}))
@@ -255,19 +283,14 @@ async def run(
     oww: OWWClient,
     gateway: GatewayClient,
     playback: PlaybackEngine,
+    cancel_event: Optional[asyncio.Event] = None,
 ) -> None:
-    """
-    Loop principal: IDLE → RECORDING → RESPONDING → IDLE indefinidamente.
+    if cancel_event is None:
+        cancel_event = asyncio.Event()
 
-    Todos los módulos se pasan como argumentos (instanciados en voice_client.py).
-    Cualquier excepción en cualquier estado publica error y vuelve a IDLE.
-    """
     log.info("StateMachine: iniciando loop")
 
     while True:
-        # ----------------------------------------------------------------
-        # Estado IDLE
-        # ----------------------------------------------------------------
         state = "IDLE"
         try:
             wake_word = await _idle(cfg, bus, audio, oww)
@@ -277,14 +300,15 @@ async def run(
         except Exception as exc:
             _log_error(state, exc, bus)
             await _cleanup(gateway, playback)
-            continue  # → volver a IDLE
+            continue
 
-        # ----------------------------------------------------------------
-        # Estado RECORDING
-        # ----------------------------------------------------------------
         state = "RECORDING"
         try:
-            await _recording(wake_word, bus, audio, gateway, playback, cfg)
+            await _recording(wake_word, bus, audio, gateway, playback, cfg, cancel_event)
+        except _TurnCancelled:
+            log.info("StateMachine: turn cancelado en RECORDING")
+            await _cleanup(gateway, playback)
+            continue
         except asyncio.CancelledError:
             log.info("StateMachine: cancelado en RECORDING")
             await _cleanup(gateway, playback)
@@ -292,14 +316,13 @@ async def run(
         except Exception as exc:
             _log_error(state, exc, bus)
             await _cleanup(gateway, playback)
-            continue  # → volver a IDLE
+            continue
 
-        # ----------------------------------------------------------------
-        # Estado RESPONDING
-        # ----------------------------------------------------------------
         state = "RESPONDING"
         try:
-            await _responding(bus, gateway, playback)
+            await _responding(bus, gateway, playback, cancel_event)
+        except _TurnCancelled:
+            log.info("StateMachine: turn cancelado en RESPONDING")
         except asyncio.CancelledError:
             log.info("StateMachine: cancelado en RESPONDING")
             raise
@@ -307,4 +330,3 @@ async def run(
             _log_error(state, exc, bus)
         finally:
             await _cleanup(gateway, playback)
-        # → volver a IDLE (siguiente iteración del while)

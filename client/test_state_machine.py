@@ -455,6 +455,230 @@ async def _run_idle_timeout_test() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 4: cancel durante RECORDING
+# ---------------------------------------------------------------------------
+
+async def _run_cancel_recording_test() -> None:
+    print("\n=== Test cancel en RECORDING ===")
+
+    bus = EventBus()
+    cfg = _make_config()
+    audio = _make_audio_mock(silent=False)  # audio con voz → no termina por silencio
+
+    oww = _make_oww_mock()
+    call_count = [0]
+
+    async def _detect_once() -> str:
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return "ok_nabu"
+        await asyncio.Event().wait()
+        return "ok_nabu"
+
+    oww.wait_for_detection = _detect_once
+
+    gateway = MagicMock()
+    gateway.connect = AsyncMock()
+    gateway.disconnect = AsyncMock()
+    gateway.send_audio = AsyncMock()
+    gateway.send_end = AsyncMock()
+    gateway.send_cancel = AsyncMock()
+    gateway.receive = lambda: (x for x in [])  # never used
+
+    playback = _make_playback_mock()
+
+    cancel_event = asyncio.Event()
+    received: list[VoiceEvent] = []
+    stop_event = asyncio.Event()
+
+    async def _collector() -> None:
+        async for ev in bus.subscribe():
+            received.append(ev)
+
+    async def _watcher() -> None:
+        idle_count = [0]
+        async for ev in bus.subscribe():
+            if ev.type == "state_changed" and ev.data.get("state") == "idle":
+                idle_count[0] += 1
+                if idle_count[0] >= 2:
+                    stop_event.set()
+                    return
+
+    collector_task = asyncio.create_task(_collector())
+    watcher_task = asyncio.create_task(_watcher())
+
+    from state_machine import run as sm_run
+
+    sm_task = asyncio.create_task(
+        sm_run(cfg, bus, audio, oww, gateway, playback, cancel_event)
+    )
+
+    # Esperar a que empiece RECORDING y disparar cancel
+    async def _fire_cancel() -> None:
+        # Esperar recording_started
+        while not any(e.type == "recording_started" for e in received):
+            await asyncio.sleep(0.01)
+        cancel_event.set()
+
+    fire_task = asyncio.create_task(_fire_cancel())
+
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=10.0)
+    except asyncio.TimeoutError:
+        pass
+
+    sm_task.cancel()
+    watcher_task.cancel()
+    fire_task.cancel()
+    for t in [sm_task, watcher_task, fire_task]:
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    bus.close()
+    try:
+        await collector_task
+    except Exception:
+        pass
+
+    event_types = [e.type for e in received]
+    print(f"\nEventos: {event_types}")
+
+    # recording_ended NO debe aparecer (el turn fue cancelado)
+    assert "recording_ended" not in event_types, (
+        f"recording_ended no debe publicarse en cancel: {event_types}"
+    )
+    # send_cancel debe haber sido llamado
+    assert gateway.send_cancel.await_count >= 1, "gateway.send_cancel() no fue llamado"
+    # send_end NO debe haber sido llamado
+    assert gateway.send_end.await_count == 0, "gateway.send_end() no debe llamarse en cancel"
+    # vuelve a IDLE (≥2 state_changed idle)
+    idle_evs = [e for e in received if e.type == "state_changed" and e.data.get("state") == "idle"]
+    assert len(idle_evs) >= 2, f"Esperaba ≥2 idle, got {len(idle_evs)}: {event_types}"
+
+    print("  OK  recording_ended no publicado")
+    print("  OK  send_cancel() llamado")
+    print("  OK  send_end() no llamado")
+    print("  OK  vuelve a IDLE")
+    print("Test cancel en RECORDING: PASADO")
+
+
+# ---------------------------------------------------------------------------
+# Test 5: cancel durante RESPONDING
+# ---------------------------------------------------------------------------
+
+async def _run_cancel_responding_test() -> None:
+    print("\n=== Test cancel en RESPONDING ===")
+
+    bus = EventBus()
+    cfg = _make_config()
+    audio = _make_audio_mock(silent=True)
+
+    oww = _make_oww_mock()
+    call_count = [0]
+
+    async def _detect_once() -> str:
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return "ok_nabu"
+        await asyncio.Event().wait()
+        return "ok_nabu"
+
+    oww.wait_for_detection = _detect_once
+
+    # Gateway que emite transcription y luego bloquea (tts lento)
+    received_events: list[VoiceEvent] = []
+
+    async def _slow_receive():
+        yield GatewayEvent(type="transcription", data={"text": "¿qué hora es?"})
+        yield GatewayEvent(type="llm_token", data={"content": "Son "})
+        await asyncio.Event().wait()  # bloquea — simulando TTS lento
+
+    gateway = MagicMock()
+    gateway.connect = AsyncMock()
+    gateway.disconnect = AsyncMock()
+    gateway.send_audio = AsyncMock()
+    gateway.send_end = AsyncMock()
+    gateway.send_cancel = AsyncMock()
+    gateway.send_text = AsyncMock()
+    gateway.receive = _slow_receive
+
+    playback = _make_playback_mock()
+    cancel_event = asyncio.Event()
+    received: list[VoiceEvent] = []  # noqa: F841 — usado por _watcher y _fire_cancel
+    stop_event = asyncio.Event()
+
+    async def _collector() -> None:
+        async for ev in bus.subscribe():
+            received.append(ev)
+
+    async def _watcher() -> None:
+        idle_count = [0]
+        async for ev in bus.subscribe():
+            if ev.type == "state_changed" and ev.data.get("state") == "idle":
+                idle_count[0] += 1
+                if idle_count[0] >= 2:
+                    stop_event.set()
+                    return
+
+    collector_task = asyncio.create_task(_collector())
+    watcher_task = asyncio.create_task(_watcher())
+
+    from state_machine import run as sm_run
+
+    sm_task = asyncio.create_task(
+        sm_run(cfg, bus, audio, oww, gateway, playback, cancel_event)
+    )
+
+    # Disparar cancel cuando llegue llm_token (estamos en RESPONDING)
+    async def _fire_cancel() -> None:
+        while not any(e.type == "llm_token" for e in received):
+            await asyncio.sleep(0.01)
+        cancel_event.set()
+
+    fire_task = asyncio.create_task(_fire_cancel())
+
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=10.0)
+    except asyncio.TimeoutError:
+        pass
+
+    sm_task.cancel()
+    watcher_task.cancel()
+    fire_task.cancel()
+    for t in [sm_task, watcher_task, fire_task]:
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    bus.close()
+    try:
+        await collector_task
+    except Exception:
+        pass
+
+    event_types = [e.type for e in received]
+    print(f"\nEventos: {event_types}")
+
+    # playback_ended NO debe aparecer
+    assert "playback_ended" not in event_types, (
+        f"playback_ended no debe publicarse en cancel: {event_types}"
+    )
+    # send_cancel debe haber sido llamado
+    assert gateway.send_cancel.await_count >= 1, "gateway.send_cancel() no fue llamado"
+    # vuelve a IDLE
+    idle_evs = [e for e in received if e.type == "state_changed" and e.data.get("state") == "idle"]
+    assert len(idle_evs) >= 2, f"Esperaba ≥2 idle, got {len(idle_evs)}"
+
+    print("  OK  playback_ended no publicado")
+    print("  OK  send_cancel() llamado")
+    print("  OK  vuelve a IDLE")
+    print("Test cancel en RESPONDING: PASADO")
+
+
+# ---------------------------------------------------------------------------
 # Entry points (pytest + ejecución directa)
 # ---------------------------------------------------------------------------
 
@@ -462,6 +686,8 @@ async def _run_all() -> None:
     await _run_e2e_test()
     await _run_error_test()
     await _run_idle_timeout_test()
+    await _run_cancel_recording_test()
+    await _run_cancel_responding_test()
     print("\n=== TODOS LOS TESTS PASARON ===")
 
 
@@ -478,6 +704,14 @@ def test_state_machine_error() -> None:
 def test_state_machine_idle_timeout() -> None:
     """Compatible con pytest."""
     asyncio.run(_run_idle_timeout_test())
+
+
+def test_state_machine_cancel_recording() -> None:
+    asyncio.run(_run_cancel_recording_test())
+
+
+def test_state_machine_cancel_responding() -> None:
+    asyncio.run(_run_cancel_responding_test())
 
 
 if __name__ == "__main__":
