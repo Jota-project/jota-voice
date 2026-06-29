@@ -45,6 +45,11 @@ class DisplayConfig:
 
 
 @dataclass
+class ControlConfig:
+    port: int = 8765
+
+
+@dataclass
 class LoggingConfig:
     level: str = "INFO"
 
@@ -55,6 +60,7 @@ class Config:
     oww: OWWConfig = field(default_factory=OWWConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
     display: DisplayConfig = field(default_factory=DisplayConfig)
+    control: ControlConfig = field(default_factory=ControlConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
 
@@ -101,6 +107,12 @@ def _display_from_dict(d: dict) -> DisplayConfig:
     )
 
 
+def _control_from_dict(d: dict) -> ControlConfig:
+    return ControlConfig(
+        port=int(d.get("port", 8765)),
+    )
+
+
 def load_config(path: str | Path) -> Config:
     with open(path) as f:
         data = yaml.safe_load(f)
@@ -111,6 +123,7 @@ def load_config(path: str | Path) -> Config:
         oww=_oww_from_dict(data.get("oww", {})),
         audio=_audio_from_dict(data.get("audio", {})),
         display=_display_from_dict(data.get("display", {})),
+        control=_control_from_dict(data.get("control", {})),
         logging=LoggingConfig(level=data.get("logging", {}).get("level", "INFO")),
     )
 
