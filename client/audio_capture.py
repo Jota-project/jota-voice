@@ -55,7 +55,7 @@ class AudioCapture:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Arranca parec y el hilo lector."""
+        """Arranca parec y el hilo lector. Reintenta con backoff si parec muere."""
         self._loop = asyncio.get_running_loop()
         self._queue = asyncio.Queue()
         self._stop_event.clear()
@@ -72,16 +72,45 @@ class AudioCapture:
             "--latency-msec=50",
         ]
         logger.debug("AudioCapture: arrancando %s", " ".join(cmd))
-        self._proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            env=env,
-        )
-        self._read_thread = threading.Thread(
-            target=self._read_loop, daemon=True, name="audio-capture"
-        )
-        self._read_thread.start()
+
+        # Bucle de reintento: si parec muere (PulseAudio aún no listo, HAL no
+        # inicializado, etc.) re-lanzarlo hasta que funcione o nos paren.
+        backoff = 1.0
+        while not self._stop_event.is_set():
+            try:
+                self._proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    env=env,
+                )
+                # Verificar que arrancó de verdad (no murió instantáneo)
+                await asyncio.sleep(0.5)
+                if self._proc.poll() is not None:
+                    logger.warning(
+                        "AudioCapture: parec murió al arrancar (rc=%s), reintentando en %.1fs",
+                        self._proc.returncode, backoff,
+                    )
+                    self._proc = None
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 10.0)
+                    continue
+                backoff = 1.0
+                self._read_thread = threading.Thread(
+                    target=self._read_loop, daemon=True, name="audio-capture"
+                )
+                self._read_thread.start()
+                return
+            except FileNotFoundError:
+                logger.error("AudioCapture: parec no encontrado en PATH")
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "AudioCapture: error arrancando parec: %s, reintentando en %.1fs",
+                    exc, backoff,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 10.0)
 
     async def stop(self) -> None:
         """Detiene el proceso parec y el hilo lector."""
