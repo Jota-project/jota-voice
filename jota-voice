@@ -234,10 +234,9 @@ cmd_update() {
 
     if [ $full -eq 1 ]; then
         _info "[$DEVICE_NAME] Aplicando install steps (06-configs, 07-boot)..."
-        _ssh "cd $PHONE_DIR && bash -c '
-            source lib/output.sh 2>/dev/null || true
-            source lib/yaml.sh    2>/dev/null || true
-            REPO_DIR=$PHONE_DIR
+        _ssh "cd $PHONE_DIR && REPO_DIR='$PHONE_DIR' bash -c '
+            source \"\$REPO_DIR/lib/output.sh\"
+            source \"\$REPO_DIR/lib/yaml.sh\"
             source install/06-configs.sh
             source install/07-boot.sh
         '"
@@ -345,7 +344,7 @@ case "$CMD" in
     status)   cmd_status ;;
     logs)     cmd_logs "$@" ;;
     restart)  cmd_restart "$@" ;;
-    update)   cmd_update ;;
+    update)   cmd_update "$@" ;;
     adb-port) cmd_adb_port ;;
     *) _err "Comando desconocido: $CMD"; usage; exit 1 ;;
 esac
