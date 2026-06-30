@@ -30,6 +30,17 @@ MONITOR_INTERVAL=10        # segundos entre chequeos
 log()  { echo "$(date '+%H:%M:%S') $*" >> "$LOG"; }
 notify_load() { notify "$SVC" "$*"; }
 
+# Devuelve número de consumers reales del mic OpenSL_ES_source.
+# En Termux, parec lee directamente del source sin crear source-output
+# (rarity de PulseAudio sobre Android), así que comprobamos tanto
+# source-outputs como procesos parec vivos en la fuente correcta.
+mic_consumers() {
+    local so=0 pr=0
+    [ -n "$(pactl list source-outputs short 2>/dev/null)" ] && so=$(pactl list source-outputs short 2>/dev/null | wc -l | tr -d ' ')
+    pr=$(pgrep -af 'parec.*OpenSL_ES_source' 2>/dev/null | wc -l | tr -d ' ')
+    echo $(( so + pr ))
+}
+
 # Espera activa hasta que PulseAudio responda
 wait_pulseaudio() {
     log "Esperando PulseAudio..."
@@ -68,10 +79,7 @@ test_mic() {
         SUSPENDED)
             # SUSPENDED solo es problema si NO hay consumidores del mic
             # (clientes pa como parec, jota-voice, etc.)
-            local consumers
-            consumers=$(pactl list source-outputs short 2>/dev/null | \
-                awk '$2 ~ /sles-source/ || $1 ~ /[0-9]+/{print}' | wc -l)
-            [ "$consumers" -gt 0 ] || return 2
+            mic_consumers | grep -q '^0$' && return 2
             ;;
         *) return 2 ;;
     esac
@@ -154,31 +162,29 @@ monitor() {
                 suspended_since=0
                 ;;
             SUSPENDED)
-                # Si hay consumidor activo (jota-voice, etc.), no es problema —
+                # Si hay consumidor activo (jota-voice via parec, etc.), no es problema —
                 # PulseAudio suspende automáticamente cuando todos los consumers cierran.
-                local consumers
-                consumers=$(pactl list source-outputs short 2>/dev/null | wc -l)
-                if [ "$consumers" -gt 0 ]; then
-                    suspended_since=0
-                    continue
-                fi
-                if [ $suspended_since -eq 0 ]; then
-                    suspended_since=$(date +%s)
-                    log "Fuente suspendida (sin consumers) — esperando ${SUSPEND_GRACE}s"
-                    notify_warn "$SVC" "🟡 Suspendida sin consumers — esperando resume"
-                fi
-                local now
-                now=$(date +%s)
-                if [ $((now - suspended_since)) -gt $SUSPEND_GRACE ]; then
-                    log "Suspendida >${SUSPEND_GRACE}s sin consumers — recargando"
-                    notify_warn "$SVC" "🔄 Recargando módulo"
-                    pactl unload-module module-sles-source 2>/dev/null || true
-                    sleep 2
-                    if ! load_sles; then
-                        log "Reload falló — saliendo para que supervisord reinicie"
-                        notify_err "$SVC" "❌ Reload falló — reiniciando loader"
-                        exit 1
+                if mic_consumers | grep -q '^0$'; then
+                    if [ $suspended_since -eq 0 ]; then
+                        suspended_since=$(date +%s)
+                        log "Fuente suspendida (sin consumers) — esperando ${SUSPEND_GRACE}s"
+                        notify_warn "$SVC" "🟡 Suspendida sin consumers — esperando resume"
                     fi
+                    local now
+                    now=$(date +%s)
+                    if [ $((now - suspended_since)) -gt $SUSPEND_GRACE ]; then
+                        log "Suspendida >${SUSPEND_GRACE}s sin consumers — recargando"
+                        notify_warn "$SVC" "🔄 Recargando módulo"
+                        pactl unload-module module-sles-source 2>/dev/null || true
+                        sleep 2
+                        if ! load_sles; then
+                            log "Reload falló — saliendo para que supervisord reinicie"
+                            notify_err "$SVC" "❌ Reload falló — reiniciando loader"
+                            exit 1
+                        fi
+                        suspended_since=0
+                    fi
+                else
                     suspended_since=0
                 fi
                 ;;
