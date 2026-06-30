@@ -225,11 +225,28 @@ cmd_restart() {
 
 cmd_update() {
     _check_sshpass
+    local full=0
+    [ "${1:-}" = "--full" ] && full=1
+
     _info "[$DEVICE_NAME] Sincronizando código..."
     _ssh "mkdir -p $PHONE_DIR"
     _rsync "$REPO_DIR/" "$PHONE_HOST:$PHONE_DIR/"
-    _info "[$DEVICE_NAME] Reiniciando jota-voice..."
-    _ssh "supervisorctl -c ~/supervisord.conf restart jota-voice"
+
+    if [ $full -eq 1 ]; then
+        _info "[$DEVICE_NAME] Aplicando install steps (06-configs, 07-boot)..."
+        _ssh "cd $PHONE_DIR && bash -c '
+            source lib/output.sh 2>/dev/null || true
+            source lib/yaml.sh    2>/dev/null || true
+            REPO_DIR=$PHONE_DIR
+            source install/06-configs.sh
+            source install/07-boot.sh
+        '"
+    fi
+
+    _info "[$DEVICE_NAME] Recargando supervisord..."
+    _ssh "supervisorctl -c ~/supervisord.conf reread && supervisorctl -c ~/supervisord.conf update" || true
+    _info "[$DEVICE_NAME] Reiniciando servicios..."
+    _ssh "supervisorctl -c ~/supervisord.conf restart jota-voice oww sles-source pulseaudio"
     _ok "[$DEVICE_NAME] Actualizado"
 }
 
@@ -275,7 +292,7 @@ Uso:
   jota-voice status
   jota-voice logs [jota-voice|oww|jota-display|supervisord|boot]
   jota-voice restart [jota-voice|oww|jota-display]
-  jota-voice update
+  jota-voice update [--full]
   jota-voice adb-port
 
   # Varios dispositivos (nombre obligatorio):
