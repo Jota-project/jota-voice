@@ -190,10 +190,12 @@ async def _recording(
 
     capture_task = asyncio.create_task(_capture_loop())
     cancel_task = asyncio.create_task(cancel_event.wait())
-    wake_task = asyncio.create_task(_wait_wake_or_cancel(bus, cancel_event, "RECORDING"))
+    # RECORDING: NO monitorizamos wake_word — durante la grabación estamos
+    # escuchando al usuario y su propia voz produciría falsos positivos. El
+    # wake_word solo puede interrumpir durante RESPONDING (TTS sonando).
 
     done, pending = await asyncio.wait(
-        [capture_task, cancel_task, wake_task],
+        [capture_task, cancel_task],
         return_when=asyncio.FIRST_COMPLETED,
     )
     for t in pending:
@@ -203,7 +205,7 @@ async def _recording(
         except asyncio.CancelledError:
             pass
 
-    if cancel_task in done or wake_task in done:
+    if cancel_task in done:
         await _safe_send_cancel(gateway)
         raise _TurnCancelled()
 
