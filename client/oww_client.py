@@ -4,22 +4,19 @@ Connects to wyoming-openwakeword (default port 10401) using the Wyoming
 JSON-lines-over-TCP protocol and reports wake-word detections.
 
 Modo de uso: ``run_forever()`` es una coroutine que mantiene una conexión
-permanente con OWW, envía audio del micrófono en streaming y publica
-``VoiceEvent(type="wake_word_detected")`` en el bus cuando detecta una
-wake word. Diseñado para correr como task background durante toda la vida
-de jota-voice — la detección es persistente y no se interrumpe durante
-RECORDING/RESPONDING.
+permanente con OWW, envía audio en streaming e invoca el callback
+``on_wake_word`` cuando detecta. Diseñado para correr como task background
+durante toda la vida de jota-voice — la detección es persistente y no se
+interrumpe durante RECORDING/RESPONDING.
 """
 
 import asyncio
 import json
 import logging
 import os
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from config import OWWConfig
-from event_bus import EventBus, VoiceEvent
-from audio_capture import AudioCapture
 
 log = logging.getLogger(__name__)
 
@@ -152,10 +149,14 @@ class OWWClient:
     # Modo persistente: run_forever (task background durante toda la vida)
     # ------------------------------------------------------------------
 
-    async def run_forever(self, audio: AudioCapture, bus: EventBus) -> None:
+    async def run_forever(
+        self,
+        audio,  # AudioBackend
+        on_wake_word: Callable[[str], Awaitable[None]],
+    ) -> None:
         """
-        Loop persistente: conecta a OWW, envía audio en streaming y publica
-        ``wake_word_detected`` en el bus cuando hay detección.
+        Loop persistente: conecta a OWW, envía audio en streaming e invoca
+        ``on_wake_word(name)`` cuando hay detección.
 
         Diseñado para correr como task background. Si OWW se cae, reconecta
         con backoff y sigue. Termina solo cuando la task es cancelada.
@@ -169,13 +170,11 @@ class OWWClient:
             # Task 1: enviar audio del mic a OWW en loop
             send_task = asyncio.create_task(self._send_audio_loop(audio))
             try:
-                # Task 2: esperar detecciones y publicarlas
+                # Task 2: esperar detecciones y notificar via callback
                 while True:
                     name = await self.wait_for_detection()
-                    bus.publish(
-                        VoiceEvent(type="wake_word_detected", data={"wake_word": name})
-                    )
-                    log.info("OWW run_forever: publicado wake_word_detected → %r", name)
+                    log.info("OWW run_forever: detectado → %r, invocando callback", name)
+                    await on_wake_word(name)
             except (ConnectionError, OSError, asyncio.IncompleteReadError) as exc:
                 log.warning("OWW run_forever: conexión perdida (%s), reconectando", exc)
                 send_task.cancel()
@@ -186,7 +185,7 @@ class OWWClient:
                 await self.disconnect()
                 continue
 
-    async def _send_audio_loop(self, audio: AudioCapture) -> None:
+    async def _send_audio_loop(self, audio) -> None:
         """Envía audio del mic a OWW continuamente. Solo termina por cancelación."""
         import numpy as np
 
