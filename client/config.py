@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 import yaml
 
 
@@ -19,12 +19,18 @@ class GatewayConfig:
 
 
 @dataclass
+class DeviceConfig:
+    id: str = "jota-voice"
+
+
+@dataclass
 class OWWConfig:
     host: str = "127.0.0.1"
     port: int = 10401
     wake_words: List[str] = field(default_factory=lambda: ["ok_nabu"])
     reconnect_backoff_s: List[float] = field(default_factory=lambda: [5.0, 10.0, 20.0, 60.0])
     idle_detection_timeout_s: float = 0.0  # 0.0 = sin timeout
+    backend: str = "wyoming"
 
 
 @dataclass
@@ -36,12 +42,14 @@ class AudioConfig:
     silence_timeout_s: float = 1.5
     recording_timeout_s: float = 15.0
     vad_rms_threshold: float = 200.0
+    backend: Optional[str] = None
 
 
 @dataclass
 class DisplayConfig:
     url: str = "http://127.0.0.1:8766"
     timeout_s: float = 2.0
+    backend: Optional[str] = None
 
 
 @dataclass
@@ -57,6 +65,7 @@ class LoggingConfig:
 @dataclass
 class Config:
     gateway: GatewayConfig
+    device: DeviceConfig = field(default_factory=DeviceConfig)
     oww: OWWConfig = field(default_factory=OWWConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
     display: DisplayConfig = field(default_factory=DisplayConfig)
