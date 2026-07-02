@@ -42,6 +42,8 @@ class AudioConfig:
     silence_timeout_s: float = 1.5
     recording_timeout_s: float = 15.0
     vad_rms_threshold: float = 200.0
+    input_device: Optional[int] = None
+    output_device: Optional[int] = None
     backend: Optional[str] = None
 
 
