@@ -89,8 +89,17 @@ def _gateway_from_dict(d: dict) -> GatewayConfig:
     )
 
 
+def _device_from_dict(d: dict) -> DeviceConfig:
+    required = {"id"}
+    missing = required - d.keys()
+    if missing:
+        raise ValueError(f"config.yaml: faltan campos en device: {missing}")
+    return DeviceConfig(id=str(d["id"]))
+
+
 def _oww_from_dict(d: dict) -> OWWConfig:
     return OWWConfig(
+        backend=d.get("backend", "wyoming"),
         host=d.get("host", "127.0.0.1"),
         port=int(d.get("port", 10401)),
         wake_words=list(d.get("wake_words", ["ok_nabu"])),
@@ -101,6 +110,7 @@ def _oww_from_dict(d: dict) -> OWWConfig:
 
 def _audio_from_dict(d: dict) -> AudioConfig:
     return AudioConfig(
+        backend=d.get("backend"),
         sample_rate=int(d.get("sample_rate", 16000)),
         channels=int(d.get("channels", 1)),
         frames_per_buffer=int(d.get("frames_per_buffer", 512)),
@@ -108,12 +118,15 @@ def _audio_from_dict(d: dict) -> AudioConfig:
         silence_timeout_s=float(d.get("silence_timeout_s", 1.5)),
         recording_timeout_s=float(d.get("recording_timeout_s", 15.0)),
         vad_rms_threshold=float(d.get("vad_rms_threshold", 200.0)),
+        input_device=d.get("input_device"),
+        output_device=d.get("output_device"),
     )
 
 
 def _display_from_dict(d: dict) -> DisplayConfig:
     return DisplayConfig(
-        url=d.get("url", "http://127.0.0.1:8766"),
+        backend=d.get("backend"),
+        url=d.get("url", ""),
         timeout_s=float(d.get("timeout_s", 2.0)),
     )
 
@@ -129,8 +142,11 @@ def load_config(path: str | Path) -> Config:
         data = yaml.safe_load(f)
     if "gateway" not in data:
         raise ValueError("config.yaml: sección 'gateway' obligatoria")
+    if "device" not in data:
+        raise ValueError("config.yaml: sección 'device' obligatoria")
     return Config(
         gateway=_gateway_from_dict(data["gateway"]),
+        device=_device_from_dict(data["device"]),
         oww=_oww_from_dict(data.get("oww", {})),
         audio=_audio_from_dict(data.get("audio", {})),
         display=_display_from_dict(data.get("display", {})),
@@ -144,6 +160,8 @@ if __name__ == "__main__":
     cfg_path = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
     cfg = load_config(cfg_path)
     print("Config cargada OK")
+    print(f"  device:  {cfg.device.id}")
     print(f"  gateway: {cfg.gateway.ws_url}")
-    print(f"  oww:     {cfg.oww.host}:{cfg.oww.port}")
-    print(f"  display: {cfg.display.url}")
+    print(f"  oww:     {cfg.oww.host}:{cfg.oww.port} (backend={cfg.oww.backend})")
+    print(f"  audio:   backend={cfg.audio.backend}")
+    print(f"  display: backend={cfg.display.backend} url={cfg.display.url!r}")

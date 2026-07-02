@@ -1,18 +1,23 @@
 gateway:
-  host: "192.168.X.X"       # IP del servidor donde corre jota-gateway
+  host: "green-house"
   port: 8004
   path: "/ws/stream"
-  client_key: "RELLENAR"    # client_key del dispositivo en el servidor
+  client_key: "RELLENAR"
   connect_timeout_s: 10
 
+device:
+  id: "mi-dispositivo"
+
 oww:
-  host: "127.0.0.1"         # OWW en el mismo dispositivo → localhost
+  backend: "wyoming"          # único backend en fase 1
+  host: "127.0.0.1"           # localhost en Mac y en Termux
   port: 10401
   wake_words:
     - "ok_nabu"
   reconnect_backoff_s: [5, 10, 20, 60]
 
 audio:
+  backend: null               # null = auto-detect por SO
   sample_rate: 16000
   channels: 1
   frames_per_buffer: 512
@@ -20,22 +25,22 @@ audio:
   silence_timeout_s: 1.5
   recording_timeout_s: 15.0
   vad_rms_threshold: 200
+  input_device: null          # solo sounddevice
+  output_device: null         # solo sounddevice
 
 display:
+  backend: null               # null = "http" si url, si no "null"
   url: "http://127.0.0.1:8766"
   timeout_s: 2.0
 
 hosts:
   - ip: "192.168.X.X"
-    name: "mi-servidor"     # nombre del host en /etc/hosts del dispositivo
+    name: "mi-servidor"
   - ip: "192.168.X.X"
     name: "mi-asistente"
-
-phone:
-  name: "mi-dispositivo"    # nombre único para identificar este teléfono
 
 logging:
   level: "INFO"
 
 control:
-  port: 8765                  # Puerto del servidor de control HTTP (para botón cancel)
+  port: 8765
