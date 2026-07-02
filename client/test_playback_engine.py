@@ -1,7 +1,7 @@
 """
 test_playback_engine.py — Tests de lógica pura para PlaybackEngine.
 
-No requiere PyAudio ni hardware de audio: usa mocks.
+No requiere AudioBackend real: usa un mock del backend de audio.
 Ejecutar desde la raíz del proyecto:
     python -m pytest client/test_playback_engine.py -v
 o directamente:
@@ -12,44 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import sys
-import types
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
-
-# ---------------------------------------------------------------------------
-# Stub de PyAudio para importar sin hardware
-# ---------------------------------------------------------------------------
-
-def _install_pyaudio_stub() -> None:
-    """Instala un módulo pyaudio falso si el real no está disponible."""
-    try:
-        import pyaudio  # noqa: F401
-    except ImportError:
-        stub = types.ModuleType("pyaudio")
-        stub.paInt16 = 8  # valor numérico real de paInt16
-        stub.paContinue = 0
-
-        class _FakeStream:
-            def write(self, data: bytes) -> None:
-                pass
-            def stop_stream(self) -> None:
-                pass
-            def close(self) -> None:
-                pass
-
-        class _FakePyAudio:
-            def open(self, **kwargs):  # noqa: ANN001
-                return _FakeStream()
-            def terminate(self) -> None:
-                pass
-
-        stub.PyAudio = _FakePyAudio
-        stub.Stream = _FakeStream
-        sys.modules["pyaudio"] = stub
-
-
-_install_pyaudio_stub()
 
 # Añadir client/ al sys.path para importar módulos locales
 import os
@@ -66,7 +31,7 @@ from playback_engine import PlaybackEngine   # noqa: E402
 # ---------------------------------------------------------------------------
 
 def _make_engine() -> tuple[PlaybackEngine, EventBus, list[VoiceEvent]]:
-    """Devuelve (engine, bus, captured_events)."""
+    """Devuelve (engine, bus, captured_events, audio_mock)."""
     bus = EventBus()
     captured: list[VoiceEvent] = []
 
@@ -79,9 +44,14 @@ def _make_engine() -> tuple[PlaybackEngine, EventBus, list[VoiceEvent]]:
 
     bus.publish = capturing_publish  # type: ignore[method-assign]
 
-    import pyaudio as pa_mod
-    fake_pa = pa_mod.PyAudio()
-    engine = PlaybackEngine(bus=bus, pa=fake_pa)
+    # Mock AudioBackend con métodos async
+    audio = MagicMock()
+    audio.play_chunk = AsyncMock()
+    audio.play_notification = AsyncMock()
+    audio.drain = AsyncMock()
+    audio.reset = MagicMock()
+
+    engine = PlaybackEngine(bus=bus, audio=audio)
     return engine, bus, captured
 
 
@@ -171,13 +141,13 @@ class TestPlayChunk(unittest.IsolatedAsyncioTestCase):
                                  f"Texto '{text}' supera el buffer de 2 chars")
 
     async def test_play_chunk_vacio_no_reproduce(self) -> None:
-        """play_chunk con bytes vacíos no debe abrir stream ni emitir eventos."""
+        """play_chunk con bytes vacíos no debe invocar al audio backend ni emitir eventos."""
         engine, bus, captured = _make_engine()
         await engine.play_chunk(b"")
 
         display_events = [e for e in captured if e.type == "display_text_update"]
         self.assertEqual(len(display_events), 0)
-        self.assertIsNone(engine._stream, "No debe abrir stream con audio vacío")
+        engine._audio.play_chunk.assert_not_called()
 
     async def test_duracion_calculo_correcto(self) -> None:
         """Verificar que audio_duration se calcula correctamente."""
