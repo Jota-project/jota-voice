@@ -6,8 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-from typing import Optional
 
 import numpy as np
 
@@ -15,6 +13,17 @@ from config import AudioConfig
 from audio_capture import AudioCapture
 
 log = logging.getLogger(__name__)
+
+
+def _require_pyaudio():
+    """Import lazy de pyaudio — solo disponible en Termux/ARM."""
+    try:
+        import pyaudio
+    except ImportError as exc:
+        raise RuntimeError(
+            "TermuxBackend requiere pyaudio. Instálalo con: pkg install portaudio && pip install pyaudio"
+        ) from exc
+    return pyaudio
 
 
 class TermuxBackend:
@@ -29,12 +38,7 @@ class TermuxBackend:
 
     async def start(self) -> None:
         await self._capture.start()
-        try:
-            import pyaudio
-        except ImportError as exc:
-            raise RuntimeError(
-                "TermuxBackend requiere pyaudio. Instálalo con: pkg install portaudio && pip install pyaudio"
-            ) from exc
+        pyaudio = _require_pyaudio()
         self._pa = pyaudio.PyAudio()
         log.debug("TermuxBackend: PyAudio inicializado")
 
@@ -62,8 +66,6 @@ class TermuxBackend:
 
     async def play_notification(self) -> None:
         """Beep de notificación (dos tonos ascendentes, ~300ms total)."""
-        import pyaudio
-
         rate = 24000
         segments = []
         for freq, dur in [(587.0, 0.10), (880.0, 0.18)]:
@@ -80,12 +82,11 @@ class TermuxBackend:
         await self._play(audio)
 
     async def _play(self, audio: bytes) -> None:
-        import pyaudio
-
         if not audio or self._pa is None:
             return
         async with self._lock:
             if self._stream is None:
+                pyaudio = _require_pyaudio()
                 self._stream = self._pa.open(
                     format=pyaudio.paInt16,
                     channels=1,
