@@ -251,8 +251,8 @@ if [ "$PASSED" -eq "$TOTAL" ]; then
     echo "════════════════════════════════════════════════════════════"
     exit 0
 else
-    FAILLED=$((TOTAL-PASSED))
-    printf "  ${R}FAIL${N} — %d/%d checks pasaron (%d fallaron)\n" "$PASSED" "$TOTAL" "$FAILLED"
+    FAILED=$((TOTAL-PASSED))
+    printf "  ${R}FAIL${N} — %d/%d checks pasaron (%d fallaron)\n" "$PASSED" "$TOTAL" "$FAILED"
     echo ""
     echo "  Revisa los ✗ arriba. Comunes:"
     echo "    - Servicio no cargado → bash install/macos/07-launchd.sh"
