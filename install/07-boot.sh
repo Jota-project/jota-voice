@@ -1,4 +1,6 @@
 #!/bin/sh
+# Note: as of 2026-07-02 boot runs voice_client.py config.yaml, which reads
+# device.id (was phone.name). The config is rsynced by install/06-configs.sh.
 set -e
 source "$REPO_DIR"/lib/output.sh
 

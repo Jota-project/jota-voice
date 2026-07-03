@@ -1,4 +1,6 @@
 #!/bin/sh
+# Note: as of 2026-07-02 the config uses device.id (was phone.name). The phone
+# config.yaml is rsynced from this repo, so the rename is automatic on deploy.
 set -e
 source "$REPO_DIR"/lib/output.sh
 source "$REPO_DIR"/lib/yaml.sh
