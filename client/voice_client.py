@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""voice_client.py — Punto de entrada de jota-voice v2.
+"""voice_client.py — Punto de entrada de jota-voice v2 (multiplataforma).
 
-Instancia todos los módulos, crea el EventBus, arranca tareas:
-- DisplayClient.run() como task background permanente
+Instancia los backends vía registry, crea el EventBus, arranca tareas:
+- OWW run_forever como task background permanente (vía WyomingBackend)
+- Display run() como task background permanente
 - state_machine.run() como loop principal
 - Gestión de señales (SIGTERM/SIGINT → shutdown limpio)
 
 Uso: python client/voice_client.py config.yaml
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -75,15 +75,9 @@ def _apply_termux_hosts() -> None:
 
 _apply_termux_hosts()
 
-try:
-    import pyaudio
-except ImportError:
-    sys.exit("pyaudio no encontrado. Instálalo con: pip install pyaudio")
-
 from config import load_config
-from event_bus import EventBus
-from audio_capture import AudioCapture
-from oww_client import OWWClient
+from event_bus import EventBus, VoiceEvent
+from backends import registry
 from gateway_client import GatewayClient
 from playback_engine import PlaybackEngine
 from display_client import DisplayClient
@@ -103,16 +97,23 @@ async def main(config_path: str) -> None:
     cfg = load_config(config_path)
     _setup_logging(cfg.logging.level)
     log = logging.getLogger(__name__)
-    log.info("jota-voice v2 arrancando…")
+    log.info("jota-voice v2 arrancando… device=%s", cfg.device.id)
 
-    # --- Crear módulos ---
+    # --- Crear bus + backends via registry ---
     bus = EventBus()
-    pa = pyaudio.PyAudio()
-    audio = AudioCapture(cfg.audio)
-    oww = OWWClient(cfg.oww)
-    gateway = GatewayClient(cfg.gateway)
-    playback = PlaybackEngine(bus, pa)
-    display = DisplayClient(cfg.display, bus)
+
+    async def _oww_on_wake(name: str) -> None:
+        bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": name}))
+
+    audio = registry.make_audio(cfg)
+    oww = registry.make_oww(cfg, on_wake_word=_oww_on_wake)
+    display_backend = registry.make_display(cfg)
+    gateway = GatewayClient(cfg.gateway, device_id=cfg.device.id)
+    playback = PlaybackEngine(bus, audio)
+    display = DisplayClient(display_backend)
+
+    log.info("Backends: audio=%s oww=%s display=%s",
+             audio.__class__.__name__, oww.__class__.__name__, display_backend.__class__.__name__)
 
     # --- SIGTERM / SIGINT handler ---
     loop = asyncio.get_running_loop()
@@ -132,16 +133,14 @@ async def main(config_path: str) -> None:
     cancel_event = asyncio.Event()
 
     # --- Task background permanente: OWW (detección persistente de wake word) ---
-    # OWW escucha continuamente durante toda la vida de jota-voice y publica
-    # wake_word_detected en el bus. El state_machine lo consume desde IDLE y
-    # también lo monitoriza en RECORDING/RESPONDING para permitir interrumpir
-    # el TTS con una nueva wake word (estilo Alexa/Google).
-    oww_task = asyncio.create_task(oww.run_forever(audio, bus), name="oww_listener")
+    oww_task = asyncio.create_task(
+        oww.run_forever(audio, _oww_on_wake), name="oww_listener"
+    )
 
     # --- Task background permanente: DisplayClient ---
-    display_task = asyncio.create_task(display.run(), name="display")
+    display_task = asyncio.create_task(display.run(bus), name="display")
 
-    # --- Task background: ControlServer (señal cancel para jota-display) ---
+    # --- Task background: ControlServer ---
     control_task = asyncio.create_task(
         control_server.run(cfg.control, cancel_event), name="control_server"
     )
@@ -151,8 +150,6 @@ async def main(config_path: str) -> None:
         sm_run(cfg, bus, audio, gateway, playback, cancel_event), name="state_machine"
     )
 
-    # stop_event.wait() es una coroutine; hay que envolverla en task para
-    # pasarla a asyncio.wait().
     stop_task = asyncio.create_task(stop_event.wait(), name="stop_signal")
 
     try:
@@ -160,13 +157,11 @@ async def main(config_path: str) -> None:
             [sm_task, stop_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
-        # Cancelar la tarea que quedó pendiente (la que no terminó primero)
         for t in pending:
             t.cancel()
     finally:
         log.info("Apagando jota-voice…")
 
-        # Cancelar todas las tasks si siguen vivas
         sm_task.cancel()
         oww_task.cancel()
         display_task.cancel()
@@ -178,7 +173,6 @@ async def main(config_path: str) -> None:
             return_exceptions=True,
         )
 
-        # Teardown de recursos en orden inverso a su creación
         await audio.stop()
 
         try:
@@ -191,11 +185,13 @@ async def main(config_path: str) -> None:
         except Exception:
             pass
 
-        playback.close()
-        pa.terminate()
         bus.close()
-
         log.info("jota-voice apagado limpiamente")
+
+
+async def _on_wake(bus: EventBus, name: str) -> None:
+    """Callback por defecto de wake word — publica en el bus."""
+    bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": name}))
 
 
 if __name__ == "__main__":
