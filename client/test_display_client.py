@@ -1,7 +1,7 @@
 """
 test_display_client.py — Test offline del mapeo VoiceEvent → estado display.
 
-Sin HTTP real: se parchea _post para capturar las llamadas.
+Sin HTTP real: se mockea el backend para capturar las llamadas a update().
 Compatible con pytest y ejecución directa.
 """
 
@@ -11,22 +11,20 @@ import os
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from config import DisplayConfig
 from event_bus import EventBus, VoiceEvent
 from display_client import DisplayClient
 
 
 async def _run_test() -> None:
-    cfg = DisplayConfig(url="http://127.0.0.1:9999", timeout_s=1.0)
     bus = EventBus()
-    client = DisplayClient(cfg, bus)
 
-    results: list[tuple[str, str]] = []
+    calls: list[tuple[str, dict]] = []
 
-    async def fake_post(state: str, text: str = "") -> None:
-        results.append((state, text))
+    class FakeBackend:
+        async def update(self, state: str, **kwargs) -> None:
+            calls.append((state, kwargs))
 
-    client._post = fake_post  # type: ignore[method-assign]
+    client = DisplayClient(FakeBackend())
 
     # (evento, estado_esperado_o_None, texto_esperado_o_None)
     test_cases = [
@@ -34,11 +32,11 @@ async def _run_test() -> None:
         (VoiceEvent(type="transcription", data={"text": "hola jota"}),            "thinking",  "hola jota"),
         (VoiceEvent(type="playback_started", data={}),                            "response",  ""),
         (VoiceEvent(type="display_text_update", data={"text": "Buenos días"}),    "response",  "Buenos días"),
-        # state_changed con formato {"to": "IDLE"} (usado por state machine real)
-        (VoiceEvent(type="state_changed", data={"from": "SPEAKING", "to": "IDLE"}), "idle",   ""),
-        # state_changed con formato alternativo {"state": "idle"}
+        # state_changed con formato {"state": "idle"} (la nueva API solo mira "state")
+        (VoiceEvent(type="state_changed", data={"from": "SPEAKING", "to": "IDLE"}), None, None),
+        # state_changed con formato canónico {"state": "idle"}
         (VoiceEvent(type="state_changed", data={"state": "idle"}),                "idle",      ""),
-        # --- Eventos que deben ignorarse (sin POST) ---
+        # --- Eventos que deben ignorarse (sin update) ---
         (VoiceEvent(type="wake_word_detected", data={"confidence": 0.99}),        None, None),
         (VoiceEvent(type="recording_ended", data={}),                             None, None),
         (VoiceEvent(type="transcription_partial", data={"text": "ho"}),           None, None),
@@ -50,20 +48,24 @@ async def _run_test() -> None:
         (VoiceEvent(type="state_changed", data={"from": "IDLE", "to": "RECORDING"}), None, None),
     ]
 
-    expected_posts = [(s, t) for (_, s, t) in test_cases if s is not None]
+    expected_calls = []
+    for _, state, text in test_cases:
+        if state is not None:
+            kwargs = {"text": text} if text else {}
+            expected_calls.append((state, kwargs))
 
     for ev, _, _ in test_cases:
         await client._handle(ev)
 
-    assert results == expected_posts, (
-        f"Mapeo incorrecto.\nEsperado: {expected_posts}\nObtenido:  {results}"
+    assert calls == expected_calls, (
+        f"Mapeo incorrecto.\nEsperado: {expected_calls}\nObtenido:  {calls}"
     )
 
-    n_ignored = len(test_cases) - len(expected_posts)
-    print(f"OK — {len(expected_posts)} POSTs generados, {n_ignored} eventos ignorados.")
-    print("POSTs enviados:")
-    for state, text in results:
-        t = f' text="{text}"' if text else ""
+    n_ignored = len(test_cases) - len(expected_calls)
+    print(f"OK — {len(expected_calls)} updates generados, {n_ignored} eventos ignorados.")
+    print("Updates enviados:")
+    for state, kwargs in calls:
+        t = f' text={kwargs["text"]!r}' if kwargs.get("text") else ""
         print(f"  state={state!r}{t}")
 
 
