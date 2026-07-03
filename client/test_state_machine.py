@@ -74,9 +74,9 @@ if _here not in sys.path:
     sys.path.insert(0, _here)
 
 # Importar módulos del proyecto
-from event_bus import EventBus, VoiceEvent          # noqa: E402
-from config import Config, GatewayConfig, AudioConfig, OWWConfig  # noqa: E402
-from gateway_client import GatewayEvent             # noqa: E402
+from event_bus import EventBus, VoiceEvent                              # noqa: E402
+from config import Config, GatewayConfig, AudioConfig, OWWConfig, DeviceConfig  # noqa: E402
+from gateway_client import GatewayEvent                                 # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +86,7 @@ from gateway_client import GatewayEvent             # noqa: E402
 def _make_config() -> Config:
     return Config(
         gateway=GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=5.0),
+        device=DeviceConfig(id="test-device"),
         audio=AudioConfig(
             sample_rate=16000,
             frames_per_buffer=512,
@@ -181,19 +182,19 @@ async def _run_e2e_test() -> None:
     gateway  = _gateway_mock_with_events(gw_events)
     playback = _make_playback_mock()
 
-    # Preparar secuencia de detecciones:
-    #   - 1er call: devuelve "ok_nabu" inmediatamente
-    #   - 2do call: bloquea hasta cancelación (simula espera real en el 2do ciclo)
+    # El state_machine consume `wake_word_detected` del bus. Publicamos el
+    # primer wake_word inmediatamente; los siguientes nunca llegan (simula
+    # que OWW solo detectó una vez y luego está en silencio).
     call_count = [0]
 
-    async def _wait_once_then_block() -> str:
-        call_count[0] += 1
-        if call_count[0] == 1:
-            return "ok_nabu"
-        await asyncio.Event().wait()
-        return "ok_nabu"  # never reached
+    async def _publish_wake_words() -> None:
+        while True:
+            await asyncio.sleep(0)
+            if call_count[0] == 0:
+                call_count[0] += 1
+                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
 
-    oww.wait_for_detection = _wait_once_then_block
+    wake_publisher_task = asyncio.create_task(_publish_wake_words())
 
     # Suscribir al bus para capturar todos los eventos
     received: list[VoiceEvent] = []
@@ -220,7 +221,7 @@ async def _run_e2e_test() -> None:
 
     from state_machine import run as sm_run
 
-    sm_task = asyncio.create_task(sm_run(cfg, bus, audio, oww, gateway, playback))
+    sm_task = asyncio.create_task(sm_run(cfg, bus, audio, gateway, playback))
 
     try:
         await asyncio.wait_for(stop_event.wait(), timeout=10.0)
@@ -229,12 +230,17 @@ async def _run_e2e_test() -> None:
 
     sm_task.cancel()
     watcher_task.cancel()
+    wake_publisher_task.cancel()
     try:
         await sm_task
     except asyncio.CancelledError:
         pass
     try:
         await watcher_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await wake_publisher_task
     except asyncio.CancelledError:
         pass
 
@@ -324,17 +330,19 @@ async def _run_error_test() -> None:
     cfg = _make_config()
     audio = _make_audio_mock(silent=True)
 
+    oww = _make_oww_mock()
+
+    # Publica wake_word_detected en el bus (el state_machine lo consume desde ahí).
     call_count = [0]
 
-    async def _wait_once_then_block() -> str:
-        call_count[0] += 1
-        if call_count[0] == 1:
-            return "ok_nabu"
-        await asyncio.Event().wait()
-        return "ok_nabu"
+    async def _publish_wake_words() -> None:
+        while True:
+            await asyncio.sleep(0)
+            if call_count[0] == 0:
+                call_count[0] += 1
+                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
 
-    oww = _make_oww_mock()
-    oww.wait_for_detection = _wait_once_then_block
+    wake_publisher_task = asyncio.create_task(_publish_wake_words())
 
     gateway = MagicMock()
     gateway.connect = AsyncMock(side_effect=ConnectionRefusedError("gateway no disponible"))
@@ -356,7 +364,7 @@ async def _run_error_test() -> None:
 
     from state_machine import run as sm_run
 
-    sm_task = asyncio.create_task(sm_run(cfg, bus, audio, oww, gateway, playback))
+    sm_task = asyncio.create_task(sm_run(cfg, bus, audio, gateway, playback))
 
     try:
         await asyncio.wait_for(stop_event.wait(), timeout=10.0)
@@ -364,8 +372,13 @@ async def _run_error_test() -> None:
         pass
 
     sm_task.cancel()
+    wake_publisher_task.cancel()
     try:
         await sm_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await wake_publisher_task
     except asyncio.CancelledError:
         pass
 
@@ -394,6 +407,7 @@ async def _run_idle_timeout_test() -> None:
     bus = EventBus()
     cfg = Config(
         gateway=GatewayConfig(host="127.0.0.1", client_key="test"),
+        device=DeviceConfig(id="test-device"),
         oww=OWWConfig(idle_detection_timeout_s=0.1),  # timeout muy corto
     )
 
@@ -402,12 +416,6 @@ async def _run_idle_timeout_test() -> None:
     oww.connect_with_backoff = AsyncMock()
     oww.disconnect = AsyncMock()
     oww.send_audio = AsyncMock()
-
-    async def _never_detect() -> str:
-        await asyncio.Event().wait()  # bloquea para siempre
-        return "never"
-
-    oww.wait_for_detection = _never_detect
 
     audio = _make_audio_mock(silent=True)
     gateway = _gateway_mock_with_events([])
@@ -426,7 +434,10 @@ async def _run_idle_timeout_test() -> None:
 
     from state_machine import run as sm_run
 
-    sm_task = asyncio.create_task(sm_run(cfg, bus, audio, oww, gateway, playback))
+    sm_task = asyncio.create_task(sm_run(cfg, bus, audio, gateway, playback))
+
+    # No publicamos ningún wake_word_detected — el test verifica que
+    # state_machine publica error tras idle_detection_timeout_s.
 
     try:
         await asyncio.wait_for(stop_event.wait(), timeout=3.0)
@@ -466,16 +477,18 @@ async def _run_cancel_recording_test() -> None:
     audio = _make_audio_mock(silent=False)  # audio con voz → no termina por silencio
 
     oww = _make_oww_mock()
+
+    # Publica wake_word_detected en el bus (el state_machine lo consume desde ahí).
     call_count = [0]
 
-    async def _detect_once() -> str:
-        call_count[0] += 1
-        if call_count[0] == 1:
-            return "ok_nabu"
-        await asyncio.Event().wait()
-        return "ok_nabu"
+    async def _publish_wake_words() -> None:
+        while True:
+            await asyncio.sleep(0)
+            if call_count[0] == 0:
+                call_count[0] += 1
+                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
 
-    oww.wait_for_detection = _detect_once
+    wake_publisher_task = asyncio.create_task(_publish_wake_words())
 
     gateway = MagicMock()
     gateway.connect = AsyncMock()
@@ -510,7 +523,7 @@ async def _run_cancel_recording_test() -> None:
     from state_machine import run as sm_run
 
     sm_task = asyncio.create_task(
-        sm_run(cfg, bus, audio, oww, gateway, playback, cancel_event)
+        sm_run(cfg, bus, audio, gateway, playback, cancel_event)
     )
 
     # Esperar a que empiece RECORDING y disparar cancel
@@ -530,7 +543,8 @@ async def _run_cancel_recording_test() -> None:
     sm_task.cancel()
     watcher_task.cancel()
     fire_task.cancel()
-    for t in [sm_task, watcher_task, fire_task]:
+    wake_publisher_task.cancel()
+    for t in [sm_task, watcher_task, fire_task, wake_publisher_task]:
         try:
             await t
         except (asyncio.CancelledError, Exception):
@@ -576,16 +590,18 @@ async def _run_cancel_responding_test() -> None:
     audio = _make_audio_mock(silent=True)
 
     oww = _make_oww_mock()
+
+    # Publica wake_word_detected en el bus (el state_machine lo consume desde ahí).
     call_count = [0]
 
-    async def _detect_once() -> str:
-        call_count[0] += 1
-        if call_count[0] == 1:
-            return "ok_nabu"
-        await asyncio.Event().wait()
-        return "ok_nabu"
+    async def _publish_wake_words() -> None:
+        while True:
+            await asyncio.sleep(0)
+            if call_count[0] == 0:
+                call_count[0] += 1
+                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
 
-    oww.wait_for_detection = _detect_once
+    wake_publisher_task = asyncio.create_task(_publish_wake_words())
 
     # Gateway que emite transcription y luego bloquea (tts lento)
     received_events: list[VoiceEvent] = []
@@ -628,7 +644,7 @@ async def _run_cancel_responding_test() -> None:
     from state_machine import run as sm_run
 
     sm_task = asyncio.create_task(
-        sm_run(cfg, bus, audio, oww, gateway, playback, cancel_event)
+        sm_run(cfg, bus, audio, gateway, playback, cancel_event)
     )
 
     # Disparar cancel cuando llegue llm_token (estamos en RESPONDING)
@@ -647,7 +663,8 @@ async def _run_cancel_responding_test() -> None:
     sm_task.cancel()
     watcher_task.cancel()
     fire_task.cancel()
-    for t in [sm_task, watcher_task, fire_task]:
+    wake_publisher_task.cancel()
+    for t in [sm_task, watcher_task, fire_task, wake_publisher_task]:
         try:
             await t
         except (asyncio.CancelledError, Exception):

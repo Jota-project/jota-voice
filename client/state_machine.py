@@ -24,11 +24,11 @@ from typing import Optional
 
 import numpy as np
 
-from audio_capture import AudioCapture
+from backends.audio_base import AudioBackend
+from backends.oww_base import OwWBackend  # noqa: F401  (used in type hints / future)
 from config import Config
 from event_bus import EventBus, VoiceEvent
 from gateway_client import GatewayClient
-from oww_client import OWWClient
 from playback_engine import PlaybackEngine
 
 log = logging.getLogger(__name__)
@@ -83,11 +83,29 @@ async def _idle(
     log.info("IDLE: esperando wake_word del bus…")
 
     # 4. Suscribirse al bus y esperar primer wake_word_detected
-    async for event in bus.subscribe():
-        if event.type == "wake_word_detected":
-            wake_word = event.data.get("wake_word", "")
-            log.info("IDLE: wake word recibido → %r", wake_word)
-            return wake_word
+    timeout_s = cfg.oww.idle_detection_timeout_s
+    if timeout_s > 0:
+        # Aplicar timeout: si no llega wake_word_detected en `timeout_s`,
+        # lanzar OSError para que run() publique error y vuelva a IDLE.
+        async def _wait_wake_or_timeout() -> str:
+            try:
+                async for event in bus.subscribe():
+                    if event.type == "wake_word_detected":
+                        return event.data.get("wake_word", "")
+            except asyncio.CancelledError:
+                raise
+        try:
+            return await asyncio.wait_for(_wait_wake_or_timeout(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            raise OSError(
+                f"IDLE: timeout {timeout_s}s esperando wake_word_detected"
+            )
+    else:
+        async for event in bus.subscribe():
+            if event.type == "wake_word_detected":
+                wake_word = event.data.get("wake_word", "")
+                log.info("IDLE: wake word recibido → %r", wake_word)
+                return wake_word
 
 
 async def _wait_wake_or_cancel(
@@ -315,7 +333,7 @@ async def _cleanup(gateway: GatewayClient, playback: PlaybackEngine) -> None:
 async def run(
     cfg: Config,
     bus: EventBus,
-    audio: AudioCapture,
+    audio: AudioBackend,
     gateway: GatewayClient,
     playback: PlaybackEngine,
     cancel_event: Optional[asyncio.Event] = None,
