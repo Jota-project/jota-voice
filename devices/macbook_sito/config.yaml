@@ -2,6 +2,12 @@ gateway:
   host: "green-house"
   port: 8004
   path: "/ws/stream"
+  # IMPORTANTE: client_key es un placeholder. Reemplaza esto con el UUID real
+  # generado por el INSERT en jota-db antes del primer arranque. Pasos:
+  #   1. ssh sito@192.168.1.106
+  #   2. docker exec -i jota_db psql -U user -d jota
+  #   3. INSERT INTO clients (id, client_key, created_at) VALUES ('macbook_sito', gen_random_uuid(), NOW());
+  #   4. Pega el UUID aquí.
   client_key: "PEGA-AQUI-EL-UUID-DEL-PASO-1"
   connect_timeout_s: 10
 

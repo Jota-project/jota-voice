@@ -68,15 +68,34 @@ Servicio: `launchctl list | grep com.jota.voice`.
 
 ```
 client/
-  voice_client.py   # proceso principal — máquina de estados
-  oww.py            # cliente wyoming-openwakeword
-  gateway.py        # cliente WebSocket jota-gateway
-  audio.py          # captura/reproducción PulseAudio
-  display.py        # estado → jota-display (best-effort)
-  config.py         # carga config.yaml con Pydantic
-boot/
-  start.sh          # arranca el cliente (Termux:Boot)
-install.sh          # primer setup en dispositivo nuevo
-deploy.sh           # sync + restart desde el Mac
-config.example.yaml # plantilla de configuración
+  voice_client.py             # entry point — wire registry + tasks
+  state_machine.py            # máquina de estados IDLE→RECORDING→RESPONDING
+  event_bus.py                # pub/sub asíncrono
+  gateway_client.py           # WebSocket jota-gateway (handshake con device_id)
+  playback_engine.py          # orquesta TTS delegando en AudioBackend
+  config.py                   # carga config.yaml (Pydantic v2)
+  control_server.py           # HTTP /cancel para jota-display
+  oww_client.py               # Wyoming TCP client (helper de WyomingBackend)
+  audio_capture.py            # parec/PulseAudio (helper de TermuxBackend)
+  display_client.py           # EventBus → DisplayBackend (inyectado)
+  backends/                   # interfaces intercambiables por SO
+    registry.py               # factory con auto-detección por sys.platform
+    audio_base.py             # Protocol AudioBackend
+    audio_sounddevice.py      # Mac/Linux (sounddevice/PortAudio)
+    audio_termux.py           # Android (parec + pyaudio)
+    display_base.py           # Protocol DisplayBackend
+    display_http.py           # POST a jota-display
+    display_null.py           # no-op
+    oww_base.py               # Protocol OwWBackend
+    oww_wyoming.py            # wrapper sobre OWWClient
+  test_*.py                   # tests unitarios
+install/
+  shared/99-smoke-test.sh     # smoke test automatizado cross-platform
+  termux/                     # scripts de instalación en Android (legacy)
+  macos/                      # scripts de instalación en macOS
+devices/
+  macbook_sito/               # config por dispositivo
+  hab_sito/                   # config del Huawei (legacy)
+deploy.sh                     # --target phone|macbook
+config.example.yaml           # plantilla de configuración
 ```
