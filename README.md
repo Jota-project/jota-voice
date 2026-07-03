@@ -7,14 +7,21 @@ Sustituye a `wyoming-satellite` + Home Assistant voice pipeline con un cliente s
 ## Arquitectura
 
 ```
-[Teléfono - Termux]
-  wyoming-openwakeword (worker-01:10401) ← wake word
-         ↓ Detection
-  jota-voice-client ───── WS streaming ──→ jota-gateway :8004
-         ↓                                   ├── jota-transcriber (STT)
-  jota-display :8766                         ├── OpenClaw (LLM)
-  (UI kiosk)                                 └── jota-speaker (TTS)
-                                                  ↓ audio chunks back
+                config.yaml
+                     │
+                     ▼
+            ┌──────────────┐
+            │   registry   │  ← auto-detecta SO
+            └──────┬───────┘
+                   │
+   ┌───────────────┼───────────────┐
+   ▼               ▼               ▼
+AudioBackend   DisplayBackend   OwWBackend
+   │               │               │
+   ├─Sounddevice  ├─Http          └─Wyoming (TCP)
+   │  (Mac/Linux) └─Null
+   └─Termux        (no-op)
+     (Android)
 ```
 
 ## Setup rápido
@@ -30,6 +37,24 @@ python client/voice_client.py config.yaml
 cp .env.local.example .env.local && nano .env.local
 bash deploy.sh
 ```
+
+### macOS (MacBook)
+
+```bash
+# Una vez por máquina
+REPO_DIR=$(pwd) bash install/macos/01-homebrew.sh   # brew + python + docker check
+REPO_DIR=$(pwd) bash install/macos/03-venv.sh       # ~/venvs/jota-voice
+REPO_DIR=$(pwd) bash install/macos/04-oww.sh         # Wyoming en Docker (puerto 10401)
+REPO_DIR=$(pwd) bash install/macos/06-configs.sh     # symlink config
+REPO_DIR=$(pwd) bash install/macos/07-launchd.sh     # launchd agent
+
+# Deploys posteriores
+bash deploy.sh macbook
+```
+
+Logs: `tail -f ~/Library/Logs/jota-voice/stdout.log`.
+
+Servicio: `launchctl list | grep com.jota.voice`.
 
 ## Documentación
 
