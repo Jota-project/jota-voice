@@ -20,7 +20,7 @@ def _write_cfg(data: dict) -> str:
 
 
 def test_control_port_default() -> None:
-    path = _write_cfg({"gateway": {"host": "127.0.0.1", "client_key": "test"}})
+    path = _write_cfg({"gateway": {"host": "127.0.0.1", "client_key": "test"}, "device": {"id": "test-device"}})
     try:
         from config import load_config
         cfg = load_config(path)
@@ -32,6 +32,7 @@ def test_control_port_default() -> None:
 def test_control_port_custom() -> None:
     path = _write_cfg({
         "gateway": {"host": "127.0.0.1", "client_key": "test"},
+        "device": {"id": "test-device"},
         "control": {"port": 9000},
     })
     try:
