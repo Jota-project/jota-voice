@@ -18,8 +18,9 @@ class GatewayEvent:
 
 
 class GatewayClient:
-    def __init__(self, cfg: GatewayConfig) -> None:
+    def __init__(self, cfg: GatewayConfig, device_id: str = "unknown") -> None:
         self._cfg = cfg
+        self._device_id = device_id
         self._ws: Optional[Any] = None
 
     async def connect(self) -> None:
@@ -33,11 +34,12 @@ class GatewayClient:
             raise
         handshake = {
             "client_key": self._cfg.client_key,
+            "device_id": self._device_id,
             "input_mode": "audio",
             "output_mode": ["audio", "text", "status"],
         }
         await self._ws.send(json.dumps(handshake))
-        log.debug("Gateway conectado a %s", self._cfg.ws_url)
+        log.debug("Gateway conectado a %s (device=%s)", self._cfg.ws_url, self._device_id)
 
     async def disconnect(self) -> None:
         if self._ws:
