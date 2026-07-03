@@ -1,0 +1,44 @@
+gateway:
+  host: "green-house"
+  port: 8004
+  path: "/ws/stream"
+  client_key: "PEGA-AQUI-EL-UUID-DEL-PASO-1"
+  connect_timeout_s: 10
+
+device:
+  id: "macbook_sito"
+
+oww:
+  backend: "wyoming"
+  host: "127.0.0.1"           # Wyoming corre en Docker local en el Mac
+  port: 10401
+  wake_words:
+    - "ok_nabu"
+  reconnect_backoff_s: [5, 10, 20, 60]
+
+audio:
+  backend: "sounddevice"
+  sample_rate: 16000
+  channels: 1
+  frames_per_buffer: 512
+  preroll_seconds: 1.5
+  silence_timeout_s: 1.5
+  recording_timeout_s: 15.0
+  vad_rms_threshold: 200
+  input_device: null          # default mic
+  output_device: null         # default speakers
+
+display:
+  backend: "null"             # Mac no usa jota-display kiosk
+
+hosts:
+  - ip: "192.168.1.106"
+    name: "green-house"
+  - ip: "192.168.1.109"
+    name: "worker-01"
+
+logging:
+  level: "INFO"
+
+control:
+  port: 8765

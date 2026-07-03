@@ -1,5 +1,6 @@
 # Config de usuario (no versionar)
 config.yaml
+!devices/*/config.yaml
 .env.local
 jota-env.sh
 
