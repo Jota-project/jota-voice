@@ -40,23 +40,13 @@ case "$TARGET" in
         ;;
 
     phone)
-        REPO_LOCAL_TERMUX="${REPO_LOCAL_TERMUX:-/data/data/com.termux/files/home/work/jota-voice}"
-        DEVICE_DIR="$REPO_LOCAL_TERMUX/devices/hab_sito"
-
-        if [ ! -d "$DEVICE_DIR" ]; then
-            echo "ERROR: $DEVICE_DIR no existe en el teléfono. Crea devices/hab_sito/ primero."
-            exit 1
-        fi
-
-        echo "[deploy phone] rsync al teléfono (Termux) en $REPO_LOCAL_TERMUX…"
-        rsync -a --delete \
-            --exclude '.venv' --exclude '__pycache__' --exclude '.git' \
-            --exclude 'devices/*/.env' \
-            ./ "$REPO_LOCAL_TERMUX/"
-
-        echo "[deploy phone] reiniciando servicio en el teléfono…"
-        ssh phone "cd $REPO_LOCAL_TERMUX && ./install/termux/04-service.sh restart || true"
-        echo "[deploy phone] OK"
+        # TODO: restaurar la lógica phone original (rsync vía sshpass al Huawei
+        # vía Termux). El repo no tenía deploy.sh previamente; la lógica phone
+        # previa vivía en scripts de shell ad-hoc. Si necesitas el flujo phone
+        # exacto, revisa el historial de git antes de este refactor o el script
+        # de bootstrap que arrancaba jota-watchdog v2.
+        echo "[deploy phone] lógica phone pendiente de restaurar — usa los scripts ad-hoc previos"
+        exit 1
         ;;
 
     *)
