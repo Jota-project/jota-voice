@@ -161,6 +161,30 @@ class TestPlayChunk(unittest.IsolatedAsyncioTestCase):
         duration_tick = len(audio_1tick) / (24000 * 2)
         self.assertAlmostEqual(duration_tick, 0.05, places=10)
 
+    async def test_play_chunk_no_duplica_espera_del_backend(self) -> None:
+        """Si el backend ya bloquea la duración real del audio, PlaybackEngine no
+        debe esperar otra vez esa misma duración para animar el texto."""
+        engine, bus, captured = _make_engine()
+        engine.push_token("Texto de prueba para animar")
+
+        real_duration = 0.2
+
+        async def _slow_play_chunk(audio: bytes) -> None:
+            await asyncio.sleep(real_duration)
+
+        engine._audio.play_chunk = _slow_play_chunk
+
+        audio = _make_audio(real_duration)
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        await engine.play_chunk(audio)
+        elapsed = loop.time() - start
+
+        self.assertLess(
+            elapsed, real_duration * 1.6,
+            f"play_chunk tardó {elapsed:.3f}s (~doble de {real_duration}s) — bug de doble espera",
+        )
+
     async def test_reset_entre_turnos(self) -> None:
         """Después de reset, play_chunk del siguiente turno empieza desde cero."""
         engine, bus, captured = _make_engine()

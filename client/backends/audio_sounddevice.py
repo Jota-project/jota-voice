@@ -14,6 +14,7 @@ import threading
 import numpy as np
 
 from config import AudioConfig
+from .notification_tone import synth_notification_tone
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ class SounddeviceBackend:
         self._input_stream = None
         self._output_stream = None
         self._play_q: queue_mod.Queue[bytes] = queue_mod.Queue()
+        self._play_leftover: bytes | None = None
         self._capture_thread: threading.Thread | None = None
         self._capture_stop = threading.Event()
 
@@ -98,6 +100,7 @@ class SounddeviceBackend:
                 log.warning("SounddeviceBackend.stop output: %s", exc)
             self._output_stream = None
         # Drenar play queue
+        self._play_leftover = None
         while not self._play_q.empty():
             try:
                 self._play_q.get_nowait()
@@ -137,32 +140,33 @@ class SounddeviceBackend:
         if self._cfg.output_device is not None:
             out_kwargs["device"] = self._cfg.output_device
 
-        def _out_callback(outdata, frames, time, status):  # noqa: ARG001
-            try:
-                data = self._play_q.get_nowait()
-            except queue_mod.Empty:
-                outdata[:] = b"\x00\x00" * frames
-                return
-            arr = np.frombuffer(data, dtype=np.int16)
-            n = min(len(arr), frames)
-            outdata[:n, 0] = arr[:n]
-            if n < frames:
-                outdata[n:, 0] = 0
-
-        self._output_stream = sd.OutputStream(**out_kwargs, callback=_out_callback)
+        self._output_stream = sd.OutputStream(**out_kwargs, callback=self._out_callback)
         self._output_stream.start()
 
+    def _out_callback(self, outdata, frames, time, status) -> None:  # noqa: ARG002
+        if status:
+            log.warning("SounddeviceBackend playback status: %s", status)
+        written = 0
+        while written < frames:
+            if self._play_leftover is not None:
+                chunk = self._play_leftover
+                self._play_leftover = None
+            else:
+                try:
+                    chunk = self._play_q.get_nowait()
+                except queue_mod.Empty:
+                    break
+            arr = np.frombuffer(chunk, dtype=np.int16)
+            n = min(len(arr), frames - written)
+            outdata[written:written + n, 0] = arr[:n]
+            written += n
+            if n < len(arr):
+                self._play_leftover = arr[n:].tobytes()
+        if written < frames:
+            outdata[written:, 0] = 0
+
     async def play_notification(self) -> None:
-        rate = _TTS_SAMPLE_RATE
-        segments = []
-        for freq, dur in [(587.0, 0.10), (880.0, 0.18)]:
-            n = int(rate * dur)
-            t = np.linspace(0, dur, n, endpoint=False)
-            envelope = np.exp(-t * 18.0)
-            tone = np.sin(2 * np.pi * freq * t) * 0.6 + np.sin(2 * np.pi * freq * 2 * t) * 0.2
-            segments.append((tone * envelope * 32767 * 0.9).astype(np.int16))
-            segments.append(np.zeros(int(rate * 0.03), dtype=np.int16))
-        wave = np.concatenate(segments).tobytes()
+        wave = synth_notification_tone(_TTS_SAMPLE_RATE)
         await self._enqueue_and_wait(wave)
 
     async def play_chunk(self, audio: bytes) -> None:
@@ -190,6 +194,7 @@ class SounddeviceBackend:
                 log.warning("SounddeviceBackend.drain close: %s", exc)
             self._output_stream = None
         # Vaciar play queue
+        self._play_leftover = None
         while not self._play_q.empty():
             try:
                 self._play_q.get_nowait()
@@ -199,6 +204,7 @@ class SounddeviceBackend:
     def reset(self) -> None:
         with self._lock:
             self._preroll.clear()
+        self._play_leftover = None
         while not self._play_q.empty():
             try:
                 self._play_q.get_nowait()

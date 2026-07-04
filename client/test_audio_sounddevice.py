@@ -73,3 +73,32 @@ def test_reset_clears_preroll() -> None:
     be._preroll.append(_tone_frame())
     be.reset()
     assert be.get_preroll() == b""
+
+
+def test_out_callback_cola_vacia_rellena_silencio() -> None:
+    """Bug: outdata[:] = bytes crudos lanzaba ValueError en vez de escribir silencio."""
+    be = SounddeviceBackend(_cfg())
+    frames = 8
+    outdata = np.ones((frames, 1), dtype=np.int16)
+    be._out_callback(outdata, frames, None, None)  # no debe lanzar
+    assert np.all(outdata == 0)
+
+
+def test_out_callback_no_trunca_chunk_mayor_que_frames() -> None:
+    """Bug: un chunk TTS más grande que `frames` perdía silenciosamente el resto."""
+    be = SounddeviceBackend(_cfg())
+    frames = 4
+    chunk = np.arange(1, 11, dtype=np.int16).tobytes()  # 10 samples, > frames
+    be._play_q.put(chunk)
+
+    outdata1 = np.zeros((frames, 1), dtype=np.int16)
+    be._out_callback(outdata1, frames, None, None)
+    assert list(outdata1.ravel()) == [1, 2, 3, 4]
+
+    outdata2 = np.zeros((frames, 1), dtype=np.int16)
+    be._out_callback(outdata2, frames, None, None)
+    assert list(outdata2.ravel()) == [5, 6, 7, 8]
+
+    outdata3 = np.zeros((frames, 1), dtype=np.int16)
+    be._out_callback(outdata3, frames, None, None)
+    assert list(outdata3.ravel()) == [9, 10, 0, 0]

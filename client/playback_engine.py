@@ -48,9 +48,7 @@ class PlaybackEngine:
         )
         full_text = "".join(self._text_buffer)
 
-        async with self._play_lock:
-            await self._audio.play_chunk(audio)
-
+        async def _animate_text() -> None:
             for i in range(n_ticks):
                 await asyncio.sleep(tick)
                 if chars_per_second > 0:
@@ -62,6 +60,12 @@ class PlaybackEngine:
                 self._bus.publish(
                     VoiceEvent(type="display_text_update", data={"text": visible})
                 )
+
+        async with self._play_lock:
+            # El backend ya bloquea la duración real del audio (escritura a
+            # hardware o sleep interno); animar el texto en paralelo evita
+            # esperar la misma duración dos veces.
+            await asyncio.gather(self._audio.play_chunk(audio), _animate_text())
 
     async def play_notification(self) -> None:
         async with self._play_lock:
