@@ -731,5 +731,18 @@ def test_state_machine_cancel_responding() -> None:
     asyncio.run(_run_cancel_responding_test())
 
 
+def test_idle_type_hints_resolve() -> None:
+    """_idle()/_recording() deben anotar audio con AudioBackend (importado), no
+    con el AudioCapture obsoleto que ya no se importa en el módulo."""
+    import typing
+    import state_machine
+
+    hints = typing.get_type_hints(state_machine._idle)
+    assert hints["audio"] is state_machine.AudioBackend
+
+    hints = typing.get_type_hints(state_machine._recording)
+    assert hints["audio"] is state_machine.AudioBackend
+
+
 if __name__ == "__main__":
     asyncio.run(_run_all())

@@ -33,10 +33,11 @@ def _apply_termux_hosts() -> None:
     """
     import socket
 
-    TERMUX_HOSTS = "/data/data/com.termux/files/usr/etc/hosts"
+    from backends.platform_detect import TERMUX_HOSTS_PATH
+
     _table: dict[str, str] = {}
     try:
-        with open(TERMUX_HOSTS) as fh:
+        with open(TERMUX_HOSTS_PATH) as fh:
             for line in fh:
                 line = line.split("#")[0].strip()
                 parts = line.split()

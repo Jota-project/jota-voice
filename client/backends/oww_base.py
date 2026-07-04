@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Callable, Coroutine, Protocol, runtime_checkable
 
+from .audio_base import AudioBackend
+
 
 @runtime_checkable
 class OwWBackend(Protocol):
@@ -18,6 +20,6 @@ class OwWBackend(Protocol):
     async def wait_for_detection(self) -> str: ...
     async def run_forever(
         self,
-        audio: "AudioBackend",
+        audio: AudioBackend,
         on_wake_word: Callable[[str], Coroutine],
     ) -> None: ...

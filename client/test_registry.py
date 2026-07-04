@@ -18,8 +18,8 @@ def _cfg(audio_backend: str | None = None, display_backend: str | None = None) -
 
 
 def test_make_audio_unsupported_os(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry, "is_termux", lambda: False)
     monkeypatch.setattr(registry.sys, "platform", "win32")
-    monkeypatch.delenv("PREFIX", raising=False)
     with pytest.raises(ConfigError, match="SO no soportado"):
         registry.make_audio(_cfg())
 
@@ -42,15 +42,15 @@ def test_make_audio_sounddevice_override(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_make_audio_default_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry, "is_termux", lambda: False)
     monkeypatch.setattr(registry.sys, "platform", "darwin")
-    monkeypatch.delenv("PREFIX", raising=False)
     inst = registry.make_audio(_cfg())
     assert inst.__class__.__name__ == "SounddeviceBackend"
 
 
 def test_make_audio_default_termux(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry, "is_termux", lambda: True)
     monkeypatch.setattr(registry.sys, "platform", "linux")
-    monkeypatch.setenv("PREFIX", "/data/data/com.termux/files/usr")
     inst = registry.make_audio(_cfg())
     assert inst.__class__.__name__ == "TermuxBackend"
 
@@ -83,3 +83,18 @@ def test_make_display_null_override() -> None:
 def test_make_display_unknown_backend() -> None:
     with pytest.raises(ConfigError, match="display backend desconocido"):
         registry.make_display(_cfg(display_backend="mqtt"))
+
+
+def test_make_oww_wyoming_default() -> None:
+    inst = registry.make_oww(_cfg(), on_wake_word=None)
+    assert inst.__class__.__name__ == "WyomingBackend"
+
+
+def test_make_oww_unknown_backend() -> None:
+    cfg = Config(
+        gateway=GatewayConfig(host="127.0.0.1", client_key="x"),
+        device=DeviceConfig(id="test"),
+        oww=OWWConfig(backend="mqtt"),
+    )
+    with pytest.raises(ConfigError, match="oww backend desconocido"):
+        registry.make_oww(cfg, on_wake_word=None)

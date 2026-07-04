@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # deploy.sh — despliega jota-voice al target indicado (phone | macbook)
 #
-# Uso: ./deploy.sh [phone|macbook]
+# Uso: ./deploy.sh phone [device_name]
+#      ./deploy.sh macbook
 #
-# phone   -> rsync al teléfono Android vía Termux (ssh) y reinicia el servicio.
+# phone   -> rsync al teléfono Android vía Termux (ssh) y reinicia jota-voice
+#            vía supervisorctl. Lee credenciales de devices/<device_name>.env
+#            (ver devices/example.env). Si solo hay un devices/*.env, se
+#            autodetecta.
 # macbook -> rsync local a $HOME/Work/jota-voice y reinicia el launchd service.
 
 set -euo pipefail
 
+REPO_LOCAL_SELF="$(cd "$(dirname "$0")" && pwd)"
 TARGET="${1:-phone}"
 
 case "$TARGET" in
@@ -40,13 +45,78 @@ case "$TARGET" in
         ;;
 
     phone)
-        # TODO: restaurar la lógica phone original (rsync vía sshpass al Huawei
-        # vía Termux). El repo no tenía deploy.sh previamente; la lógica phone
-        # previa vivía en scripts de shell ad-hoc. Si necesitas el flujo phone
-        # exacto, revisa el historial de git antes de este refactor o el script
-        # de bootstrap que arrancaba jota-watchdog v2.
-        echo "[deploy phone] lógica phone pendiente de restaurar — usa los scripts ad-hoc previos"
-        exit 1
+        DEVICES_DIR="$REPO_LOCAL_SELF/devices"
+        DEVICE_NAME="${2:-}"
+
+        if [ -z "$DEVICE_NAME" ]; then
+            CANDIDATES=()
+            for f in "$DEVICES_DIR"/*.env; do
+                [ -f "$f" ] || continue
+                [ "$(basename "$f")" = "example.env" ] && continue
+                CANDIDATES+=("$f")
+            done
+            case "${#CANDIDATES[@]}" in
+                0)
+                    echo "ERROR: no hay ningún devices/*.env. Copia devices/example.env a devices/<nombre>.env y rellénalo."
+                    exit 1
+                    ;;
+                1)
+                    DEVICE_NAME="$(basename "${CANDIDATES[0]}" .env)"
+                    ;;
+                *)
+                    echo "ERROR: hay varios dispositivos en devices/*.env. Especifica uno:"
+                    echo "  ./deploy.sh phone <nombre>"
+                    echo "Disponibles:"
+                    for f in "${CANDIDATES[@]}"; do echo "  - $(basename "$f" .env)"; done
+                    exit 1
+                    ;;
+            esac
+        fi
+
+        DEVICE_ENV="$DEVICES_DIR/${DEVICE_NAME}.env"
+        if [ ! -f "$DEVICE_ENV" ]; then
+            echo "ERROR: $DEVICE_ENV no existe."
+            exit 1
+        fi
+
+        command -v sshpass >/dev/null 2>&1 || {
+            echo "ERROR: falta sshpass (brew install sshpass / pkg install sshpass)."
+            exit 1
+        }
+
+        set -a
+        # shellcheck disable=SC1090
+        . "$DEVICE_ENV"
+        set +a
+
+        for var in PHONE_HOST PHONE_PORT PHONE_USER PHONE_PASS PHONE_DIR; do
+            eval val=\$$var
+            if [ -z "$val" ]; then
+                echo "ERROR: $var no definida en $DEVICE_ENV"
+                exit 1
+            fi
+        done
+
+        PHONE_TARGET="${PHONE_USER}@${PHONE_HOST}"
+
+        _phone_ssh() {
+            sshpass -p "$PHONE_PASS" ssh -p "$PHONE_PORT" "$PHONE_TARGET" "$@"
+        }
+        _phone_rsync() {
+            sshpass -p "$PHONE_PASS" rsync -a --delete \
+                -e "ssh -p $PHONE_PORT" \
+                --exclude '.git' --exclude '.venv' --exclude '__pycache__' \
+                --exclude 'config.yaml' --exclude 'devices' \
+                "$@"
+        }
+
+        echo "[deploy phone:${DEVICE_NAME}] sincronizando con ${PHONE_TARGET}:${PHONE_DIR}…"
+        _phone_ssh "mkdir -p '$PHONE_DIR'"
+        _phone_rsync "$REPO_LOCAL_SELF/" "${PHONE_TARGET}:${PHONE_DIR}/"
+
+        echo "[deploy phone:${DEVICE_NAME}] reiniciando jota-voice vía supervisorctl…"
+        _phone_ssh 'supervisorctl -c "$HOME/supervisord.conf" restart jota-voice'
+        echo "[deploy phone:${DEVICE_NAME}] OK"
         ;;
 
     *)

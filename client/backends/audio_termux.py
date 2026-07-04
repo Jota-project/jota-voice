@@ -7,12 +7,13 @@ from __future__ import annotations
 import asyncio
 import logging
 
-import numpy as np
-
 from config import AudioConfig
 from audio_capture import AudioCapture
+from .notification_tone import synth_notification_tone
 
 log = logging.getLogger(__name__)
+
+_TTS_SAMPLE_RATE = 24000  # PCM16 mono del gateway
 
 
 def _require_pyaudio():
@@ -66,16 +67,7 @@ class TermuxBackend:
 
     async def play_notification(self) -> None:
         """Beep de notificación (dos tonos ascendentes, ~300ms total)."""
-        rate = 24000
-        segments = []
-        for freq, dur in [(587.0, 0.10), (880.0, 0.18)]:
-            n = int(rate * dur)
-            t = np.linspace(0, dur, n, endpoint=False)
-            envelope = np.exp(-t * 18.0)
-            tone = np.sin(2 * np.pi * freq * t) * 0.6 + np.sin(2 * np.pi * freq * 2 * t) * 0.2
-            segments.append((tone * envelope * 32767 * 0.9).astype(np.int16))
-            segments.append(np.zeros(int(rate * 0.03), dtype=np.int16))
-        wave = np.concatenate(segments).tobytes()
+        wave = synth_notification_tone(_TTS_SAMPLE_RATE)
         await self._play(wave)
 
     async def play_chunk(self, audio: bytes) -> None:
@@ -90,7 +82,7 @@ class TermuxBackend:
                 self._stream = self._pa.open(
                     format=pyaudio.paInt16,
                     channels=1,
-                    rate=24000,
+                    rate=_TTS_SAMPLE_RATE,
                     output=True,
                 )
             loop = asyncio.get_running_loop()

@@ -25,7 +25,6 @@ from typing import Optional
 import numpy as np
 
 from backends.audio_base import AudioBackend
-from backends.oww_base import OwWBackend  # noqa: F401  (used in type hints / future)
 from config import Config
 from event_bus import EventBus, VoiceEvent
 from gateway_client import GatewayClient
@@ -51,7 +50,7 @@ async def _safe_send_cancel(gateway: GatewayClient) -> None:
 async def _idle(
     cfg: Config,
     bus: EventBus,
-    audio: AudioCapture,
+    audio: AudioBackend,
     cancel_event: asyncio.Event,
 ) -> str:
     """
@@ -159,7 +158,7 @@ async def _consume_wake(bus: EventBus) -> str:
 async def _recording(
     wake_word: str,
     bus: EventBus,
-    audio: AudioCapture,
+    audio: AudioBackend,
     gateway: GatewayClient,
     playback: PlaybackEngine,
     cfg: Config,
