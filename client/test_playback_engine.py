@@ -22,7 +22,7 @@ _HERE = os.path.dirname(__file__)
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from event_bus import EventBus, VoiceEvent  # noqa: E402
+from domain.event_bus import EventBus, VoiceEvent  # noqa: E402
 from playback_engine import PlaybackEngine   # noqa: E402
 
 

@@ -77,12 +77,12 @@ def _apply_termux_hosts() -> None:
 _apply_termux_hosts()
 
 from config import load_config
-from event_bus import EventBus, VoiceEvent
+from domain.event_bus import EventBus, VoiceEvent
+from domain.state_machine import run as sm_run
 from backends import registry
 from backends.gateway_client import GatewayClient
 from playback_engine import PlaybackEngine
 from display_client import DisplayClient
-from state_machine import run as sm_run
 import control_server
 
 

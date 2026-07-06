@@ -7,7 +7,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from event_bus import EventBus, VoiceEvent
+from domain.event_bus import EventBus, VoiceEvent
 
 log = logging.getLogger(__name__)
 

@@ -6,13 +6,8 @@ Ambos deben recibir todos los eventos en el mismo orden.
 """
 
 import asyncio
-import sys
-import os
 
-# Permite ejecutar desde cualquier directorio
-sys.path.insert(0, os.path.dirname(__file__))
-
-from event_bus import EventBus, VoiceEvent
+from domain.event_bus import EventBus, VoiceEvent
 
 
 async def _run_test() -> None:
@@ -95,9 +90,4 @@ async def _run_test() -> None:
 
 
 def test_event_bus() -> None:
-    """Entry point compatible con pytest y ejecución directa."""
     asyncio.run(_run_test())
-
-
-if __name__ == "__main__":
-    test_event_bus()

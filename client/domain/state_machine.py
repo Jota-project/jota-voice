@@ -25,10 +25,11 @@ from typing import Optional
 import numpy as np
 
 from backends.audio_base import AudioBackend
-from config import Config
-from event_bus import EventBus, VoiceEvent
 from backends.gateway_client import GatewayClient
+from config import Config
 from playback_engine import PlaybackEngine
+
+from .event_bus import EventBus, VoiceEvent
 
 log = logging.getLogger(__name__)
 

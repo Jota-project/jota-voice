@@ -68,13 +68,8 @@ def _install_stubs() -> None:
 
 _install_stubs()
 
-# Añadir client/ al sys.path para importar módulos locales
-_here = os.path.dirname(__file__)  # .../client
-if _here not in sys.path:
-    sys.path.insert(0, _here)
-
 # Importar módulos del proyecto
-from event_bus import EventBus, VoiceEvent                              # noqa: E402
+from domain.event_bus import EventBus, VoiceEvent                       # noqa: E402
 from config import Config, GatewayConfig, AudioConfig, OWWConfig, DeviceConfig  # noqa: E402
 from backends.gateway_client import GatewayEvent                        # noqa: E402
 
@@ -219,7 +214,7 @@ async def _run_e2e_test() -> None:
 
     watcher_task = asyncio.create_task(_watcher())
 
-    from state_machine import run as sm_run
+    from domain.state_machine import run as sm_run
 
     sm_task = asyncio.create_task(sm_run(cfg, bus, audio, gateway, playback))
 
@@ -362,7 +357,7 @@ async def _run_error_test() -> None:
 
     collector_task = asyncio.create_task(_collector())
 
-    from state_machine import run as sm_run
+    from domain.state_machine import run as sm_run
 
     sm_task = asyncio.create_task(sm_run(cfg, bus, audio, gateway, playback))
 
@@ -432,7 +427,7 @@ async def _run_idle_timeout_test() -> None:
 
     collector_task = asyncio.create_task(_collector())
 
-    from state_machine import run as sm_run
+    from domain.state_machine import run as sm_run
 
     sm_task = asyncio.create_task(sm_run(cfg, bus, audio, gateway, playback))
 
@@ -520,7 +515,7 @@ async def _run_cancel_recording_test() -> None:
     collector_task = asyncio.create_task(_collector())
     watcher_task = asyncio.create_task(_watcher())
 
-    from state_machine import run as sm_run
+    from domain.state_machine import run as sm_run
 
     sm_task = asyncio.create_task(
         sm_run(cfg, bus, audio, gateway, playback, cancel_event)
@@ -641,7 +636,7 @@ async def _run_cancel_responding_test() -> None:
     collector_task = asyncio.create_task(_collector())
     watcher_task = asyncio.create_task(_watcher())
 
-    from state_machine import run as sm_run
+    from domain.state_machine import run as sm_run
 
     sm_task = asyncio.create_task(
         sm_run(cfg, bus, audio, gateway, playback, cancel_event)
@@ -735,7 +730,7 @@ def test_idle_type_hints_resolve() -> None:
     """_idle()/_recording() deben anotar audio con AudioBackend (importado), no
     con el AudioCapture obsoleto que ya no se importa en el módulo."""
     import typing
-    import state_machine
+    from domain import state_machine
 
     hints = typing.get_type_hints(state_machine._idle)
     assert hints["audio"] is state_machine.AudioBackend

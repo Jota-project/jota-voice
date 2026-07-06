@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from event_bus import EventBus, VoiceEvent
+from domain.event_bus import EventBus, VoiceEvent
 
 log = logging.getLogger(__name__)
 

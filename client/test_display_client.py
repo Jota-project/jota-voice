@@ -11,7 +11,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from event_bus import EventBus, VoiceEvent
+from domain.event_bus import EventBus, VoiceEvent
 from display_client import DisplayClient
 
 
