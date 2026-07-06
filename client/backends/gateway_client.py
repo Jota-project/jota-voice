@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass
 from typing import AsyncGenerator, Optional, Any
 
@@ -9,6 +10,22 @@ import websockets
 from config import GatewayConfig
 
 log = logging.getLogger(__name__)
+
+
+def _cloudflare_access_headers() -> dict[str, str]:
+    """Cabeceras de Service Token para Cloudflare Access, si están configuradas.
+
+    Desactivado por defecto; se activa poniendo CF_ACCESS_CLIENT_ID y
+    CF_ACCESS_CLIENT_SECRET (p.ej. en devices/<id>/.env, ver config.py).
+    """
+    client_id = os.environ.get("CF_ACCESS_CLIENT_ID")
+    client_secret = os.environ.get("CF_ACCESS_CLIENT_SECRET")
+    if client_id and client_secret:
+        return {
+            "CF-Access-Client-Id": client_id,
+            "CF-Access-Client-Secret": client_secret,
+        }
+    return {}
 
 
 @dataclass
@@ -24,9 +41,10 @@ class GatewayClient:
         self._ws: Optional[Any] = None
 
     async def connect(self) -> None:
+        headers = _cloudflare_access_headers()
         try:
             self._ws = await asyncio.wait_for(
-                websockets.connect(self._cfg.ws_url),
+                websockets.connect(self._cfg.ws_url, additional_headers=headers or None),
                 timeout=self._cfg.connect_timeout_s,
             )
         except asyncio.TimeoutError:

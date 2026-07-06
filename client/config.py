@@ -2,7 +2,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
+import os
 import yaml
+
+
+def _load_env_file(path: Path) -> None:
+    """Carga variables KEY=VALUE de un .env sin pisar las ya definidas en el entorno."""
+    if not path.is_file():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip())
 
 
 @dataclass
@@ -142,6 +155,8 @@ def _control_from_dict(d: dict) -> ControlConfig:
 
 
 def load_config(path: str | Path) -> Config:
+    real_path = Path(path).resolve()
+    _load_env_file(real_path.parent / ".env")
     with open(path) as f:
         data = yaml.safe_load(f)
     if "gateway" not in data:

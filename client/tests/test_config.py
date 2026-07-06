@@ -77,3 +77,37 @@ def test_load_config_rechaza_gateway_sin_url_ni_host() -> None:
             pass
     finally:
         os.unlink(path)
+
+
+def test_load_config_carga_env_sibling_si_existe(monkeypatch) -> None:
+    monkeypatch.delenv("CF_ACCESS_CLIENT_ID", raising=False)
+    with tempfile.TemporaryDirectory() as workdir:
+        cfg_path = os.path.join(workdir, "config.yaml")
+        with open(cfg_path, "w") as f:
+            yaml.dump(
+                {"gateway": {"host": "127.0.0.1", "client_key": "test"}, "device": {"id": "test-device"}},
+                f,
+            )
+        with open(os.path.join(workdir, ".env"), "w") as f:
+            f.write("CF_ACCESS_CLIENT_ID=from-dotenv\n")
+
+        from config import load_config
+        load_config(cfg_path)
+        assert os.environ.get("CF_ACCESS_CLIENT_ID") == "from-dotenv"
+
+
+def test_load_config_no_pisa_variable_de_entorno_ya_definida(monkeypatch) -> None:
+    monkeypatch.setenv("CF_ACCESS_CLIENT_ID", "ya-estaba")
+    with tempfile.TemporaryDirectory() as workdir:
+        cfg_path = os.path.join(workdir, "config.yaml")
+        with open(cfg_path, "w") as f:
+            yaml.dump(
+                {"gateway": {"host": "127.0.0.1", "client_key": "test"}, "device": {"id": "test-device"}},
+                f,
+            )
+        with open(os.path.join(workdir, ".env"), "w") as f:
+            f.write("CF_ACCESS_CLIENT_ID=from-dotenv\n")
+
+        from config import load_config
+        load_config(cfg_path)
+        assert os.environ.get("CF_ACCESS_CLIENT_ID") == "ya-estaba"
