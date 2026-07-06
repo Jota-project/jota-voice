@@ -4,6 +4,14 @@
 set -e
 . "$(dirname "$0")/00-lib.sh"
 
+# Si el dispositivo por defecto ya tiene config, no preguntamos nada —
+# ni siquiera el device id (evita romper una ejecución no interactiva).
+DEFAULT_CFG="$REPO_DIR/devices/$DEVICE_ID/config.yaml"
+if [ -f "$DEFAULT_CFG" ]; then
+    _ok "$DEFAULT_CFG ya existe, no se toca (bórralo a mano si quieres regenerarlo)"
+    exit 0
+fi
+
 printf "  device id [%s]: " "$DEVICE_ID"
 read -r INPUT_ID
 ID="${INPUT_ID:-$DEVICE_ID}"
