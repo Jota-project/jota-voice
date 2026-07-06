@@ -7,14 +7,17 @@ import yaml
 
 @dataclass
 class GatewayConfig:
-    host: str
     client_key: str
+    host: str = ""
     port: int = 8004
     path: str = "/ws/stream"
     connect_timeout_s: float = 10.0
+    url: Optional[str] = None
 
     @property
     def ws_url(self) -> str:
+        if self.url:
+            return self.url
         return f"ws://{self.host}:{self.port}{self.path}"
 
 
@@ -76,16 +79,17 @@ class Config:
 
 
 def _gateway_from_dict(d: dict) -> GatewayConfig:
-    required = {"host", "client_key"}
-    missing = required - d.keys()
-    if missing:
-        raise ValueError(f"config.yaml: faltan campos en gateway: {missing}")
+    if "client_key" not in d:
+        raise ValueError("config.yaml: falta client_key en gateway")
+    if "url" not in d and "host" not in d:
+        raise ValueError("config.yaml: gateway necesita 'url' o 'host'")
     return GatewayConfig(
-        host=d["host"],
         client_key=d["client_key"],
+        host=d.get("host", ""),
         port=int(d.get("port", 8004)),
         path=d.get("path", "/ws/stream"),
         connect_timeout_s=float(d.get("connect_timeout_s", 10.0)),
+        url=d.get("url"),
     )
 
 

@@ -1,7 +1,11 @@
 gateway:
+  # Opción A: host + port + path (WebSocket directo, sin proxy)
   host: "green-house"
   port: 8004
   path: "/ws/stream"
+  # Opción B: url completa (proxy inverso / túnel). Si se define, tiene
+  # prioridad sobre host/port/path — bórralos si usas esta opción.
+  # url: "wss://tu-dominio.com/api/gateway/ws/stream"
   client_key: "RELLENAR"
   connect_timeout_s: 10
 
