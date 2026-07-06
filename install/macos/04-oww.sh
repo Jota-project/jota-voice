@@ -6,14 +6,13 @@ set -e
 CONTAINER_NAME="wyoming-oww"
 IMAGE="rhasspy/wyoming-openwakeword"
 PORT=10401
-DATA_DIR="$HOME/wyoming-data"
 
 _info "Asegurando imagen $IMAGE…"
 docker pull "$IMAGE" >/dev/null
 _ok "Imagen actualizada"
 
-_info "Creando directorio de datos $DATA_DIR…"
-mkdir -p "$DATA_DIR"
+_info "Creando directorio de datos $OWW_DATA_DIR…"
+mkdir -p "$OWW_DATA_DIR"
 
 # Si ya existe el contenedor, asegúrate de que está corriendo.
 if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
@@ -21,14 +20,18 @@ if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     docker start "$CONTAINER_NAME" >/dev/null
 else
     _info "Creando contenedor $CONTAINER_NAME…"
+    # --model/--preload-model están deprecados en wyoming-openwakeword;
+    # --custom-model-dir carga cualquier .tflite que encuentre en /data
+    # (verificado: reporta "Found custom model <nombre> at /data/<nombre>.tflite").
     docker run -d \
         --name "$CONTAINER_NAME" \
         --restart unless-stopped \
         -p "${PORT}:${PORT}" \
-        -v "${DATA_DIR}:/data" \
+        -v "${OWW_DATA_DIR}:/data" \
         "$IMAGE" \
-        --model ok_nabu \
-        --uri "tcp://0.0.0.0:${PORT}"
+        --uri "tcp://0.0.0.0:${PORT}" \
+        --custom-model-dir /data \
+        --threshold 0.3
 fi
 _ok "Contenedor $CONTAINER_NAME arrancado"
 
