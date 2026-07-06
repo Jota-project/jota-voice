@@ -79,7 +79,7 @@ _apply_termux_hosts()
 from config import load_config
 from event_bus import EventBus, VoiceEvent
 from backends import registry
-from gateway_client import GatewayClient
+from backends.gateway_client import GatewayClient
 from playback_engine import PlaybackEngine
 from display_client import DisplayClient
 from state_machine import run as sm_run

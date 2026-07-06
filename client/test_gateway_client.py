@@ -24,7 +24,7 @@ if _here not in sys.path:
     sys.path.insert(0, _here)
 
 from config import GatewayConfig
-from gateway_client import GatewayClient
+from backends.gateway_client import GatewayClient
 
 
 async def _test_send_cancel_envia_mensaje() -> None:

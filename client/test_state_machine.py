@@ -76,7 +76,7 @@ if _here not in sys.path:
 # Importar módulos del proyecto
 from event_bus import EventBus, VoiceEvent                              # noqa: E402
 from config import Config, GatewayConfig, AudioConfig, OWWConfig, DeviceConfig  # noqa: E402
-from gateway_client import GatewayEvent                                 # noqa: E402
+from backends.gateway_client import GatewayEvent                        # noqa: E402
 
 
 # ---------------------------------------------------------------------------
