@@ -13,7 +13,7 @@ from config import ControlConfig
 
 
 async def _test_post_cancel_activa_evento() -> None:
-    import control_server
+    from app import control_server
 
     cancel_event = asyncio.Event()
     cfg = ControlConfig(port=18765)
@@ -47,7 +47,7 @@ async def _test_post_cancel_activa_evento() -> None:
 
 
 async def _test_endpoint_desconocido_retorna_404() -> None:
-    import control_server
+    from app import control_server
 
     cancel_event = asyncio.Event()
     cfg = ControlConfig(port=18766)
@@ -76,7 +76,7 @@ async def _test_endpoint_desconocido_retorna_404() -> None:
 
 
 async def _test_puerto_ocupado_no_crashea() -> None:
-    import control_server
+    from app import control_server
 
     # Ocupar el puerto manualmente
     blocker = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 18767)

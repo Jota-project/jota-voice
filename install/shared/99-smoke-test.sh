@@ -247,7 +247,7 @@ if [ "$PASSED" -eq "$TOTAL" ]; then
     echo ""
     echo "  Si wake-word no dispara, prueba:"
     echo "    launchctl bootout gui/\$(id -u)/com.jota.voice"
-    echo "    ~/venvs/jota-voice/bin/python3 $REPO_DIR/client/voice_client.py \"\$CONFIG\""
+    echo "    ~/venvs/jota-voice/bin/python3 $REPO_DIR/client/app/voice_client.py \"\$CONFIG\""
     echo "════════════════════════════════════════════════════════════"
     exit 0
 else

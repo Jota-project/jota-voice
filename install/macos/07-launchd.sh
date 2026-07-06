@@ -30,7 +30,7 @@ cat > "$PLIST" <<EOF
     <key>ProgramArguments</key>
     <array>
         <string>${PYTHON_BIN}</string>
-        <string>${REPO_DIR}/client/voice_client.py</string>
+        <string>${REPO_DIR}/client/app/voice_client.py</string>
         <string>${CONFIG}</string>
     </array>
     <key>EnvironmentVariables</key>

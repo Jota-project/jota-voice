@@ -27,9 +27,9 @@ import numpy as np
 from backends.audio_base import AudioBackend
 from backends.gateway_client import GatewayClient
 from config import Config
-from playback_engine import PlaybackEngine
 
 from .event_bus import EventBus, VoiceEvent
+from app.playback_engine import PlaybackEngine
 
 log = logging.getLogger(__name__)
 

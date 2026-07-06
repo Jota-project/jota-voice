@@ -12,7 +12,7 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 
 from domain.event_bus import EventBus, VoiceEvent
-from display_client import DisplayClient
+from app.display_client import DisplayClient
 
 
 async def _run_test() -> None:

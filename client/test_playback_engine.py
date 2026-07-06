@@ -23,7 +23,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from domain.event_bus import EventBus, VoiceEvent  # noqa: E402
-from playback_engine import PlaybackEngine   # noqa: E402
+from app.playback_engine import PlaybackEngine   # noqa: E402
 
 
 # ---------------------------------------------------------------------------

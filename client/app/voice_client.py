@@ -7,7 +7,7 @@ Instancia los backends vía registry, crea el EventBus, arranca tareas:
 - state_machine.run() como loop principal
 - Gestión de señales (SIGTERM/SIGINT → shutdown limpio)
 
-Uso: python client/voice_client.py config.yaml
+Uso: python client/app/voice_client.py config.yaml
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ import signal
 import sys
 from pathlib import Path
 
-_HERE = Path(__file__).resolve().parent  # .../client
+_HERE = Path(__file__).resolve().parent.parent  # .../client (voice_client.py ahora vive en client/app/)
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
@@ -81,9 +81,10 @@ from domain.event_bus import EventBus, VoiceEvent
 from domain.state_machine import run as sm_run
 from backends import registry
 from backends.gateway_client import GatewayClient
-from playback_engine import PlaybackEngine
-from display_client import DisplayClient
-import control_server
+
+from .playback_engine import PlaybackEngine
+from .display_client import DisplayClient
+from . import control_server
 
 
 def _setup_logging(level: str) -> None:

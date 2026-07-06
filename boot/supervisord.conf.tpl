@@ -70,7 +70,7 @@ priority=6
 
 [program:jota-voice]
 command=%(ENV_HOME)s/jota-voice/.venv/bin/python3
-    %(ENV_HOME)s/jota-voice/client/voice_client.py
+    %(ENV_HOME)s/jota-voice/client/app/voice_client.py
     %(ENV_HOME)s/jota-voice/config.yaml
 directory=%(ENV_HOME)s/jota-voice
 environment=PULSE_RUNTIME_PATH="%(ENV_HOME)s/.pulse"
