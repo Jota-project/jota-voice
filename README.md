@@ -29,16 +29,22 @@ AudioBackend   DisplayBackend   OwWBackend
 ## Setup rápido
 
 ```bash
-# En el teléfono (Termux)
+# En el teléfono (Termux) — primera vez
 git clone https://github.com/Jota-project/jota-voice.git ~/jota-voice && cd ~/jota-voice
-sh install.sh
-nano config.yaml          # rellenar client_key y IPs
+cp config.example.yaml devices/<id>/config.yaml && nano devices/<id>/config.yaml   # client_key, IPs
+sh install.sh              # install/06-configs.sh crea el symlink config.yaml → devices/<id>/config.yaml
 python client/voice_client.py config.yaml
 
-# Desde el Mac — deploy
-cp .env.local.example .env.local && nano .env.local
-bash deploy.sh
+# Desde el Mac — deploy a un dispositivo ya configurado
+cp devices/example.env devices/<nombre>.env && nano devices/<nombre>.env   # credenciales SSH
+bash deploy.sh phone <nombre>
 ```
+
+`devices/<id>/config.yaml` nunca se trackea en git (contiene el `client_key`
+real) — cada usuario/dispositivo crea el suyo a partir de
+`config.example.yaml`. `devices/<nombre>.env` tampoco se trackea — son las
+credenciales SSH que usa `deploy.sh` para llegar a ese dispositivo desde el
+Mac.
 
 ### macOS (MacBook)
 
@@ -103,8 +109,9 @@ install/
   macos/                      # scripts de instalación en macOS
   docs/                       # documentación técnica (spec, arquitectura, kiosk, nginx...)
 devices/
-  macbook_sito/                # config macOS (directorio + config.yaml)
-  hab_sito.env                 # config del teléfono Huawei (legacy, fichero plano)
-deploy.sh                     # --target phone|macbook
-config.example.yaml           # plantilla de configuración
+  <id>/config.yaml             # identidad real de un dispositivo (gitignored, una por Mac/Termux)
+  <nombre>.env                 # credenciales SSH para deploy.sh phone <nombre> (gitignored)
+  example.env                  # plantilla de <nombre>.env (trackeada)
+deploy.sh                     # phone [<nombre>] | macbook
+config.example.yaml           # plantilla de devices/<id>/config.yaml (trackeada)
 ```
