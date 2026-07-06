@@ -694,15 +694,6 @@ async def _run_cancel_responding_test() -> None:
 # Entry points (pytest + ejecución directa)
 # ---------------------------------------------------------------------------
 
-async def _run_all() -> None:
-    await _run_e2e_test()
-    await _run_error_test()
-    await _run_idle_timeout_test()
-    await _run_cancel_recording_test()
-    await _run_cancel_responding_test()
-    print("\n=== TODOS LOS TESTS PASARON ===")
-
-
 def test_state_machine_e2e() -> None:
     """Compatible con pytest."""
     asyncio.run(_run_e2e_test())
@@ -737,7 +728,3 @@ def test_idle_type_hints_resolve() -> None:
 
     hints = typing.get_type_hints(state_machine._recording)
     assert hints["audio"] is state_machine.AudioBackend
-
-
-if __name__ == "__main__":
-    asyncio.run(_run_all())

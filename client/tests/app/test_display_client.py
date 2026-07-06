@@ -6,10 +6,6 @@ Compatible con pytest y ejecución directa.
 """
 
 import asyncio
-import sys
-import os
-
-sys.path.insert(0, os.path.dirname(__file__))
 
 from domain.event_bus import EventBus, VoiceEvent
 from app.display_client import DisplayClient
@@ -70,9 +66,4 @@ async def _run_test() -> None:
 
 
 def test_display_client_mapping() -> None:
-    """Entry point compatible con pytest y ejecución directa."""
     asyncio.run(_run_test())
-
-
-if __name__ == "__main__":
-    test_display_client_mapping()

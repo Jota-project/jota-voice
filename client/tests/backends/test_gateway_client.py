@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
 import types
 from unittest.mock import AsyncMock, MagicMock
@@ -18,10 +17,6 @@ if "websockets" not in sys.modules:
     stub.connect = AsyncMock()
     sys.modules["websockets"] = stub
     sys.modules["websockets.exceptions"] = exc_stub
-
-_here = os.path.dirname(__file__)
-if _here not in sys.path:
-    sys.path.insert(0, _here)
 
 from config import GatewayConfig
 from backends.gateway_client import GatewayClient
@@ -57,9 +52,3 @@ def test_send_cancel_envia_mensaje() -> None:
 
 def test_send_cancel_sin_ws_lanza_error() -> None:
     asyncio.run(_test_send_cancel_sin_ws_lanza_error())
-
-
-if __name__ == "__main__":
-    asyncio.run(_test_send_cancel_envia_mensaje())
-    asyncio.run(_test_send_cancel_sin_ws_lanza_error())
-    print("=== TODOS LOS TESTS PASARON ===")

@@ -11,19 +11,11 @@ o directamente:
 from __future__ import annotations
 
 import asyncio
-import sys
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
-
-# Añadir client/ al sys.path para importar módulos locales
-import os
-_HERE = os.path.dirname(__file__)
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
-
-from domain.event_bus import EventBus, VoiceEvent  # noqa: E402
-from app.playback_engine import PlaybackEngine   # noqa: E402
+from domain.event_bus import EventBus, VoiceEvent
+from app.playback_engine import PlaybackEngine
 
 
 # ---------------------------------------------------------------------------
@@ -208,48 +200,3 @@ class TestPlayChunk(unittest.IsolatedAsyncioTestCase):
                              "Texto del turno anterior no debe aparecer tras reset")
 
 
-class TestCursorLogicUnit(unittest.TestCase):
-    """Tests de lógica pura del cursor, sin asyncio."""
-
-    def test_chars_per_second_formula(self) -> None:
-        text_buffer = ["Hola ", "mundo"]  # 10 chars
-        text_cursor = 0.0
-        total_chars = sum(len(t) for t in text_buffer)
-        pending_chars = total_chars - int(text_cursor)
-        audio_duration = 0.5
-
-        chars_per_second = pending_chars / audio_duration
-        self.assertAlmostEqual(chars_per_second, 20.0)  # 10 chars / 0.5s
-
-    def test_cursor_avance_parcial(self) -> None:
-        text_buffer = ["ABCDE"]  # 5 chars
-        text_cursor = 2.0
-        total_chars = sum(len(t) for t in text_buffer)
-        pending_chars = total_chars - int(text_cursor)  # 3
-        audio_duration = 0.3
-        chars_per_second = pending_chars / audio_duration  # 10 chars/s
-
-        tick = 0.05
-        text_cursor = min(text_cursor + chars_per_second * tick, float(total_chars))
-        self.assertAlmostEqual(text_cursor, 2.5)
-
-        visible = "".join(text_buffer)[: int(text_cursor)]
-        self.assertEqual(visible, "AB")  # int(2.5) = 2
-
-    def test_cursor_clamp_al_total(self) -> None:
-        text_buffer = ["Hi"]  # 2 chars
-        total_chars = 2
-        text_cursor = 1.8
-        chars_per_second = 100.0
-        tick = 0.05
-
-        text_cursor = min(text_cursor + chars_per_second * tick, float(total_chars))
-        self.assertEqual(text_cursor, 2.0, "El cursor debe clamp-earse al total de chars")
-
-
-# ---------------------------------------------------------------------------
-# Punto de entrada directo
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)

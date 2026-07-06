@@ -2,12 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
-
-_here = os.path.dirname(__file__)
-if _here not in sys.path:
-    sys.path.insert(0, _here)
 
 from config import ControlConfig
 
@@ -100,10 +94,3 @@ def test_endpoint_desconocido_retorna_404() -> None:
 
 def test_puerto_ocupado_no_crashea() -> None:
     asyncio.run(_test_puerto_ocupado_no_crashea())
-
-
-if __name__ == "__main__":
-    asyncio.run(_test_post_cancel_activa_evento())
-    asyncio.run(_test_endpoint_desconocido_retorna_404())
-    asyncio.run(_test_puerto_ocupado_no_crashea())
-    print("=== TODOS LOS TESTS PASARON ===")

@@ -1,15 +1,10 @@
-"""Tests de ControlConfig en config.py."""
+"""Tests de config.py (sección control)."""
 from __future__ import annotations
 
 import os
-import sys
 import tempfile
 
 import yaml
-
-_here = os.path.dirname(__file__)
-if _here not in sys.path:
-    sys.path.insert(0, _here)
 
 
 def _write_cfg(data: dict) -> str:
@@ -41,9 +36,3 @@ def test_control_port_custom() -> None:
         assert cfg.control.port == 9000, f"Esperaba 9000, got {cfg.control.port}"
     finally:
         os.unlink(path)
-
-
-if __name__ == "__main__":
-    test_control_port_default()
-    test_control_port_custom()
-    print("=== TODOS LOS TESTS PASARON ===")
