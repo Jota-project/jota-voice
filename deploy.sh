@@ -28,7 +28,7 @@ case "$TARGET" in
         echo "[deploy macbook] rsync local en $REPO_LOCAL…"
         rsync -a --delete \
             --exclude '.venv' --exclude '__pycache__' --exclude '.git' \
-            --exclude 'devices/*/.env' \
+            --exclude 'devices/*/.env' --exclude 'devices/*/config.yaml' \
             ./ "$REPO_LOCAL/"
 
         # Symlink del config (install/macos/06-configs.sh lo crea también;
