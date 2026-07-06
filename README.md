@@ -1,8 +1,10 @@
 # jota-voice
 
-Capa de dispositivo del sistema de asistente de voz jota. Corre en Termux (Android).
+Cliente Android/Termux del ecosistema [Jota](https://github.com/Jota-project), un asistente de voz distribuido y modular.
 
-Sustituye a `wyoming-satellite` + Home Assistant voice pipeline con un cliente streaming directo a `jota-gateway`, reduciendo la latencia de ~5-6s a <2s.
+Sustituye a `wyoming-satellite` + Home Assistant voice pipeline con streaming directo a [`jota-gateway`](https://github.com/Jota-project/jota-gateway), reduciendo la latencia de ~5-6s a <2s. Corre en el mismo dispositivo que [`jota-display`](https://github.com/Jota-project/jota-display) (UI kiosk).
+
+Ver la [arquitectura completa del ecosistema](https://github.com/Jota-project/.github/blob/main/ARCHITECTURE.md) para el resto de microservicios (gateway, transcriber, speaker, orchestrator...).
 
 ## Arquitectura
 
@@ -28,7 +30,7 @@ AudioBackend   DisplayBackend   OwWBackend
 
 ```bash
 # En el teléfono (Termux)
-git clone <repo> ~/jota-voice && cd ~/jota-voice
+git clone https://github.com/Jota-project/jota-voice.git ~/jota-voice && cd ~/jota-voice
 sh install.sh
 nano config.yaml          # rellenar client_key y IPs
 python client/voice_client.py config.yaml
@@ -60,9 +62,15 @@ Servicio: `launchctl list | grep com.jota.voice`.
 
 | Fichero | Contenido |
 |---|---|
-| [`docs/spec.md`](docs/spec.md) | Especificación técnica: módulos, protocolos, máquina de estados |
-| [`docs/plan.md`](docs/plan.md) | Plan de implementación por fases |
-| [`docs/arquitectura.md`](docs/arquitectura.md) | Topología del sistema completo (legacy, mantener actualizado) |
+| [`install/docs/spec.md`](install/docs/spec.md) | Especificación técnica: módulos, protocolos, máquina de estados |
+| [`install/docs/arquitectura.md`](install/docs/arquitectura.md) | Topología del sistema completo (legacy, mantener actualizado) |
+| [`install/docs/pendientes.md`](install/docs/pendientes.md) | Roadmap y tareas pendientes |
+| [`install/docs/openclaw-integracion.md`](install/docs/openclaw-integracion.md) | Integración OpenClaw ↔ Home Assistant |
+| [`install/docs/kiosk.md`](install/docs/kiosk.md) | Kiosk de voz — legacy (Huawei P8 Lite) |
+| [`install/docs/nginx.md`](install/docs/nginx.md) | Proxy inverso en green-house |
+| [`install/docs/bootstrap-setup.md`](install/docs/bootstrap-setup.md) | Instalación manual de APKs (una vez por teléfono) |
+| [`install/docs/fullyKiosk-setup.md`](install/docs/fullyKiosk-setup.md) | Setup manual de FullyKiosk Browser |
+| [`install/docs/parches-movil.md`](install/docs/parches-movil.md) | Parches aplicados a librerías de terceros en el móvil |
 
 ## Estructura
 
@@ -93,9 +101,10 @@ install/
   shared/99-smoke-test.sh     # smoke test automatizado cross-platform
   termux/                     # scripts de instalación en Android (legacy)
   macos/                      # scripts de instalación en macOS
+  docs/                       # documentación técnica (spec, arquitectura, kiosk, nginx...)
 devices/
-  macbook_sito/               # config por dispositivo
-  hab_sito/                   # config del Huawei (legacy)
+  macbook_sito/                # config macOS (directorio + config.yaml)
+  hab_sito.env                 # config del teléfono Huawei (legacy, fichero plano)
 deploy.sh                     # --target phone|macbook
 config.example.yaml           # plantilla de configuración
 ```
