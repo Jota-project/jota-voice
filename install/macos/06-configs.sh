@@ -8,7 +8,8 @@ DEST="$DEST_DIR/config.yaml"
 SRC="$REPO_DIR/devices/${DEVICE_ID}/config.yaml"
 
 if [ ! -f "$SRC" ]; then
-    _err "No existe $SRC. Crea devices/${DEVICE_ID}/config.yaml primero."
+    _err "No existe $SRC."
+    _info "Créalo con: cp config.example.yaml devices/${DEVICE_ID}/config.yaml && editarlo"
     exit 1
 fi
 
