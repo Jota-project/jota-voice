@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Awaitable, Callable
 
 from config import OWWConfig
-from oww_client import OWWClient
+from .oww_client import OWWClient
 
 
 class WyomingBackend:
