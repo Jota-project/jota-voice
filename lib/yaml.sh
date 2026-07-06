@@ -9,6 +9,25 @@ yaml_get() {
     grep "^${key}:" "$YAML_FILE" 2>/dev/null | sed 's/^[^:]*: *//' | tr -d '"'
 }
 
+# yaml_get_nested SECTION KEY — valor de un campo anidado un nivel:
+#   section:
+#     key: "valor"
+yaml_get_nested() {
+    local section="$1" key="$2"
+    awk -v section="$section" -v key="$key" '
+        $0 ~ "^"section":" { in_section=1; next }
+        in_section && /^[^[:space:]]/ { in_section=0 }
+        in_section && $0 ~ "^[[:space:]]*"key"[[:space:]]*:" {
+            sub("^[[:space:]]*"key"[[:space:]]*:[[:space:]]*", "")
+            gsub(/"/, "")
+            sub(/[[:space:]]*#.*$/, "")
+            sub(/[[:space:]]*$/, "")
+            print
+            exit
+        }
+    ' "$YAML_FILE" 2>/dev/null
+}
+
 yaml_get_hosts() {
     local in_hosts=false
     local ip="" name=""
