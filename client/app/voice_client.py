@@ -82,9 +82,9 @@ from domain.state_machine import run as sm_run
 from backends import registry
 from backends.gateway_client import GatewayClient
 
-from .playback_engine import PlaybackEngine
-from .display_client import DisplayClient
-from . import control_server
+from app.playback_engine import PlaybackEngine
+from app.display_client import DisplayClient
+from app import control_server
 
 
 def _setup_logging(level: str) -> None:
