@@ -37,7 +37,15 @@ class OWWClient:
         return self._connected
 
     async def connect(self) -> None:
-        """Open TCP connection and send audio-start handshake."""
+        """Open TCP connection and send detect + audio-start handshake.
+
+        El evento "detect" es obligatorio: el servidor Wyoming solo
+        instancia detectores para los nombres pedidos aquí. Sin él,
+        self.detectors queda vacío para siempre y ninguna wake word se
+        detecta jamás, aunque el audio llegue correctamente (verificado
+        contra un servidor real: sin "detect", devuelve "not-detected"
+        incondicionalmente).
+        """
         try:
             self._reader, self._writer = await asyncio.wait_for(
                 asyncio.open_connection(self._cfg.host, self._cfg.port),
@@ -46,6 +54,12 @@ class OWWClient:
         except asyncio.TimeoutError:
             raise OSError(f"OWW: timeout conectando a {self._cfg.host}:{self._cfg.port}")
         try:
+            await self._send_json(
+                {
+                    "type": "detect",
+                    "data": {"names": list(self._cfg.wake_words)},
+                }
+            )
             await self._send_json(
                 {
                     "type": "audio-start",
@@ -57,7 +71,10 @@ class OWWClient:
             await self.disconnect()
             raise
         self._connected = True
-        log.debug("OWW conectado a %s:%d", self._cfg.host, self._cfg.port)
+        log.debug(
+            "OWW conectado a %s:%d (wake_words=%s)",
+            self._cfg.host, self._cfg.port, self._cfg.wake_words,
+        )
 
     async def disconnect(self) -> None:
         """Close the TCP connection gracefully."""
