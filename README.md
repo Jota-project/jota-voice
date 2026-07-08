@@ -62,6 +62,27 @@ bash deploy.sh macbook
 
 > **Nota sobre Wyoming OpenWakeWord:** este repo fija la imagen Docker a `rhasspy/wyoming-openwakeword:1.10.0` porque la 2.1.0 (`latest`) está rota en upstream ([rhasspy/wyoming-openwakeword#53](https://github.com/rhasspy/wyoming-openwakeword/issues/53)). No subir a `latest` sin verificar que el issue está cerrado.
 
+### Barra de menú nativa
+
+Al instalar jota-voice en macOS aparece automáticamente un icono en la barra de menús superior. El icono cambia según el estado del cliente:
+
+| Estado | Icono (SF Symbol) | Significado |
+|---|---|---|
+| `idle` | `mic` | Esperando wake word |
+| `listening` | `ear` | Grabando |
+| `thinking` | `brain` | Esperando respuesta del gateway |
+| `speaking` | `speaker.wave.2` | Reproduciendo TTS |
+| `error` | `exclamationmark.triangle` | Último turno terminó en error |
+
+El menú incluye:
+
+- Cabecera con el estado actual (no seleccionable).
+- Submenú **Servicio** → Pausar/Reanudar escucha, Apagar servicio.
+- Abrir logs / Abrir configuración en la app por defecto.
+- Acerca de / Salir.
+
+Para desactivar el UI sin desinstalar pyobjc: `export JOTA_DISABLE_MENUBAR=1` antes de arrancar el cliente (o añade esa línea a tu `.jota-voice.env`).
+
 Logs: `tail -f ~/Library/Logs/jota-voice/stdout.log`.
 
 Servicio: `launchctl list | grep com.jota.voice`.
