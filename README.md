@@ -60,6 +60,8 @@ REPO_DIR=$(pwd) bash install/macos/07-launchd.sh     # launchd agent
 bash deploy.sh macbook
 ```
 
+> **Nota sobre Wyoming OpenWakeWord:** este repo fija la imagen Docker a `rhasspy/wyoming-openwakeword:1.10.0` porque la 2.1.0 (`latest`) está rota en upstream ([rhasspy/wyoming-openwakeword#53](https://github.com/rhasspy/wyoming-openwakeword/issues/53)). No subir a `latest` sin verificar que el issue está cerrado.
+
 Logs: `tail -f ~/Library/Logs/jota-voice/stdout.log`.
 
 Servicio: `launchctl list | grep com.jota.voice`.
