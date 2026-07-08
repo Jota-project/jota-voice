@@ -4,8 +4,15 @@ set -e
 . "$(dirname "$0")/00-lib.sh"
 
 CONTAINER_NAME="wyoming-oww"
-IMAGE="rhasspy/wyoming-openwakeword"
+# Pin a 1.10.0: la 2.1.0 (latest) está rota en upstream
+# (rhasspy/wyoming-openwakeword#53 — modelos .tflite incompatibles con pyopen_wakeword 1.1.0).
+# No subir a 2.x sin verificar contra el issue primero.
+IMAGE="rhasspy/wyoming-openwakeword:1.10.0"
 PORT=10401
+
+# Threshold de detección. OpenWakeWord recomienda 0.1-0.2 con audio de micro real.
+# Configurable por env: OWW_THRESHOLD=0.10 sh install/macos/04-oww.sh
+OWW_THRESHOLD="${OWW_THRESHOLD:-0.15}"
 
 _info "Asegurando imagen $IMAGE…"
 docker pull "$IMAGE" >/dev/null
@@ -31,9 +38,10 @@ else
         "$IMAGE" \
         --uri "tcp://0.0.0.0:${PORT}" \
         --custom-model-dir /data \
-        --threshold 0.3
+        --threshold "$OWW_THRESHOLD"
 fi
 _ok "Contenedor $CONTAINER_NAME arrancado"
+_info "Imagen: $IMAGE  |  threshold: $OWW_THRESHOLD"
 
 _info "Esperando a que el puerto ${PORT} responda…"
 deadline=$((SECONDS + 30))
