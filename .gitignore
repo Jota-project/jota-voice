@@ -26,3 +26,6 @@ devices/*.env
 
 # Planes y specs de desarrollo (internos, no para el repo público)
 docs/superpowers/
+
+# Worktrees de git para desarrollo aislado
+.worktrees/
