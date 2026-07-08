@@ -5,6 +5,7 @@ según sys.platform + overrides de Config.
 """
 from __future__ import annotations
 
+import logging
 import sys
 
 from config import Config
@@ -55,3 +56,24 @@ def make_oww(cfg: Config, on_wake_word):
     if name == "wyoming":
         return WyomingBackend(cfg.oww, on_wake_word)
     raise ConfigError(f"oww backend desconocido: {name!r}")
+
+
+def make_menubar(cfg: Config):
+    from ui.menubar_null import NullMenubarBackend
+
+    if not cfg.menubar.enabled:
+        return NullMenubarBackend()
+
+    if sys.platform != "darwin":
+        return NullMenubarBackend()
+
+    try:
+        from ui.menubar_cocoa import CocoaMenubarBackend
+    except ImportError:
+        logging.getLogger(__name__).warning(
+            "pyobjc-framework-Cocoa no disponible; menubar UI desactivada. "
+            "Instala con: pip install pyobjc-framework-Cocoa"
+        )
+        return NullMenubarBackend()
+
+    return CocoaMenubarBackend(cfg.menubar)
