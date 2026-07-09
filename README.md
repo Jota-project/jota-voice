@@ -50,17 +50,21 @@ Mac.
 
 ```bash
 # Una vez por máquina
-REPO_DIR=$(pwd) bash install/macos/01-homebrew.sh   # brew + python + docker check
+REPO_DIR=$(pwd) bash install/macos/01-homebrew.sh   # brew + python
 REPO_DIR=$(pwd) bash install/macos/03-venv.sh       # ~/venvs/jota-voice
-REPO_DIR=$(pwd) bash install/macos/04-oww.sh         # Wyoming en Docker (puerto 10401)
+REPO_DIR=$(pwd) bash install/macos/04-oww.sh         # Wyoming OWW nativo (venv + launchd, puerto 10401)
 REPO_DIR=$(pwd) bash install/macos/06-configs.sh     # symlink config
-REPO_DIR=$(pwd) bash install/macos/07-launchd.sh     # launchd agent
+REPO_DIR=$(pwd) bash install/macos/07-launchd.sh     # launchd agent para voice_client
 
 # Deploys posteriores
 bash deploy.sh macbook
 ```
 
-> **Nota sobre Wyoming OpenWakeWord:** este repo fija la imagen Docker a `rhasspy/wyoming-openwakeword:1.10.0` porque la 2.1.0 (`latest`) está rota en upstream ([rhasspy/wyoming-openwakeword#53](https://github.com/rhasspy/wyoming-openwakeword/issues/53)). No subir a `latest` sin verificar que el issue está cerrado.
+> **Wyoming OpenWakeWord:** el servidor OWW corre nativo (venv Python
+> supervisado por launchd), no en Docker. Usa el paquete oficial
+> `wyoming-openwakeword==1.8.2` con un shim local que sustituye
+> `tflite-runtime-nightly` por `ai-edge-litert` (la primera no publica
+> wheels para macOS; ver `install/macos/tflite_runtime_shim/`).
 
 Logs: `tail -f ~/Library/Logs/jota-voice/stdout.log`.
 
@@ -84,34 +88,38 @@ Servicio: `launchctl list | grep com.jota.voice`.
 
 ```
 client/
-  voice_client.py             # entry point — wire registry + tasks
-  state_machine.py            # máquina de estados IDLE→RECORDING→RESPONDING
-  event_bus.py                # pub/sub asíncrono
-  gateway_client.py           # WebSocket jota-gateway (handshake con device_id)
-  playback_engine.py          # orquesta TTS delegando en AudioBackend
-  config.py                   # carga config.yaml (Pydantic v2)
-  control_server.py           # HTTP /cancel para jota-display
-  oww_client.py               # Wyoming TCP client (helper de WyomingBackend)
-  audio_capture.py            # parec/PulseAudio (helper de TermuxBackend)
-  display_client.py           # EventBus → DisplayBackend (inyectado)
-  backends/                   # interfaces intercambiables por SO
-    registry.py               # factory con auto-detección por sys.platform
-    audio_base.py             # Protocol AudioBackend
-    audio_sounddevice.py      # Mac/Linux (sounddevice/PortAudio)
-    audio_termux.py           # Android (parec + pyaudio)
-    display_base.py           # Protocol DisplayBackend
-    display_http.py           # POST a jota-display
-    display_null.py           # no-op
-    oww_base.py               # Protocol OwWBackend
-    oww_wyoming.py            # wrapper sobre OWWClient
-  test_*.py                   # tests unitarios
+  config.py                   # carga config.yaml (dataclasses)
+  domain/                      # lógica de negocio, sin I/O directo
+    state_machine.py           # máquina de estados IDLE→RECORDING→RESPONDING
+    event_bus.py                # pub/sub asíncrono
+  app/                          # orquestación — wiring de backends + entry point
+    voice_client.py             # entry point — wire registry + tasks
+    playback_engine.py          # orquesta TTS delegando en AudioBackend
+    display_client.py           # EventBus → DisplayBackend (inyectado)
+    control_server.py           # HTTP /cancel para jota-display
+  backends/                    # interfaces intercambiables por SO
+    registry.py                 # factory con auto-detección por sys.platform
+    gateway_client.py           # WebSocket jota-gateway (handshake con device_id)
+    audio_base.py                # Protocol AudioBackend
+    audio_sounddevice.py         # Mac/Linux (sounddevice/PortAudio)
+    audio_termux.py              # Android (parec + pyaudio)
+    audio_capture.py             # parec/PulseAudio (helper de TermuxBackend)
+    display_base.py              # Protocol DisplayBackend
+    display_http.py              # POST a jota-display
+    display_null.py              # no-op
+    oww_base.py                  # Protocol OwWBackend
+    oww_wyoming.py                # wrapper sobre OWWClient
+    oww_client.py                 # Wyoming TCP client (helper de WyomingBackend)
+  tests/{domain,app,backends}/  # tests unitarios, mismo layout que el código
 install/
   shared/99-smoke-test.sh     # smoke test automatizado cross-platform
+  shared/tests/                # tests de los scripts de install/shared
   termux/                     # scripts de instalación en Android (legacy)
   macos/                      # scripts de instalación en macOS
   docs/                       # documentación técnica (spec, arquitectura, kiosk, nginx...)
 devices/
   <id>/config.yaml             # identidad real de un dispositivo (gitignored, una por Mac/Termux)
+  <id>/.env                    # secretos por dispositivo: p.ej. cabeceras de Cloudflare Access (gitignored)
   <nombre>.env                 # credenciales SSH para deploy.sh phone <nombre> (gitignored)
   example.env                  # plantilla de <nombre>.env (trackeada)
 deploy.sh                     # phone [<nombre>] | macbook
