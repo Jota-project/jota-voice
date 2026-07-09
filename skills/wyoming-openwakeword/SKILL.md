@@ -32,7 +32,7 @@ de voz**: si no detecta, el resto no se ejecuta.
   10401 por defecto. Es lo que realmente desplegamos.
 - **Threshold** (`--threshold`): score mínimo (0.0-1.0) para considerar que un chunk
   tiene la wake word. Por defecto 0.5 en Wyoming, **pero OpenWakeWord recomienda
-  0.1-0.2 con audio de micro real**. Ver `references/docker-macos.md`.
+  0.1-0.2 con audio de micro real**. Ver `install/macos/04-oww.sh`.
 - **Trigger level** (`--trigger-level`): número de activaciones consecutivas por
   encima del threshold antes de emitir `detection`. Default 1. Casi nunca hay que
   tocarlo.
@@ -112,14 +112,14 @@ Pipeline completo en `references/custom-model-training.md`.
 
 ## Diferencias Docker (Mac) vs venv (Termux)
 
-| Aspecto | Docker (Mac) | venv (Termux) |
+| Aspecto | venv nativo (macOS) | venv (Termux) |
 |---|---|---|
-| Imagen/paquete | `rhasspy/wyoming-openwakeword:1.10.0` | `openwakeword==0.5.1` + `wyoming-openwakeword==1.3.0` |
+| Imagen/paquete | `wyoming-openwakeword==1.8.2` + shim `tflite_runtime → ai_edge_litert` | `openwakeword==0.5.1` + `wyoming-openwakeword==1.3.0` |
 | Sistema de audio | sounddevice/PortAudio (cliente) | parec/sles-source (cliente) |
-| Arquitectura | `linux/amd64`, `linux/arm64` | `linux/arm/v7` (Huawei P8 Lite), `linux/arm64` |
-| Por qué venv | No hay Docker nativo fiable en Android | venv + `system-site-packages` para tflite-runtime y scipy vía Termux pkg |
+| Arquitectura | macOS 12+ arm64/x86_64 | `linux/arm/v7` (Huawei P8 Lite), `linux/arm64` |
+| Por qué venv | Evita overhead 1-2GB de Docker Desktop LinuxKit; Docker publicaba wheels rotos para macOS | venv + `system-site-packages` para tflite-runtime y scipy vía Termux pkg |
 | Instalación | `install/macos/04-oww.sh` | `install/04-oww.sh` |
-| Detalles | `references/docker-macos.md` | `references/termux-installation.md` |
+| Supervisión | launchd (KeepAlive) | tmux/CI (sin supervisor) |
 
 **Punto crítico de arquitectura**: la imagen Wyoming 1.10.0 es la **última con
 soporte para `linux/arm/v7`**. Las versiones 2.x solo soportan `linux/amd64` y
