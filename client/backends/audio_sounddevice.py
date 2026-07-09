@@ -36,6 +36,7 @@ class SounddeviceBackend:
         self._output_stream = None
         self._play_q: queue_mod.Queue[bytes] = queue_mod.Queue()
         self._play_leftover: bytes | None = None
+        self._enqueue_carry: bytes = b""
         self._capture_thread: threading.Thread | None = None
         self._capture_stop = threading.Event()
 
@@ -101,6 +102,7 @@ class SounddeviceBackend:
             self._output_stream = None
         # Drenar play queue
         self._play_leftover = None
+        self._enqueue_carry = b""
         while not self._play_q.empty():
             try:
                 self._play_q.get_nowait()
@@ -144,6 +146,19 @@ class SounddeviceBackend:
         self._output_stream.start()
 
     def _out_callback(self, outdata, frames, time, status) -> None:  # noqa: ARG002
+        # IMPORTANTE: este callback corre en el hilo realtime de PortAudio,
+        # registrado por sounddevice con error=paAbort — cualquier excepción
+        # sin capturar que escape de aquí aborta el OutputStream ENTERO
+        # (no solo el chunk en curso), dejando el resto de la respuesta en
+        # silencio permanente sin ningún error visible para el usuario. Por
+        # eso nunca debe poder lanzar, pase lo que pase en la cola.
+        try:
+            self._out_callback_unsafe(outdata, frames, status)
+        except Exception:
+            log.exception("SounddeviceBackend: error en _out_callback, escribiendo silencio")
+            outdata[:, 0] = 0
+
+    def _out_callback_unsafe(self, outdata, frames, status) -> None:
         if status:
             log.warning("SounddeviceBackend playback status: %s", status)
         written = 0
@@ -176,6 +191,19 @@ class SounddeviceBackend:
 
     async def _enqueue_and_wait(self, audio: bytes) -> None:
         self._ensure_output_stream()
+        # El chunking de red no garantiza alinear cada mensaje TTS a un
+        # número par de bytes (tamaño de una muestra int16) — un chunk de
+        # longitud impar rompería np.frombuffer en _out_callback. En vez de
+        # dejarlo entrar en _play_q, arrastramos el byte suelto y lo
+        # anteponemos al siguiente chunk para no perder muestras.
+        audio = self._enqueue_carry + audio
+        if len(audio) % 2 != 0:
+            self._enqueue_carry = audio[-1:]
+            audio = audio[:-1]
+        else:
+            self._enqueue_carry = b""
+        if not audio:
+            return
         duration = len(audio) / (_TTS_SAMPLE_RATE * 2)
         self._play_q.put(audio)
         await asyncio.sleep(duration + 0.05)
@@ -195,6 +223,7 @@ class SounddeviceBackend:
             self._output_stream = None
         # Vaciar play queue
         self._play_leftover = None
+        self._enqueue_carry = b""
         while not self._play_q.empty():
             try:
                 self._play_q.get_nowait()
@@ -205,6 +234,7 @@ class SounddeviceBackend:
         with self._lock:
             self._preroll.clear()
         self._play_leftover = None
+        self._enqueue_carry = b""
         while not self._play_q.empty():
             try:
                 self._play_q.get_nowait()

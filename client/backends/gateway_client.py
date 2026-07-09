@@ -103,7 +103,11 @@ class GatewayClient:
                     log.warning("Gateway: frame JSON inválido: %r", message[:80])
                     continue
                 event_type = data.get("type", "")
-                if event_type == "done":
+                if event_type in ("done", "turn_end"):
+                    # El gateway real (green-house) señaliza fin de turno
+                    # con "turn_end" en vez de "done" — sin esto, receive()
+                    # se quedaba esperando mensajes que nunca llegaban hasta
+                    # el timeout de 30s de RESPONDING en cada turno.
                     return
                 # El gateway envía "token" para LLM; normalizamos al tipo interno.
                 if event_type == "token":
