@@ -11,8 +11,12 @@ conexiones exitosas.
 distribuidos no son compatibles. La llamada `OpenWakeWord.process_streaming`
 lanza `IndexError: tuple index out of range` en cada chunk, silenciosamente.
 
-**Workaround**: pinear `rhasspy/wyoming-openwakeword:1.10.0`. Está aplicado
-en `install/macos/04-oww.sh` (commit `61f0abd`).
+**Workaround**: pinear `rhasspy/wyoming-openwakeword:1.10.0` (imagen Docker)
+o `wyoming-openwakeword==1.8.2` (paquete pip usado en el install path
+nativo de macOS). Ambos siguen importando `tflite_runtime.interpreter` y
+son inmunes al bug. El pin está aplicado en `install/macos/04-oww.sh`
+(commit `61f0abd` para Docker; spec `2026-07-09-macos-oww-native-design`
+para pip).
 
 **Issue upstream**: [rhasspy/wyoming-openwakeword#53](https://github.com/rhasspy/wyoming-openwakeword/issues/53)
 (ABIERTO, sin PR).
@@ -95,9 +99,10 @@ del repo openWakeWord. Ver `custom-model-training.md`.
 `Triggered`), el cliente entra en `RECORDING`, pero falla con
 `[Errno 8] nodename nor servname provided, or not known`.
 
-**Causa**: el cliente intenta conectar al gateway
-(`green-house.alfonsogare.com` o similar) y el DNS no resuelve. Es
-problema de infraestructura/red, **no de Wyoming OWW**.
+**Causa**: el cliente intenta conectar al gateway (el dominio configurado
+en `devices/<id>/config.yaml` → `gateway.url`) y el DNS no resuelve. Es
+problema de infraestructura/red (typo en el dominio del despliegue), **no
+de Wyoming OWW**.
 
 **Workaround**: cambiar `gateway.url` en `devices/<id>/config.yaml` a la
 IP local del gateway mientras se diagnostica el DNS.
