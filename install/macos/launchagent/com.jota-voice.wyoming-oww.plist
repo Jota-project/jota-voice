@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jota-voice.wyoming-oww</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__VENV_DIR__/bin/python</string>
+    <string>-m</string>
+    <string>wyoming_openwakeword</string>
+    <string>--uri</string>
+    <string>tcp://0.0.0.0:10401</string>
+    <string>--custom-model-dir</string>
+    <string>__DATA_DIR__</string>
+    <string>--threshold</string>
+    <string>__THRESHOLD__</string>
+    <string>--debug-probability</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/com.jota-voice.wyoming-oww.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/com.jota-voice.wyoming-oww.log</string>
+</dict>
+</plist>
