@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tflite-runtime-shim"
+version = "0.1.0"
+description = "Shim que re-exporta ai_edge_litert.interpreter como tflite_runtime.interpreter, para usar wyoming-openwakeword en macOS."
+requires-python = ">=3.9"
+dependencies = ["ai-edge-litert"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tflite_runtime*"]
