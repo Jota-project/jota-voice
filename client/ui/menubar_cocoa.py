@@ -143,18 +143,34 @@ class CocoaMenubarBackend:
 
     def set_state(self, state: str) -> None:
         self._shared.update(state=state)
+        self._request_repaint()
 
     def set_status_text(self, text: str) -> None:
         self._shared.update(last_text=text)
+        self._request_repaint()
 
     def set_listening_paused(self, paused: bool) -> None:
         self._shared.update(listening_paused=paused)
+        self._request_repaint()
 
     def set_errors_count(self, n: int) -> None:
         self._shared.update(errors_count=n)
+        self._request_repaint()
 
     def set_commands(self, cmds: MenubarCommands) -> None:
         self._commands = cmds
+
+    def _request_repaint(self) -> None:
+        """Fuerza un repintado inmediato en vez de esperar al siguiente
+        tick del NSTimer (hasta 1/refresh_hz segundos de retraso — con el
+        default de 5Hz, hasta 200ms). El icono debe reaccionar en el
+        instante en que cambia el estado (p.ej. al detectar la wake word),
+        no en el siguiente tick periódico. No-op si run_forever() todavía
+        no arrancó (self._app sigue en None)."""
+        if self._app is not None:
+            self._app.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "tick:", None, False
+            )
 
     # ------------------------------------------------------------------
     # Runloop Cocoa

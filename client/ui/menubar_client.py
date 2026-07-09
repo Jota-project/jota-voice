@@ -89,8 +89,20 @@ class MenubarClient:
 
         if event.type == "state_changed":
             self._backend.set_state(event.data.get("state", ""))
+        elif event.type == "wake_word_detected":
+            # La state machine actual solo publica state_changed para
+            # "idle" — nunca para "listening"/"thinking"/"speaking". El
+            # icono debe reaccionar en el instante de la detección, así
+            # que derivamos el estado visual directamente de los eventos
+            # de dominio que sí se publican (ver domain/state_machine.py).
+            self._backend.set_state("listening")
+        elif event.type == "recording_ended":
+            self._backend.set_state("thinking")
+        elif event.type == "playback_started":
+            self._backend.set_state("speaking")
         elif event.type == "transcription":
             self._backend.set_status_text(event.data.get("text", ""))
         elif event.type == "error":
             self._errors_count += 1
             self._backend.set_errors_count(self._errors_count)
+            self._backend.set_state("error")

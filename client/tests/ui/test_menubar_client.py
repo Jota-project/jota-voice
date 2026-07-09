@@ -60,6 +60,93 @@ def test_state_changed_propagates():
     assert "hola" in set_text_vals
 
 
+def test_wake_word_detected_sets_listening_instantly():
+    """El icono debe reaccionar en el instante en que se detecta la wake
+    word, no esperar a un state_changed (que la state machine actual NO
+    emite para "listening" — solo para "idle")."""
+    bus = EventBus()
+    backend = FakeBackend()
+    client = MenubarClient(backend)
+    ui_queue: queue.Queue = queue.Queue()
+    pause = asyncio.Event()
+
+    async def scenario():
+        task = asyncio.create_task(client.run(bus, ui_queue, pause))
+        await asyncio.sleep(0.05)
+        bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "hey_jarvis"}))
+        await asyncio.sleep(0.05)
+        bus.close()
+        await asyncio.wait_for(task, timeout=2.0)
+
+    _run(scenario())
+
+    set_state_vals = [c[1][0] for c in backend.calls if c[0] == "set_state"]
+    assert set_state_vals == ["listening"]
+
+
+def test_recording_ended_sets_thinking():
+    bus = EventBus()
+    backend = FakeBackend()
+    client = MenubarClient(backend)
+    ui_queue: queue.Queue = queue.Queue()
+    pause = asyncio.Event()
+
+    async def scenario():
+        task = asyncio.create_task(client.run(bus, ui_queue, pause))
+        await asyncio.sleep(0.05)
+        bus.publish(VoiceEvent(type="recording_ended", data={}))
+        await asyncio.sleep(0.05)
+        bus.close()
+        await asyncio.wait_for(task, timeout=2.0)
+
+    _run(scenario())
+
+    set_state_vals = [c[1][0] for c in backend.calls if c[0] == "set_state"]
+    assert set_state_vals == ["thinking"]
+
+
+def test_playback_started_sets_speaking():
+    bus = EventBus()
+    backend = FakeBackend()
+    client = MenubarClient(backend)
+    ui_queue: queue.Queue = queue.Queue()
+    pause = asyncio.Event()
+
+    async def scenario():
+        task = asyncio.create_task(client.run(bus, ui_queue, pause))
+        await asyncio.sleep(0.05)
+        bus.publish(VoiceEvent(type="playback_started", data={}))
+        await asyncio.sleep(0.05)
+        bus.close()
+        await asyncio.wait_for(task, timeout=2.0)
+
+    _run(scenario())
+
+    set_state_vals = [c[1][0] for c in backend.calls if c[0] == "set_state"]
+    assert set_state_vals == ["speaking"]
+
+
+def test_error_also_sets_error_state():
+    bus = EventBus()
+    backend = FakeBackend()
+    client = MenubarClient(backend)
+    ui_queue: queue.Queue = queue.Queue()
+    pause = asyncio.Event()
+
+    async def scenario():
+        task = asyncio.create_task(client.run(bus, ui_queue, pause))
+        await asyncio.sleep(0.05)
+        bus.publish(VoiceEvent(type="error", data={"message": "boom"}))
+        await asyncio.sleep(0.05)
+        bus.close()
+        await asyncio.wait_for(task, timeout=2.0)
+
+    _run(scenario())
+
+    set_state_vals = [c[1][0] for c in backend.calls if c[0] == "set_state"]
+    assert set_state_vals == ["error"]
+
+
 def test_error_increments_count():
     bus = EventBus()
     backend = FakeBackend()
