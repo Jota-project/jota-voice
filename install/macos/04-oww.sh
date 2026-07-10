@@ -126,7 +126,19 @@ _ok "plist generado: $PLIST"
 # Si ya estaba cargado de una instalación previa, lo descargamos antes de
 # recargar (paralelo a 07-launchd.sh).
 launchctl bootout "gui/${USER_UID}/com.jota-voice.wyoming-oww" 2>/dev/null || true
-launchctl bootstrap "gui/${USER_UID}" "$PLIST"
+# bootout es asíncrono: launchd puede tardar un instante en liberar el
+# servicio anterior. Un bootstrap inmediato puede fallar con
+# "Input/output error" (reproducido en la práctica); un reintento tras
+# una breve espera lo resuelve sin intervención manual.
+if ! launchctl bootstrap "gui/${USER_UID}" "$PLIST" 2>/tmp/oww-bootstrap-err; then
+    _info "bootstrap falló en el primer intento (posible race con bootout), reintentando…"
+    sleep 2
+    if ! launchctl bootstrap "gui/${USER_UID}" "$PLIST"; then
+        _err "launchctl bootstrap falló dos veces. Detalle: $(cat /tmp/oww-bootstrap-err 2>/dev/null)"
+        exit 1
+    fi
+fi
+rm -f /tmp/oww-bootstrap-err
 launchctl enable "gui/${USER_UID}/com.jota-voice.wyoming-oww"
 launchctl kickstart -k "gui/${USER_UID}/com.jota-voice.wyoming-oww"
 _ok "Servicio com.jota-voice.wyoming-oww arrancado"
