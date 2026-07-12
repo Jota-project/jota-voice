@@ -73,3 +73,40 @@ def test_cloudflare_access_headers_con_solo_una_variable(monkeypatch) -> None:
     monkeypatch.setenv("CF_ACCESS_CLIENT_ID", "abc123")
     monkeypatch.delenv("CF_ACCESS_CLIENT_SECRET", raising=False)
     assert _cloudflare_access_headers() == {}
+
+
+class _FakeWS:
+    """Async-iterable mínimo que simula los mensajes de un websocket real."""
+
+    def __init__(self, messages: list) -> None:
+        self._messages = list(messages)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._messages:
+            raise StopAsyncIteration
+        return self._messages.pop(0)
+
+
+async def _test_receive_termina_en_turn_end_sin_esperar_done() -> None:
+    """El gateway real (green-house) señaliza fin de turno con "turn_end", no
+    con "done" — receive() debía quedarse esperando mensajes que nunca
+    llegaban hasta el timeout de 30s de RESPONDING. Debe terminar también
+    al ver turn_end, igual que hace con done."""
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test")
+    client = GatewayClient(cfg)
+    client._ws = _FakeWS([
+        json.dumps({"type": "pipeline_event", "stage": "tts_done"}),
+        json.dumps({"type": "turn_end", "turn_id": "t-1"}),
+        json.dumps({"type": "pipeline_event", "stage": "nunca_deberia_llegar"}),
+    ])
+
+    events = [ev async for ev in client.receive()]
+
+    assert [e.type for e in events] == ["pipeline_event"]
+
+
+def test_receive_termina_en_turn_end_sin_esperar_done() -> None:
+    asyncio.run(_test_receive_termina_en_turn_end_sin_esperar_done())

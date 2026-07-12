@@ -48,3 +48,11 @@ logging:
 
 control:
   port: 8765
+
+# menubar:
+#   enabled: true                # false desactiva el UI nativo (macOS)
+#   refresh_hz: 5.0               # Frecuencia del repaint; clamp [1.0, 30.0]
+#   log_path: null                # null = ~/Library/Logs/jota-voice/stdout.log
+#   config_path: null             # null = ~/Library/Application Support/jota-voice/config.yaml
+#
+# Equivalente: export JOTA_DISABLE_MENUBAR=1 antes de arrancar el cliente.

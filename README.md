@@ -66,6 +66,27 @@ bash deploy.sh macbook
 > `tflite-runtime-nightly` por `ai-edge-litert` (la primera no publica
 > wheels para macOS; ver `install/macos/tflite_runtime_shim/`).
 
+### Barra de menú nativa
+
+Al instalar jota-voice en macOS aparece automáticamente un icono en la barra de menús superior. El icono cambia según el estado del cliente:
+
+| Estado | Icono (SF Symbol) | Significado |
+|---|---|---|
+| `idle` | `mic` | Esperando wake word |
+| `listening` | `ear` | Grabando |
+| `thinking` | `brain` | Esperando respuesta del gateway |
+| `speaking` | `speaker.wave.2` | Reproduciendo TTS |
+| `error` | `exclamationmark.triangle` | Último turno terminó en error |
+
+El menú incluye:
+
+- Cabecera con el estado actual (no seleccionable).
+- Submenú **Servicio** → Pausar/Reanudar escucha, Apagar servicio.
+- Abrir logs / Abrir configuración en la app por defecto.
+- Acerca de / Salir.
+
+Para desactivar el UI sin desinstalar pyobjc: `export JOTA_DISABLE_MENUBAR=1` antes de arrancar el cliente (o añade esa línea a tu `.jota-voice.env`).
+
 Logs: `tail -f ~/Library/Logs/jota-voice/stdout.log`.
 
 Servicio: `launchctl list | grep com.jota.voice`.

@@ -71,6 +71,20 @@ class DisplayConfig:
 
 
 @dataclass
+class MenubarConfig:
+    enabled: bool = True
+    refresh_hz: float = 5.0
+    log_path: Optional[str] = None
+    config_path: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.refresh_hz < 1.0:
+            self.refresh_hz = 1.0
+        elif self.refresh_hz > 30.0:
+            self.refresh_hz = 30.0
+
+
+@dataclass
 class ControlConfig:
     port: int = 8765
 
@@ -89,6 +103,7 @@ class Config:
     display: DisplayConfig = field(default_factory=DisplayConfig)
     control: ControlConfig = field(default_factory=ControlConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    menubar: MenubarConfig = field(default_factory=MenubarConfig)
 
 
 def _gateway_from_dict(d: dict) -> GatewayConfig:
@@ -154,6 +169,15 @@ def _control_from_dict(d: dict) -> ControlConfig:
     )
 
 
+def _menubar_from_dict(d: dict) -> MenubarConfig:
+    return MenubarConfig(
+        enabled=bool(d.get("enabled", True)),
+        refresh_hz=float(d.get("refresh_hz", 5.0)),
+        log_path=d.get("log_path"),
+        config_path=d.get("config_path"),
+    )
+
+
 def load_config(path: str | Path) -> Config:
     real_path = Path(path).resolve()
     _load_env_file(real_path.parent / ".env")
@@ -163,6 +187,11 @@ def load_config(path: str | Path) -> Config:
         raise ValueError("config.yaml: sección 'gateway' obligatoria")
     if "device" not in data:
         raise ValueError("config.yaml: sección 'device' obligatoria")
+
+    menubar_section = data.get("menubar", {})
+    if os.environ.get("JOTA_DISABLE_MENUBAR") in ("1", "true", "yes"):
+        menubar_section = {**menubar_section, "enabled": False}
+
     return Config(
         gateway=_gateway_from_dict(data["gateway"]),
         device=_device_from_dict(data["device"]),
@@ -171,6 +200,7 @@ def load_config(path: str | Path) -> Config:
         display=_display_from_dict(data.get("display", {})),
         control=_control_from_dict(data.get("control", {})),
         logging=LoggingConfig(level=data.get("logging", {}).get("level", "INFO")),
+        menubar=_menubar_from_dict(menubar_section),
     )
 
 

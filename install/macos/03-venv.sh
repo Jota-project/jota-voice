@@ -16,4 +16,8 @@ _info "Actualizando pip e instalando requirements…"
 "$VENV_DIR/bin/pip" install --upgrade pip wheel setuptools
 "$VENV_DIR/bin/pip" install -r "$REPO_DIR/client/requirements.txt"
 "$VENV_DIR/bin/pip" install sounddevice numpy
+_info "Instalando requirements específicos de macOS si existen…"
+if [ -f "$REPO_DIR/requirements-macos.txt" ]; then
+    "$VENV_DIR/bin/pip" install -r "$REPO_DIR/requirements-macos.txt"
+fi
 _ok "Dependencias Python instaladas"

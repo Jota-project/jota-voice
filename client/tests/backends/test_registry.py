@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from config import Config, GatewayConfig, AudioConfig, DisplayConfig, OWWConfig, DeviceConfig
+from config import Config, GatewayConfig, AudioConfig, DisplayConfig, OWWConfig, DeviceConfig, MenubarConfig
 from backends.errors import ConfigError
 from backends import registry
 
@@ -98,3 +98,54 @@ def test_make_oww_unknown_backend() -> None:
     )
     with pytest.raises(ConfigError, match="oww backend desconocido"):
         registry.make_oww(cfg, on_wake_word=None)
+
+
+def _cfg_with_menubar(enabled: bool = True) -> Config:
+    return Config(
+        gateway=GatewayConfig(host="127.0.0.1", client_key="x"),
+        device=DeviceConfig(id="test"),
+        menubar=MenubarConfig(enabled=enabled),
+    )
+
+
+def test_make_menubar_disabled_returns_null() -> None:
+    inst = registry.make_menubar(_cfg_with_menubar(enabled=False))
+    assert inst.__class__.__name__ == "NullMenubarBackend"
+
+
+def test_make_menubar_linux_returns_null(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry.sys, "platform", "linux")
+    inst = registry.make_menubar(_cfg_with_menubar())
+    assert inst.__class__.__name__ == "NullMenubarBackend"
+
+
+def test_make_menubar_darwin_no_pyobjc_returns_null(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry.sys, "platform", "darwin")
+
+    orig_import = __import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "ui.menubar_cocoa" or name.endswith(".menubar_cocoa"):
+            raise ImportError("no pyobjc")
+        return orig_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+    inst = registry.make_menubar(_cfg_with_menubar())
+    assert inst.__class__.__name__ == "NullMenubarBackend"
+
+
+def test_make_menubar_darwin_with_pyobjc_returns_cocoa(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry.sys, "platform", "darwin")
+    import types
+    import sys as _sys
+
+    fake_cocoa = types.ModuleType("ui.menubar_cocoa")
+
+    class FakeCocoaBackend:
+        def __init__(self, cfg):
+            self.cfg = cfg
+
+    fake_cocoa.CocoaMenubarBackend = FakeCocoaBackend
+    monkeypatch.setitem(_sys.modules, "ui.menubar_cocoa", fake_cocoa)
+    inst = registry.make_menubar(_cfg_with_menubar())
+    assert isinstance(inst, FakeCocoaBackend)

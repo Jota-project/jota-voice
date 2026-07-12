@@ -84,6 +84,22 @@ def test_out_callback_cola_vacia_rellena_silencio() -> None:
     assert np.all(outdata == 0)
 
 
+def test_out_callback_chunk_impar_no_lanza() -> None:
+    """Bug real (2026-07-09): un chunk TTS de longitud impar de bytes hacía
+    que np.frombuffer(..., dtype=np.int16) lanzara ValueError dentro del
+    callback de PortAudio. sounddevice registra ese callback con
+    error=paAbort, así que una excepción sin capturar aborta el
+    OutputStream ENTERO — no solo ese chunk — dejando el resto de la
+    respuesta en silencio permanente sin ningún error visible."""
+    be = SounddeviceBackend(_cfg())
+    frames = 8
+    chunk = bytes([1, 2, 3])  # 3 bytes: no es múltiplo de 2 (tamaño de int16)
+    be._play_q.put(chunk)
+
+    outdata = np.zeros((frames, 1), dtype=np.int16)
+    be._out_callback(outdata, frames, None, None)  # no debe lanzar
+
+
 def test_out_callback_no_trunca_chunk_mayor_que_frames() -> None:
     """Bug: un chunk TTS más grande que `frames` perdía silenciosamente el resto."""
     be = SounddeviceBackend(_cfg())
@@ -102,3 +118,29 @@ def test_out_callback_no_trunca_chunk_mayor_que_frames() -> None:
     outdata3 = np.zeros((frames, 1), dtype=np.int16)
     be._out_callback(outdata3, frames, None, None)
     assert list(outdata3.ravel()) == [9, 10, 0, 0]
+
+
+def test_play_chunk_nunca_encola_bytes_impares() -> None:
+    """Fix de raíz: el chunking de red no garantiza alinear cada mensaje a
+    un número par de bytes (tamaño de una muestra int16). play_chunk debe
+    arrastrar el byte suelto al siguiente chunk en vez de dejar que un
+    chunk de longitud impar llegue a _play_q (ver test_out_callback_chunk_impar_no_lanza)."""
+    be = SounddeviceBackend(_cfg(output_device=None))
+    be._ensure_output_stream = lambda: None  # evita abrir hardware real
+
+    async def _run():
+        await be.play_chunk(bytes([1, 2, 3]))  # 3 bytes: impar
+        await be.play_chunk(bytes([4, 5]))     # 2 bytes: par
+
+    asyncio.run(_run())
+
+    queued = []
+    while not be._play_q.empty():
+        queued.append(be._play_q.get_nowait())
+
+    assert all(len(c) % 2 == 0 for c in queued), f"chunk impar encolado: {queued}"
+    # El byte 5 final queda pendiente como carry (aún no tiene pareja para
+    # formar una muestra int16 completa) — no se pierde, ninguno de los
+    # bytes 1-4 se reordena ni se descarta.
+    assert b"".join(queued) == bytes([1, 2, 3, 4])
+    assert be._enqueue_carry == bytes([5])
