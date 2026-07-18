@@ -482,6 +482,125 @@ async def _run_notification_failure_test() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 2c: capture_task falla con una excepción real (p.ej. corte de red en
+# gateway.send_audio) — a diferencia del fallo cosmético de play_notification
+# de arriba, esta excepción SÍ debe propagarse: NO debe llamarse send_end()
+# sobre una conexión rota ni publicarse recording_ended como si el turno
+# hubiera terminado con normalidad.
+# ---------------------------------------------------------------------------
+
+async def _run_capture_exception_test() -> None:
+    """capture_task falla con una excepción real (p.ej. corte de red a mitad de
+    un gateway.send_audio). A diferencia del fallo cosmético de play_notification
+    (test 2b), esta excepción SÍ debe propagar — si no, el código cae al camino
+    "todo normal", intenta gateway.send_end() sobre una conexión rota, y la
+    excepción real nunca se reporta con su mensaje original."""
+    print("\n=== Test: excepción real de capture_task se propaga (no se silencia) ===")
+
+    bus = EventBus()
+    cfg = _make_config()
+    audio = SounddeviceBackend(cfg.audio)
+    audio._loop = asyncio.get_running_loop()
+    audio._capture_q = asyncio.Queue()
+    audio._oww_q = asyncio.Queue()
+
+    gateway = _gateway_mock_with_events([])
+    # Configuramos el mock para que la 3ª invocación (preroll vacío no
+    # cuenta como send_audio → la 1ª va al preroll si existe; aquí no hay,
+    # luego 2 sends en _capture_loop y el 3er lanza ConnectionError simulando
+    # un corte de red a mitad de grabación).
+    gateway.send_audio = AsyncMock(
+        side_effect=[None, None, ConnectionError("corte de red")]
+    )
+
+    playback = _make_playback_mock()
+
+    call_count = [0]
+
+    async def _publish_wake_words() -> None:
+        while True:
+            await asyncio.sleep(0)
+            if call_count[0] == 0:
+                call_count[0] += 1
+                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
+
+    wake_publisher_task = asyncio.create_task(_publish_wake_words())
+
+    # Producer que introduce frames no silenciosos a la cola tras el drain
+    # inicial de _recording() — sin esto, _capture_loop espera eternamente y
+    # nunca llega a invocar gateway.send_audio(). El test no reproduciría
+    # el escenario real de corte de red a mitad de grabación.
+    async def _audio_producer() -> None:
+        await asyncio.sleep(0.1)  # deja pasar el drain de _recording()
+        for _ in range(20):
+            audio._on_frame(_tone_frame_f32())
+            await asyncio.sleep(0.01)
+
+    audio_producer_task = asyncio.create_task(_audio_producer())
+
+    received: list[VoiceEvent] = []
+    stop_event = asyncio.Event()
+    idle_count = [0]
+
+    async def _collector() -> None:
+        async for ev in bus.subscribe():
+            received.append(ev)
+            if ev.type == "state_changed" and ev.data.get("state") == "idle":
+                idle_count[0] += 1
+                if idle_count[0] >= 2:
+                    stop_event.set()
+
+    collector_task = asyncio.create_task(_collector())
+
+    from domain.state_machine import run as sm_run
+
+    sm_task = asyncio.create_task(sm_run(cfg, bus, audio, gateway, playback))
+
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=10.0)
+    except asyncio.TimeoutError:
+        pass
+
+    for t in (sm_task, wake_publisher_task, audio_producer_task):
+        t.cancel()
+    for t in (sm_task, wake_publisher_task, audio_producer_task):
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    bus.close()
+    try:
+        await collector_task
+    except Exception:
+        pass
+
+    event_types = [e.type for e in received]
+    print(f"\nEventos: {event_types}")
+
+    assert gateway.send_end.await_count == 0, (
+        f"gateway.send_end() no debía llamarse tras la excepción de capture_task: {event_types}"
+    )
+    assert "recording_ended" not in event_types, (
+        f"recording_ended no debía publicarse tras la excepción de capture_task: {event_types}"
+    )
+    error_evs = [e for e in received if e.type == "error"]
+    assert len(error_evs) >= 1, f"Esperaba visibilidad del fallo vía evento error: {event_types}"
+    assert any("corte de red" in e.data["message"] for e in error_evs), (
+        f"El mensaje real de la excepción de capture_task no se propagó: {[e.data for e in error_evs]}"
+    )
+
+    print("  OK  gateway.send_end() NO llamado tras la excepción de capture_task")
+    print("  OK  recording_ended NO publicado")
+    print("  OK  error publicado con el mensaje real de la excepción")
+    print("Test capture exception: PASADO")
+
+
+def test_state_machine_capture_exception_propagates() -> None:
+    asyncio.run(_run_capture_exception_test())
+
+
+# ---------------------------------------------------------------------------
 # Test 3: timeout en IDLE — OWW nunca detecta, debe publicar error
 # ---------------------------------------------------------------------------
 
