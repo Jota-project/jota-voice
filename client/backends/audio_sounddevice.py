@@ -32,6 +32,7 @@ class SounddeviceBackend:
         self._cfg = cfg
         self._loop: asyncio.AbstractEventLoop | None = None
         self._capture_q: asyncio.Queue[bytes] | None = None
+        self._oww_q: asyncio.Queue[bytes] | None = None
         self._input_stream = None
         self._output_stream = None
         self._play_q: queue_mod.Queue[bytes] = queue_mod.Queue()
@@ -58,16 +59,13 @@ class SounddeviceBackend:
 
         self._loop = asyncio.get_running_loop()
         self._capture_q = asyncio.Queue()
+        self._oww_q = asyncio.Queue()
         self._capture_stop.clear()
 
         def _callback(indata, frames, time, status):  # noqa: ARG001
             if status:
                 log.warning("SounddeviceBackend capture status: %s", status)
-            chunk = bytes(indata)  # float32 contiguo
-            with self._lock:
-                self._preroll.append(chunk)
-            if self._loop is not None and not self._loop.is_closed():
-                self._loop.call_soon_threadsafe(self._capture_q.put_nowait, chunk)
+            self._on_frame(bytes(indata))  # float32 contiguo
 
         kwargs = dict(
             samplerate=self._cfg.sample_rate,
@@ -111,10 +109,27 @@ class SounddeviceBackend:
 
     # --- acceso a datos ---
 
+    def _on_frame(self, chunk: bytes) -> None:
+        """Punto único de entrada de cada frame capturado — hace fan-out a
+        las dos colas independientes (RECORDING y OWW, ver get_queue() /
+        get_oww_queue()) para que ningún consumidor le robe frames al otro
+        (issue #9: antes ambos hacían `await q.get()` sobre la misma cola)."""
+        with self._lock:
+            self._preroll.append(chunk)
+        if self._loop is None or self._loop.is_closed():
+            return
+        self._loop.call_soon_threadsafe(self._capture_q.put_nowait, chunk)
+        self._loop.call_soon_threadsafe(self._oww_q.put_nowait, chunk)
+
     def get_queue(self) -> asyncio.Queue[bytes]:
         if self._capture_q is None:
             raise RuntimeError("SounddeviceBackend.get_queue() antes de start()")
         return self._capture_q
+
+    def get_oww_queue(self) -> asyncio.Queue[bytes]:
+        if self._oww_q is None:
+            raise RuntimeError("SounddeviceBackend.get_oww_queue() antes de start()")
+        return self._oww_q
 
     def get_preroll(self) -> bytes:
         with self._lock:
