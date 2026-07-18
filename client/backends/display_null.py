@@ -1,21 +1,13 @@
-"""Stub temporal — implementación real viene en Task 4."""
+"""NullDisplayBackend — backend no-op para dispositivos sin display (ej. Mac sin kiosk)."""
+from __future__ import annotations
+
+import logging
+
+log = logging.getLogger(__name__)
 
 
 class NullDisplayBackend:
-    def __init__(self) -> None:
-        pass
+    """Display no-op. Loguea a DEBUG; nunca falla."""
 
-    async def start(self) -> None:
-        pass
-
-    async def stop(self) -> None:
-        pass
-
-    async def set_state(self, state: str) -> None:
-        pass
-
-    async def set_text(self, text: str) -> None:
-        pass
-
-    async def show_avatar(self) -> None:
-        pass
+    async def update(self, state: str, **kwargs) -> None:
+        log.debug("NullDisplayBackend: state=%s kwargs=%s", state, kwargs)

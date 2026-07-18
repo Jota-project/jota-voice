@@ -1,18 +1,37 @@
 gateway:
-  host: "192.168.X.X"       # IP del servidor donde corre jota-gateway
-  port: 8004
-  path: "/ws/stream"
-  client_key: "RELLENAR"    # client_key del dispositivo en el servidor
+  # Opción A (recomendada para gateway detrás de proxy inverso / Tunnel):
+  # una sola URL completa. Se respeta LITERAL — el cliente no añade
+  # scheme, puerto ni path. Esto cubre el caso típico "wss://host/ruta"
+  # donde el usuario no quiere que se inyecte ningún puerto.
+  url: "wss://CHANGE-ME.example.com/api/gateway/ws/stream"
+  # Opción B: host + (port opcional) + (path opcional) + (scheme opcional).
+  # Si omites 'port', NO se añade a la URL. Si omites 'path', NO se añade.
+  # Si omites 'scheme', default = "ws". Usa esto cuando hablas directo
+  # con el gateway en LAN o en un puerto propio.
+  # host: "CHANGE-ME.local"
+  # port: 8004
+  # path: "/ws/stream"
+  # scheme: "ws"
+  client_key: "RELLENAR"
   connect_timeout_s: 10
 
+device:
+  id: "mi-dispositivo"
+
 oww:
-  host: "127.0.0.1"         # OWW en el mismo dispositivo → localhost
+  backend: "wyoming"          # único backend en fase 1
+  host: "127.0.0.1"           # localhost en Mac y en Termux
   port: 10401
   wake_words:
     - "ok_nabu"
   reconnect_backoff_s: [5, 10, 20, 60]
+  debounce_s: 2.0              # ignora detecciones repetidas de la misma wake
+                                # word dentro de esta ventana (wyoming-openwakeword
+                                # dispara una detección por cada chunk de audio por
+                                # encima del threshold, no una por locución)
 
 audio:
+  backend: null               # null = auto-detect por SO
   sample_rate: 16000
   channels: 1
   frames_per_buffer: 512
@@ -20,22 +39,30 @@ audio:
   silence_timeout_s: 1.5
   recording_timeout_s: 15.0
   vad_rms_threshold: 200
+  input_device: null          # solo sounddevice
+  output_device: null         # solo sounddevice
 
 display:
+  backend: null               # null = "http" si url, si no "null"
   url: "http://127.0.0.1:8766"
   timeout_s: 2.0
 
 hosts:
   - ip: "192.168.X.X"
-    name: "mi-servidor"     # nombre del host en /etc/hosts del dispositivo
+    name: "mi-servidor"
   - ip: "192.168.X.X"
     name: "mi-asistente"
-
-phone:
-  name: "mi-dispositivo"    # nombre único para identificar este teléfono
 
 logging:
   level: "INFO"
 
 control:
-  port: 8765                  # Puerto del servidor de control HTTP (para botón cancel)
+  port: 8765
+
+# menubar:
+#   enabled: true                # false desactiva el UI nativo (macOS)
+#   refresh_hz: 5.0               # Frecuencia del repaint; clamp [1.0, 30.0]
+#   log_path: null                # null = ~/Library/Logs/jota-voice/stdout.log
+#   config_path: null             # null = ~/Library/Application Support/jota-voice/config.yaml
+#
+# Equivalente: export JOTA_DISABLE_MENUBAR=1 antes de arrancar el cliente.

@@ -1,5 +1,7 @@
 # Config de usuario (no versionar)
 config.yaml
+devices/*/config.yaml
+devices/*/.env
 .env.local
 jota-env.sh
 
@@ -24,3 +26,9 @@ devices/*.env
 
 # Planes y specs de desarrollo (internos, no para el repo público)
 docs/superpowers/
+
+# Worktrees de git para desarrollo aislado
+.worktrees/
+
+# macOS Finder
+.DS_Store

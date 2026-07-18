@@ -2,20 +2,55 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
+import os
 import yaml
+
+
+def _load_env_file(path: Path) -> None:
+    """Carga variables KEY=VALUE de un .env sin pisar las ya definidas en el entorno."""
+    if not path.is_file():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip())
 
 
 @dataclass
 class GatewayConfig:
-    host: str
     client_key: str
-    port: int = 8004
-    path: str = "/ws/stream"
+    host: str = ""
+    port: Optional[int] = None      # si es None, no se añade puerto a la URL
+    path: str = ""                  # si es "", no se añade path a la URL
+    scheme: str = "ws"              # "ws" o "wss"; solo se usa cuando NO hay url completa
     connect_timeout_s: float = 10.0
+    url: Optional[str] = None
 
     @property
     def ws_url(self) -> str:
-        return f"ws://{self.host}:{self.port}{self.path}"
+        # Si el usuario dio una URL completa, se respeta literal — sin
+        # inyectar nada. Esto cubre el caso típico de gateway detrás de
+        # un proxy inverso (Cloudflare Tunnel, nginx con TLS, etc.), donde
+        # la URL ya viene con scheme, host, puerto y path correctos.
+        if self.url:
+            return self.url
+
+        # Si NO hay url, construimos desde host (+ port opcional + path opcional).
+        # NO inyectamos defaults: si el usuario no dio port, no se añade
+        # (ej. "wss://host/ruta" se queda "wss://host/ruta", no "wss://host:443/ruta").
+        if not self.host:
+            raise ValueError(
+                "GatewayConfig: falta 'url' o 'host' para construir la URL del gateway"
+            )
+
+        url = f"{self.scheme}://{self.host}"
+        if self.port is not None:
+            url += f":{self.port}"
+        if self.path:
+            url += self.path
+        return url
 
 
 @dataclass
@@ -30,6 +65,7 @@ class OWWConfig:
     wake_words: List[str] = field(default_factory=lambda: ["ok_nabu"])
     reconnect_backoff_s: List[float] = field(default_factory=lambda: [5.0, 10.0, 20.0, 60.0])
     idle_detection_timeout_s: float = 0.0  # 0.0 = sin timeout
+    debounce_s: float = 2.0
     backend: str = "wyoming"
 
 
@@ -42,6 +78,8 @@ class AudioConfig:
     silence_timeout_s: float = 1.5
     recording_timeout_s: float = 15.0
     vad_rms_threshold: float = 200.0
+    input_device: Optional[int] = None
+    output_device: Optional[int] = None
     backend: Optional[str] = None
 
 
@@ -50,6 +88,20 @@ class DisplayConfig:
     url: str = "http://127.0.0.1:8766"
     timeout_s: float = 2.0
     backend: Optional[str] = None
+
+
+@dataclass
+class MenubarConfig:
+    enabled: bool = True
+    refresh_hz: float = 5.0
+    log_path: Optional[str] = None
+    config_path: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.refresh_hz < 1.0:
+            self.refresh_hz = 1.0
+        elif self.refresh_hz > 30.0:
+            self.refresh_hz = 30.0
 
 
 @dataclass
@@ -71,34 +123,57 @@ class Config:
     display: DisplayConfig = field(default_factory=DisplayConfig)
     control: ControlConfig = field(default_factory=ControlConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    menubar: MenubarConfig = field(default_factory=MenubarConfig)
 
 
 def _gateway_from_dict(d: dict) -> GatewayConfig:
-    required = {"host", "client_key"}
+    if "client_key" not in d:
+        raise ValueError("config.yaml: falta client_key en gateway")
+    if "url" not in d and "host" not in d:
+        raise ValueError("config.yaml: gateway necesita 'url' o 'host'")
+
+    # port y path son OPCIONALES. Si no están en el YAML, no se inyectan
+    # en la URL construida (caso típico: gateway detrás de proxy inverso
+    # con URL completa del tipo "wss://host/ruta" — el puerto no debe
+    # aparecer porque el cliente habla por el esquema por defecto del proxy).
+    port = d.get("port")
+    if port is not None:
+        port = int(port)
+
+    return GatewayConfig(
+        client_key=d["client_key"],
+        host=d.get("host", ""),
+        port=port,
+        path=d.get("path", ""),
+        scheme=d.get("scheme", "ws"),
+        connect_timeout_s=float(d.get("connect_timeout_s", 10.0)),
+        url=d.get("url"),
+    )
+
+
+def _device_from_dict(d: dict) -> DeviceConfig:
+    required = {"id"}
     missing = required - d.keys()
     if missing:
-        raise ValueError(f"config.yaml: faltan campos en gateway: {missing}")
-    return GatewayConfig(
-        host=d["host"],
-        client_key=d["client_key"],
-        port=int(d.get("port", 8004)),
-        path=d.get("path", "/ws/stream"),
-        connect_timeout_s=float(d.get("connect_timeout_s", 10.0)),
-    )
+        raise ValueError(f"config.yaml: faltan campos en device: {missing}")
+    return DeviceConfig(id=str(d["id"]))
 
 
 def _oww_from_dict(d: dict) -> OWWConfig:
     return OWWConfig(
+        backend=d.get("backend", "wyoming"),
         host=d.get("host", "127.0.0.1"),
         port=int(d.get("port", 10401)),
         wake_words=list(d.get("wake_words", ["ok_nabu"])),
         reconnect_backoff_s=[float(x) for x in d.get("reconnect_backoff_s", [5, 10, 20, 60])],
         idle_detection_timeout_s=float(d.get("idle_detection_timeout_s", 0.0)),
+        debounce_s=float(d.get("debounce_s", 2.0)),
     )
 
 
 def _audio_from_dict(d: dict) -> AudioConfig:
     return AudioConfig(
+        backend=d.get("backend"),
         sample_rate=int(d.get("sample_rate", 16000)),
         channels=int(d.get("channels", 1)),
         frames_per_buffer=int(d.get("frames_per_buffer", 512)),
@@ -106,12 +181,15 @@ def _audio_from_dict(d: dict) -> AudioConfig:
         silence_timeout_s=float(d.get("silence_timeout_s", 1.5)),
         recording_timeout_s=float(d.get("recording_timeout_s", 15.0)),
         vad_rms_threshold=float(d.get("vad_rms_threshold", 200.0)),
+        input_device=d.get("input_device"),
+        output_device=d.get("output_device"),
     )
 
 
 def _display_from_dict(d: dict) -> DisplayConfig:
     return DisplayConfig(
-        url=d.get("url", "http://127.0.0.1:8766"),
+        backend=d.get("backend"),
+        url=d.get("url", ""),
         timeout_s=float(d.get("timeout_s", 2.0)),
     )
 
@@ -122,18 +200,38 @@ def _control_from_dict(d: dict) -> ControlConfig:
     )
 
 
+def _menubar_from_dict(d: dict) -> MenubarConfig:
+    return MenubarConfig(
+        enabled=bool(d.get("enabled", True)),
+        refresh_hz=float(d.get("refresh_hz", 5.0)),
+        log_path=d.get("log_path"),
+        config_path=d.get("config_path"),
+    )
+
+
 def load_config(path: str | Path) -> Config:
+    real_path = Path(path).resolve()
+    _load_env_file(real_path.parent / ".env")
     with open(path) as f:
         data = yaml.safe_load(f)
     if "gateway" not in data:
         raise ValueError("config.yaml: sección 'gateway' obligatoria")
+    if "device" not in data:
+        raise ValueError("config.yaml: sección 'device' obligatoria")
+
+    menubar_section = data.get("menubar", {})
+    if os.environ.get("JOTA_DISABLE_MENUBAR") in ("1", "true", "yes"):
+        menubar_section = {**menubar_section, "enabled": False}
+
     return Config(
         gateway=_gateway_from_dict(data["gateway"]),
+        device=_device_from_dict(data["device"]),
         oww=_oww_from_dict(data.get("oww", {})),
         audio=_audio_from_dict(data.get("audio", {})),
         display=_display_from_dict(data.get("display", {})),
         control=_control_from_dict(data.get("control", {})),
         logging=LoggingConfig(level=data.get("logging", {}).get("level", "INFO")),
+        menubar=_menubar_from_dict(menubar_section),
     )
 
 
@@ -142,6 +240,8 @@ if __name__ == "__main__":
     cfg_path = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
     cfg = load_config(cfg_path)
     print("Config cargada OK")
+    print(f"  device:  {cfg.device.id}")
     print(f"  gateway: {cfg.gateway.ws_url}")
-    print(f"  oww:     {cfg.oww.host}:{cfg.oww.port}")
-    print(f"  display: {cfg.display.url}")
+    print(f"  oww:     {cfg.oww.host}:{cfg.oww.port} (backend={cfg.oww.backend})")
+    print(f"  audio:   backend={cfg.audio.backend}")
+    print(f"  display: backend={cfg.display.backend} url={cfg.display.url!r}")
