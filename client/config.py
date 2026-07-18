@@ -22,16 +22,35 @@ def _load_env_file(path: Path) -> None:
 class GatewayConfig:
     client_key: str
     host: str = ""
-    port: int = 8004
-    path: str = "/ws/stream"
+    port: Optional[int] = None      # si es None, no se añade puerto a la URL
+    path: str = ""                  # si es "", no se añade path a la URL
+    scheme: str = "ws"              # "ws" o "wss"; solo se usa cuando NO hay url completa
     connect_timeout_s: float = 10.0
     url: Optional[str] = None
 
     @property
     def ws_url(self) -> str:
+        # Si el usuario dio una URL completa, se respeta literal — sin
+        # inyectar nada. Esto cubre el caso típico de gateway detrás de
+        # un proxy inverso (Cloudflare Tunnel, nginx con TLS, etc.), donde
+        # la URL ya viene con scheme, host, puerto y path correctos.
         if self.url:
             return self.url
-        return f"ws://{self.host}:{self.port}{self.path}"
+
+        # Si NO hay url, construimos desde host (+ port opcional + path opcional).
+        # NO inyectamos defaults: si el usuario no dio port, no se añade
+        # (ej. "wss://host/ruta" se queda "wss://host/ruta", no "wss://host:443/ruta").
+        if not self.host:
+            raise ValueError(
+                "GatewayConfig: falta 'url' o 'host' para construir la URL del gateway"
+            )
+
+        url = f"{self.scheme}://{self.host}"
+        if self.port is not None:
+            url += f":{self.port}"
+        if self.path:
+            url += self.path
+        return url
 
 
 @dataclass
@@ -46,6 +65,7 @@ class OWWConfig:
     wake_words: List[str] = field(default_factory=lambda: ["ok_nabu"])
     reconnect_backoff_s: List[float] = field(default_factory=lambda: [5.0, 10.0, 20.0, 60.0])
     idle_detection_timeout_s: float = 0.0  # 0.0 = sin timeout
+    debounce_s: float = 2.0
     backend: str = "wyoming"
 
 
@@ -111,11 +131,21 @@ def _gateway_from_dict(d: dict) -> GatewayConfig:
         raise ValueError("config.yaml: falta client_key en gateway")
     if "url" not in d and "host" not in d:
         raise ValueError("config.yaml: gateway necesita 'url' o 'host'")
+
+    # port y path son OPCIONALES. Si no están en el YAML, no se inyectan
+    # en la URL construida (caso típico: gateway detrás de proxy inverso
+    # con URL completa del tipo "wss://host/ruta" — el puerto no debe
+    # aparecer porque el cliente habla por el esquema por defecto del proxy).
+    port = d.get("port")
+    if port is not None:
+        port = int(port)
+
     return GatewayConfig(
         client_key=d["client_key"],
         host=d.get("host", ""),
-        port=int(d.get("port", 8004)),
-        path=d.get("path", "/ws/stream"),
+        port=port,
+        path=d.get("path", ""),
+        scheme=d.get("scheme", "ws"),
         connect_timeout_s=float(d.get("connect_timeout_s", 10.0)),
         url=d.get("url"),
     )
@@ -137,6 +167,7 @@ def _oww_from_dict(d: dict) -> OWWConfig:
         wake_words=list(d.get("wake_words", ["ok_nabu"])),
         reconnect_backoff_s=[float(x) for x in d.get("reconnect_backoff_s", [5, 10, 20, 60])],
         idle_detection_timeout_s=float(d.get("idle_detection_timeout_s", 0.0)),
+        debounce_s=float(d.get("debounce_s", 2.0)),
     )
 
 

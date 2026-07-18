@@ -1,11 +1,17 @@
 gateway:
-  # Opción A: host + port + path (WebSocket directo, sin proxy)
-  host: "green-house"
-  port: 8004
-  path: "/ws/stream"
-  # Opción B: url completa (proxy inverso / túnel). Si se define, tiene
-  # prioridad sobre host/port/path — bórralos si usas esta opción.
-  # url: "wss://tu-dominio.com/api/gateway/ws/stream"
+  # Opción A (recomendada para gateway detrás de proxy inverso / Tunnel):
+  # una sola URL completa. Se respeta LITERAL — el cliente no añade
+  # scheme, puerto ni path. Esto cubre el caso típico "wss://host/ruta"
+  # donde el usuario no quiere que se inyecte ningún puerto.
+  url: "wss://CHANGE-ME.example.com/api/gateway/ws/stream"
+  # Opción B: host + (port opcional) + (path opcional) + (scheme opcional).
+  # Si omites 'port', NO se añade a la URL. Si omites 'path', NO se añade.
+  # Si omites 'scheme', default = "ws". Usa esto cuando hablas directo
+  # con el gateway en LAN o en un puerto propio.
+  # host: "CHANGE-ME.local"
+  # port: 8004
+  # path: "/ws/stream"
+  # scheme: "ws"
   client_key: "RELLENAR"
   connect_timeout_s: 10
 
@@ -19,6 +25,10 @@ oww:
   wake_words:
     - "ok_nabu"
   reconnect_backoff_s: [5, 10, 20, 60]
+  debounce_s: 2.0              # ignora detecciones repetidas de la misma wake
+                                # word dentro de esta ventana (wyoming-openwakeword
+                                # dispara una detección por cada chunk de audio por
+                                # encima del threshold, no una por locución)
 
 audio:
   backend: null               # null = auto-detect por SO
