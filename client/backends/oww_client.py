@@ -27,6 +27,7 @@ class OWWClient:
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
         self._connected = False
+        self._last_trigger_at: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Public interface
@@ -106,6 +107,14 @@ class OWWClient:
 
         Skips any detection whose name is not in ``cfg.wake_words``.
         Raises ``ConnectionError`` if the server closes the connection.
+
+        wyoming-openwakeword dispara un evento Detection por cada chunk de
+        audio por encima del threshold, no una vez por locución — una sola
+        locución de ~1s puede generar 8-15 eventos seguidos (verificado en
+        producción). Sin debounce, cada uno dispara un turno nuevo por
+        separado, causando reentradas espurias en RECORDING justo tras
+        interrumpir RESPONDING. Se ignoran repeticiones de la misma wake
+        word dentro de ``cfg.debounce_s`` desde la última aceptada.
         """
         try:
             while True:
@@ -137,6 +146,15 @@ class OWWClient:
                         None,
                     )
                     if matched:
+                        now = asyncio.get_running_loop().time()
+                        last = self._last_trigger_at.get(matched)
+                        if last is not None and (now - last) < self._cfg.debounce_s:
+                            log.debug(
+                                "Detección de %s ignorada (debounce, %.2fs desde la última)",
+                                matched, now - last,
+                            )
+                            continue
+                        self._last_trigger_at[matched] = now
                         log.info("Wake word detectado: %s", name)
                         return matched
                     log.info("Detección ignorada (no configurada): name=%r stem=%r", name, stem)
@@ -180,9 +198,13 @@ class OWWClient:
         """
         import numpy as np  # local import: numpy puede no estar en import path
 
+        backoff = list(self._cfg.reconnect_backoff_s)
+        consecutive_drops = 0
+
         while True:
             await self.connect_with_backoff()
             log.info("OWW run_forever: conectado, escuchando audio del mic")
+            consecutive_drops = 0
 
             # Task 1: enviar audio del mic a OWW en loop
             send_task = asyncio.create_task(self._send_audio_loop(audio))
@@ -200,6 +222,16 @@ class OWWClient:
                 except asyncio.CancelledError:
                     pass
                 await self.disconnect()
+
+                # connect_with_backoff() solo espera si el connect() TCP
+                # falla — si el servidor acepta la conexión y la cierra justo
+                # después (p.ej. Docker reiniciando OWW), connect() tiene
+                # éxito y esta desconexión post-conexión reintentaría sin
+                # ningún delay, martilleando el servidor en un hot-loop.
+                delay = backoff[min(consecutive_drops, len(backoff) - 1)]
+                consecutive_drops += 1
+                log.warning("OWW run_forever: esperando %.1fs antes de reconectar", delay)
+                await asyncio.sleep(delay)
                 continue
 
     async def _send_audio_loop(self, audio) -> None:
