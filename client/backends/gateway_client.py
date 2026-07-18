@@ -57,7 +57,38 @@ class GatewayClient:
             "output_mode": ["audio", "text", "status"],
         }
         await self._ws.send(json.dumps(handshake))
-        log.debug("Gateway conectado a %s (device=%s)", self._cfg.ws_url, self._device_id)
+        # Protocolo (jota-gateway/docs/client-protocol.md): leer respuesta del
+        # handshake antes de enviar audio. Sin esto, client_key inválida →
+        # close 1008 → el cliente envía el turno entero (hasta 15s) a una
+        # conexión muerta y solo lo descubre al final, de forma genérica.
+        # Coste: un RTT extra por turno (arquitectura reconnect-per-turn); #24
+        # migrará a sesión WS persistente donde el handshake ocurre una vez.
+        # Deuda técnica conocida (no expandido): capabilities.tts/barge_in/
+        # transcriber y session_id del ready no se capturan — relevante cuando
+        # #24 haga la sesión persistente.
+        try:
+            raw = await asyncio.wait_for(
+                self._ws.recv(),
+                timeout=self._cfg.connect_timeout_s,
+            )
+        except asyncio.TimeoutError:
+            log.error(
+                "Gateway: timeout esperando 'ready' tras handshake (%.1fs)",
+                self._cfg.connect_timeout_s,
+            )
+            raise
+        msg = json.loads(raw)
+        msg_type = msg.get("type", "")
+        if msg_type == "ready":
+            log.debug("Gateway listo (device=%s)", self._device_id)
+            return
+        if msg_type == "error":
+            raise RuntimeError(
+                f"Gateway: handshake rechazado: {msg.get('message', msg)}"
+            )
+        raise RuntimeError(
+            f"Gateway: handshake devolvió tipo inesperado {msg_type!r}: {msg}"
+        )
 
     async def disconnect(self) -> None:
         if self._ws:
