@@ -147,7 +147,15 @@ async def main(
             loop.add_signal_handler(sig, _on_signal)
 
     # --- Arrancar captura de audio ---
-    await audio.start()
+    try:
+        await audio.start()
+    except Exception:
+        log.exception("No se pudo arrancar la captura de audio; jota-voice no puede continuar")
+        menubar_backend.set_state("error")
+        menubar_backend.set_status_text(
+            "Error: no se pudo iniciar el audio (revisa permisos de micrófono/dispositivo)"
+        )
+        return
     log.info("AudioCapture iniciado")
 
     cancel_event = asyncio.Event()
@@ -332,7 +340,21 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
             loop_ready.set()
             await main(cfg, menubar_backend, external_stop_event=stop_event)
 
-        asyncio.run(_runner())
+        try:
+            asyncio.run(_runner())
+        except Exception:
+            log.exception("El hilo de asyncio terminó con un error no controlado")
+            # Por si el fallo ocurrió antes de que _runner() llegara a
+            # loop_ready.set(): el hilo principal no debe quedarse
+            # esperando los 5s completos del timeout.
+            loop_ready.set()
+            try:
+                menubar_backend.set_state("error")
+                menubar_backend.set_status_text(
+                    "Error interno: revisa los logs de jota-voice"
+                )
+            except Exception:
+                log.exception("No se pudo reflejar el error en el menubar")
 
     t = threading.Thread(target=_asyncio_thread, name="jota-asyncio", daemon=False)
     t.start()
@@ -343,8 +365,12 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
         log.info("Señal de parada recibida (%s)", signum)
         loop = loop_holder.get("loop")
         stop_event = stop_holder.get("stop_event")
-        if loop is not None and stop_event is not None:
+        if loop is None or stop_event is None:
+            return
+        try:
             loop.call_soon_threadsafe(stop_event.set)
+        except RuntimeError:
+            log.debug("El loop de asyncio ya estaba cerrado; señal ignorada")
 
     signal.signal(signal.SIGINT, _handle_os_signal)
     signal.signal(signal.SIGTERM, _handle_os_signal)
