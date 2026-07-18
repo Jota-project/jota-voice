@@ -56,7 +56,7 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 - [x] **#10** 🔴 `[002]` — ControlServer (127.0.0.1:8765) sin autenticación — vulnerable desde cualquier pestaña de navegador — **S** — token compartido (600) + header `X-Jota-Control-Token` + rate limiting (`c27ba2a`, `a31fd42`)
 - [x] **#11** 🔴 `[003]` — Fallo de `audio.start()` en macOS deja el icono del menubar "vivo" sin que nada funcione — **S** — try/except visible en menubar (`set_state("error")`) + "Salir" siempre cierra la app (`00bc2f6`, `984b387`)
 - [x] **#12** 🔴 `[004]` — Excepción de `capture_task` durante RECORDING nunca se comprueba — **S** — propagar `capture_task.exception()` en `_recording()` reusando el patrón de `_responding()` (`c245aa9`)
-- [ ] **#13** 🔴 `[005]` — `audio_termux.py::_play()` pierde muestras en chunks de longitud impar — **S**
+- [x] **#13** 🔴 `[005]` — `audio_termux.py::_play()` pierde muestras en chunks de longitud impar — **S** — arrastrar byte suelto en `_play()` y reset en `stop`/`drain`/`reset`, replicando el patrón de `audio_sounddevice.py::_enqueue_carry` (`b48ff57`)
 - [ ] **#14** 🔴 `[006]` — `oww_client.py`: rate/channels hardcodeados a 16000/mono, desacoplados de `AudioConfig` — **S**
 - [ ] **#15** 🔴 `[007]` — `gateway_client.py::connect()` no espera el mensaje `ready` antes de enviar audio — **S**
 - [ ] **#16** 🔴 `[008]` — Cierre de conexión a mitad de turno se trata igual que un fin de turno normal — **S**
