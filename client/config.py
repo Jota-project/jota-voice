@@ -107,6 +107,9 @@ class MenubarConfig:
 @dataclass
 class ControlConfig:
     port: int = 8765
+    token_path: Optional[str] = None
+    rate_limit_max_requests: int = 10
+    rate_limit_window_s: float = 10.0
 
 
 @dataclass
@@ -197,6 +200,9 @@ def _display_from_dict(d: dict) -> DisplayConfig:
 def _control_from_dict(d: dict) -> ControlConfig:
     return ControlConfig(
         port=int(d.get("port", 8765)),
+        token_path=d.get("token_path"),
+        rate_limit_max_requests=int(d.get("rate_limit_max_requests", 10)),
+        rate_limit_window_s=float(d.get("rate_limit_window_s", 10.0)),
     )
 
 
