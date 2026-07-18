@@ -72,6 +72,7 @@ _install_stubs()
 from domain.event_bus import EventBus, VoiceEvent                       # noqa: E402
 from config import Config, GatewayConfig, AudioConfig, OWWConfig, DeviceConfig  # noqa: E402
 from backends.gateway_client import GatewayEvent                        # noqa: E402
+from backends.audio_sounddevice import SounddeviceBackend               # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -891,6 +892,128 @@ async def _run_turn_end_grace_period_test() -> None:
     assert elapsed < 8.0, f"Tardó demasiado en cerrar tras turn_end: {elapsed:.1f}s"
     print("  OK  playback_ended tras un margen corto, sin error de timeout")
     print("Test turn_end grace period: PASADO")
+
+
+# ---------------------------------------------------------------------------
+# Test: RECORDING no debe consumir como "voz del usuario" el backlog
+# acumulado en get_queue() durante la espera de _idle() (regresión del
+# fix de fan-out de audio, issue #9).
+# ---------------------------------------------------------------------------
+
+def _silence_frame_f32() -> bytes:
+    import numpy as np
+    return np.zeros(512, dtype=np.float32).tobytes()
+
+
+def _tone_frame_f32(amplitude: float = 0.5) -> bytes:
+    import numpy as np
+    t = np.arange(512) / 16000.0
+    wave = (np.sin(2 * np.pi * 440.0 * t) * amplitude).astype(np.float32)
+    return wave.tobytes()
+
+
+async def _run_recording_discards_stale_idle_backlog_test() -> None:
+    """Antes del fan-out de audio (#9), OWWClient._send_audio_loop drenaba
+    continuamente get_queue() (la misma cola compartida) durante TODA la
+    espera de _idle() a la wake word — como efecto secundario de su propio
+    bug, get_queue() nunca acumulaba backlog. Tras separar las colas
+    (get_queue() para RECORDING, get_oww_queue() para OWW), nada consume
+    get_queue() mientras _idle() espera — si RECORDING no descarta ese
+    backlog antes de escuchar, _capture_loop consume el ruido de ambiente
+    acumulado como si fuera la voz del usuario, agota
+    silence_frames_needed con ese backlog, y corta el turno por silencio
+    ANTES de llegar al audio real (pérdida total de la locución del
+    usuario, en cualquier turno con más de ~100ms entre wake word y el
+    inicio de la frase)."""
+    print("\n=== Test regresión: backlog de IDLE no se cuela en RECORDING ===")
+
+    bus = EventBus()
+    cfg = _make_config()  # silence_timeout_s=0.1s → 3 frames a 16kHz/512
+
+    audio = SounddeviceBackend(cfg.audio)
+    audio._loop = asyncio.get_running_loop()
+    audio._capture_q = asyncio.Queue()
+    audio._oww_q = asyncio.Queue()
+
+    gateway = MagicMock()
+    gateway.connect = AsyncMock()
+    gateway.disconnect = AsyncMock()
+    gateway.send_audio = AsyncMock()
+    gateway.send_end = AsyncMock()
+    gateway.send_cancel = AsyncMock()
+    gateway.receive = lambda: (x for x in [])  # nunca se usa (no llega a RESPONDING)
+
+    playback = _make_playback_mock()
+
+    wake_published = asyncio.Event()
+    tone = _tone_frame_f32()
+
+    async def _publish_wake_word_soon() -> None:
+        await asyncio.sleep(0.05)  # deja tiempo a que se acumule backlog
+        bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
+        wake_published.set()
+
+    async def _ambient_backlog_producer() -> None:
+        # Simula la captura continua de mic mientras _idle() espera — nadie
+        # consume get_queue() en ese tramo tras el fix de fan-out.
+        while not wake_published.is_set():
+            audio._on_frame(_silence_frame_f32())
+            await asyncio.sleep(0.002)
+
+    async def _live_speech_producer() -> None:
+        await wake_published.wait()
+        for _ in range(5):
+            audio._on_frame(tone)
+            await asyncio.sleep(0.01)
+        for _ in range(5):
+            audio._on_frame(_silence_frame_f32())
+            await asyncio.sleep(0.01)
+
+    wake_task = asyncio.create_task(_publish_wake_word_soon())
+    backlog_task = asyncio.create_task(_ambient_backlog_producer())
+    speech_task = asyncio.create_task(_live_speech_producer())
+
+    stop_event = asyncio.Event()
+    idle_count = [0]
+
+    async def _watcher() -> None:
+        async for ev in bus.subscribe():
+            if ev.type == "state_changed" and ev.data.get("state") == "idle":
+                idle_count[0] += 1
+                if idle_count[0] >= 2:
+                    stop_event.set()
+                    return
+
+    watcher_task = asyncio.create_task(_watcher())
+
+    from domain.state_machine import run as sm_run
+    sm_task = asyncio.create_task(sm_run(cfg, bus, audio, gateway, playback))
+
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=5.0)
+    except asyncio.TimeoutError:
+        pass
+
+    tasks = (sm_task, watcher_task, wake_task, backlog_task, speech_task)
+    for t in tasks:
+        t.cancel()
+    for t in tasks:
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+
+    sent_frames = [c.args[0] for c in gateway.send_audio.call_args_list]
+    assert tone in sent_frames, (
+        "RECORDING cortó por silencio consumiendo solo el backlog de IDLE — "
+        f"nunca llegó a procesar el audio en vivo del usuario "
+        f"(frames enviados al gateway: {len(sent_frames)})"
+    )
+    print("  OK  audio en vivo consumido, backlog de IDLE descartado correctamente")
+
+
+def test_recording_discards_stale_idle_backlog() -> None:
+    asyncio.run(_run_recording_discards_stale_idle_backlog_test())
 
 
 # ---------------------------------------------------------------------------
