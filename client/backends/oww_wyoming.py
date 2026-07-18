@@ -1,9 +1,9 @@
 """WyomingBackend — wake word via Wyoming TCP (default port 10401)."""
 from __future__ import annotations
 
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Optional
 
-from config import OWWConfig
+from config import AudioConfig, OWWConfig
 from .oww_client import OWWClient
 
 
@@ -16,12 +16,22 @@ class WyomingBackend:
     en el registry, pero el callback real se recibe en `run_forever(audio, on_wake_word)`
     para que el llamador pueda cambiarlo entre invocaciones. Si se construye sin
     callback, el usuario debe pasarlo en `run_forever`.
+
+    `audio_cfg` (issue #14) es la AudioConfig del backend de audio para que el
+    OWWClient subyacente declare el rate/channels REALES del micrófono en los
+    eventos Wyoming, en lugar de asumir 16000/mono. Es opcional para mantener
+    compatibilidad con código que construye WyomingBackend solo con OWWConfig.
     """
 
-    def __init__(self, cfg: OWWConfig, on_wake_word: Callable[[str], Awaitable[None]] | None = None) -> None:
+    def __init__(
+        self,
+        cfg: OWWConfig,
+        on_wake_word: Callable[[str], Awaitable[None]] | None = None,
+        audio_cfg: Optional[AudioConfig] = None,
+    ) -> None:
         self._cfg = cfg
         self._default_on_wake = on_wake_word
-        self._client = OWWClient(cfg)
+        self._client = OWWClient(cfg, audio_cfg=audio_cfg)
 
     async def connect_with_backoff(self) -> None:
         await self._client.connect_with_backoff()

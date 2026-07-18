@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from config import OWWConfig
+from config import AudioConfig, OWWConfig
 from backends.oww_client import OWWClient
 
 
@@ -164,3 +164,145 @@ async def _test_wait_for_detection_ignora_detecciones_duplicadas_de_la_misma_wak
 
 def test_wait_for_detection_ignora_detecciones_duplicadas_de_la_misma_wake_word() -> None:
     asyncio.run(_test_wait_for_detection_ignora_detecciones_duplicadas_de_la_misma_wake_word())
+
+
+# ---------------------------------------------------------------------------
+# Issue #14: OWW debe reflejar rate/channels de AudioConfig en los eventos
+# Wyoming (audio-start + audio-chunk) en lugar de hardcodear 16000/mono.
+# ---------------------------------------------------------------------------
+
+
+async def _capture_audio_start_server(captured: list) -> asyncio.base_events.Server:
+    """Servidor fake: completa handshake y captura el JSON de audio-start
+    recibido. Cierra la conexión al terminar."""
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readline()  # detect
+        audio_start_line = await reader.readline()
+        try:
+            captured.append(json.loads(audio_start_line.decode().strip()))
+        except json.JSONDecodeError:
+            captured.append({})
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+    return await asyncio.start_server(handler, "127.0.0.1", 0)
+
+
+async def _capture_audio_chunk_server(captured: list) -> asyncio.base_events.Server:
+    """Servidor fake: completa handshake y captura el JSON del primer audio-chunk
+    recibido, junto con su payload (entero si existe). Cierra la conexión al terminar."""
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readline()  # detect
+        await reader.readline()  # audio-start
+        chunk_line = await reader.readline()
+        try:
+            msg = json.loads(chunk_line.decode().strip())
+        except json.JSONDecodeError:
+            msg = {}
+        payload_len = msg.get("payload_length", 0)
+        if payload_len > 0:
+            payload = await reader.readexactly(payload_len)
+        else:
+            payload = b""
+        captured.append((msg, payload))
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+    return await asyncio.start_server(handler, "127.0.0.1", 0)
+
+
+async def _test_audio_start_refleja_rate_y_channels_de_audio_config() -> None:
+    """Sin audio_config, OWWClient debe usar defaults (16000/mono/2)."""
+    captured: list = []
+    server = await _capture_audio_start_server(captured)
+    port = server.sockets[0].getsockname()[1]
+
+    async with server:
+        client = OWWClient(OWWConfig(host="127.0.0.1", port=port))
+        await client.connect()
+
+    assert len(captured) == 1, f"Esperaba 1 mensaje audio-start, recibí {len(captured)}"
+    audio_data = captured[0].get("data", {})
+    assert audio_data.get("rate") == 16000, (
+        f"audio-start rate esperado 16000 (default sin AudioConfig), obtuve {audio_data.get('rate')}"
+    )
+    assert audio_data.get("channels") == 1, (
+        f"audio-start channels esperado 1 (default sin AudioConfig), obtuve {audio_data.get('channels')}"
+    )
+    assert audio_data.get("width") == 2, (
+        f"audio-start width esperado 2 (PCM int16 del protocolo Wyoming), obtuve {audio_data.get('width')}"
+    )
+
+
+def test_audio_start_refleja_rate_y_channels_de_audio_config() -> None:
+    asyncio.run(_test_audio_start_refleja_rate_y_channels_de_audio_config())
+
+
+async def _test_audio_start_refleja_rate_y_channels_personalizados() -> None:
+    """Con audio_config(sample_rate=48000, channels=2), OWWClient debe
+    reflejar esos valores en audio-start (no los hardcodeados 16000/1)."""
+    captured: list = []
+    server = await _capture_audio_start_server(captured)
+    port = server.sockets[0].getsockname()[1]
+
+    audio_cfg = AudioConfig(sample_rate=48000, channels=2)
+    async with server:
+        client = OWWClient(OWWConfig(host="127.0.0.1", port=port), audio_cfg=audio_cfg)
+        await client.connect()
+
+    assert len(captured) == 1, f"Esperaba 1 mensaje audio-start, recibí {len(captured)}"
+    audio_data = captured[0].get("data", {})
+    assert audio_data.get("rate") == 48000, (
+        f"audio-start rate esperaba 48000 (de AudioConfig), obtuve {audio_data.get('rate')} "
+        f"(bug #14: hardcodeado a 16000)"
+    )
+    assert audio_data.get("channels") == 2, (
+        f"audio-start channels esperaba 2 (de AudioConfig), obtuve {audio_data.get('channels')} "
+        f"(bug #14: hardcodeado a 1)"
+    )
+    # width sigue siendo 2 (PCM int16) — constante del protocolo, no de AudioConfig
+    assert audio_data.get("width") == 2
+
+
+def test_audio_start_refleja_rate_y_channels_personalizados() -> None:
+    asyncio.run(_test_audio_start_refleja_rate_y_channels_personalizados())
+
+
+async def _test_audio_chunk_refleja_rate_y_channels_de_audio_config() -> None:
+    """send_audio debe emitir el header audio-chunk con rate/channels de
+    AudioConfig, no los hardcodeados 16000/1."""
+    captured: list = []
+    server = await _capture_audio_chunk_server(captured)
+    port = server.sockets[0].getsockname()[1]
+
+    audio_cfg = AudioConfig(sample_rate=48000, channels=2)
+    async with server:
+        client = OWWClient(OWWConfig(host="127.0.0.1", port=port), audio_cfg=audio_cfg)
+        await client.connect()
+        await client.send_audio(b"\x00\x01\x02\x03")
+
+    assert len(captured) == 1, f"Esperaba 1 audio-chunk, recibí {len(captured)}"
+    chunk_msg, payload = captured[0]
+    assert chunk_msg.get("type") == "audio-chunk"
+    audio_data = chunk_msg.get("data", {})
+    assert audio_data.get("rate") == 48000, (
+        f"audio-chunk rate esperaba 48000 (de AudioConfig), obtuve {audio_data.get('rate')} "
+        f"(bug #14: hardcodeado a 16000)"
+    )
+    assert audio_data.get("channels") == 2, (
+        f"audio-chunk channels esperaba 2 (de AudioConfig), obtuve {audio_data.get('channels')} "
+        f"(bug #14: hardcodeado a 1)"
+    )
+    assert payload == b"\x00\x01\x02\x03"
+
+
+def test_audio_chunk_refleja_rate_y_channels_de_audio_config() -> None:
+    asyncio.run(_test_audio_chunk_refleja_rate_y_channels_de_audio_config())

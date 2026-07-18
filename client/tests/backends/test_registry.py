@@ -100,6 +100,35 @@ def test_make_oww_unknown_backend() -> None:
         registry.make_oww(cfg, on_wake_word=None)
 
 
+def test_make_oww_propagate_audio_config_al_owwclient() -> None:
+    """Issue #14: make_oww debe pasar cfg.audio al WyomingBackend, que a su
+    vez lo propaga al OWWClient subyacente — eso es lo que el runtime usa
+    realmente para declarar rate/channels en el protocolo Wyoming, en lugar
+    de los hardcodeados 16000/mono. Verificamos el resultado observable
+    (rate/channels que OWWClient verá al serializar audio-start/audio-chunk),
+    no un campo de almacenamiento que podría descartarse sin afectar al
+    comportamiento."""
+    from backends.oww_wyoming import WyomingBackend
+
+    cfg = Config(
+        gateway=GatewayConfig(host="127.0.0.1", client_key="x"),
+        device=DeviceConfig(id="test"),
+        audio=AudioConfig(sample_rate=48000, channels=2),
+    )
+    inst = registry.make_oww(cfg, on_wake_word=None)
+    assert isinstance(inst, WyomingBackend)
+    # WyomingBackend.forwarda a OWWClient en __init__ — lo que el runtime usa
+    # es inst._client._rate / inst._client._channels (los valores serializados
+    # en los headers Wyoming). Si estos siguen siendo los defaults, el bug
+    # #14 sigue ahí aunque la cadena de constructores parezca correcta.
+    assert inst._client._rate == 48000, (
+        f"OWWClient._rate esperaba 48000 (de cfg.audio), obtuve {inst._client._rate}"
+    )
+    assert inst._client._channels == 2, (
+        f"OWWClient._channels esperaba 2 (de cfg.audio), obtuve {inst._client._channels}"
+    )
+
+
 def _cfg_with_menubar(enabled: bool = True) -> Config:
     return Config(
         gateway=GatewayConfig(host="127.0.0.1", client_key="x"),

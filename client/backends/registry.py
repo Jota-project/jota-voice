@@ -54,7 +54,7 @@ def make_oww(cfg: Config, on_wake_word):
 
     name = cfg.oww.backend
     if name == "wyoming":
-        return WyomingBackend(cfg.oww, on_wake_word)
+        return WyomingBackend(cfg.oww, on_wake_word, audio_cfg=cfg.audio)
     raise ConfigError(f"oww backend desconocido: {name!r}")
 
 
