@@ -43,8 +43,17 @@ class GatewayClient:
     async def connect(self) -> None:
         headers = _cloudflare_access_headers()
         try:
+            # max_size=None desactiva el límite de 1 MiB del default de websockets:
+            # un tts_chunk grande o un mensaje de control voluminoso dispararía
+            # 1009 (payload too big) y un cierre anómalo silencioso. El framing
+            # binario TTS ([0xA1][seq][PCM16]) no acota tamaño por chunk — el
+            # gateway puede serializar varios segundos de audio en un único frame.
             self._ws = await asyncio.wait_for(
-                websockets.connect(self._cfg.ws_url, additional_headers=headers or None),
+                websockets.connect(
+                    self._cfg.ws_url,
+                    additional_headers=headers or None,
+                    max_size=None,
+                ),
                 timeout=self._cfg.connect_timeout_s,
             )
         except asyncio.TimeoutError:
@@ -158,6 +167,16 @@ class GatewayClient:
                 if event_type == "token":
                     event_type = "llm_token"
                 yield GatewayEvent(type=event_type, data=data)
-        except websockets.exceptions.ConnectionClosed as exc:
-            log.warning("Gateway: conexión cerrada inesperadamente: %s", exc)
+        except websockets.exceptions.ConnectionClosedOK:
+            # Cierre limpio (1000/1001). El turno ya terminó vía turn_end;
+            # la sesión puede continuar en otro turno. Terminar en silencio
+            # es lo correcto — state_machine ya publicó playback_ended.
             return
+        except websockets.exceptions.ConnectionClosedError as exc:
+            # Cierre anómalo (1006 abnormal closure, 1009 payload too big,
+            # 1011 internal error…). Antes del fix de #16 se tragaba con un
+            # `return` y state_machine.publicaba playback_ended "todo bien" —
+            # el usuario oía la respuesta cortarse sin saber qué pasó. Ahora
+            # se propaga para que run() publique VoiceEvent(type='error').
+            log.warning("Gateway: conexión cerrada con error: %s", exc)
+            raise

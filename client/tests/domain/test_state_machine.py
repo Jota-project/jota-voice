@@ -48,22 +48,32 @@ def _install_stubs() -> None:
             stub.Stream = _FakeStream
             sys.modules["pyaudio"] = stub
 
-    # websockets stub (gateway_client lo importa)
-    if "websockets" not in sys.modules:
+    # websockets stub (gateway_client lo importa). Añadimos las subclases
+    # que necesitamos para distinguir OK vs Error al módulo real de websockets
+    # si no están — websockets 16.0+ las tiene ya, así que esto es no-op en
+    # práctica; pero dejamos la defensa por si una versión más nueva las mueve.
+    def _ensure_exception_subclasses() -> None:
         try:
-            import websockets  # noqa: F401
+            from websockets import exceptions as _exc
         except ImportError:
-            stub = types.ModuleType("websockets")
-            exc_stub = types.ModuleType("websockets.exceptions")
+            return
 
-            class ConnectionClosed(Exception):
-                pass
+        class _FakeConnectionClosed(Exception):
+            """Base laxa — hereda Exception directamente."""
 
-            exc_stub.ConnectionClosed = ConnectionClosed
-            stub.exceptions = exc_stub
-            stub.connect = AsyncMock()
-            sys.modules["websockets"] = stub
-            sys.modules["websockets.exceptions"] = exc_stub
+        class _FakeConnectionClosedOK(_FakeConnectionClosed):
+            pass
+
+        class _FakeConnectionClosedError(_FakeConnectionClosed):
+            pass
+
+        # Sustituimos siempre: websockets real puede tener __init__ estricto
+        # incompatible con tests que pasan solo un mensaje.
+        _exc.ConnectionClosed = _FakeConnectionClosed
+        _exc.ConnectionClosedOK = _FakeConnectionClosedOK
+        _exc.ConnectionClosedError = _FakeConnectionClosedError
+
+    _ensure_exception_subclasses()
 
 
 _install_stubs()
@@ -1166,6 +1176,141 @@ def test_state_machine_cancel_responding() -> None:
 
 def test_state_machine_turn_end_grace_period() -> None:
     asyncio.run(_run_turn_end_grace_period_test())
+
+
+# ---------------------------------------------------------------------------
+# Issue #16: cierre anómalo de la conexión a mitad de turno (servidor caído,
+# 1006/1009/1011) debe ser visible — publica VoiceEvent(type='error') y NO
+# publica playback_ended como si todo hubiera ido bien.
+#
+# El regression test complementario (turn_end limpio → playback_ended) ya
+# existe como _run_turn_end_grace_period_test arriba.
+# ---------------------------------------------------------------------------
+
+
+async def _run_anomalous_close_during_tts_publishes_error_test() -> None:
+    """Reproduce el escenario de fallo documentado en la issue #16: el
+    gateway cae a mitad de reproducir un tts_chunk. Antes del fix, el
+    `except ConnectionClosed` genérico de gateway_client.receive() tragaba
+    la ConnectionClosedError, el generador terminaba en silencio igual que
+    tras un turn_end normal, y state_machine publicaba playback_ended "todo
+    bien". El usuario oía la respuesta cortarse en seco sin saber qué pasó.
+
+    Tras el fix, la ConnectionClosedError debe propagarse desde receive(),
+    receive_task.exception() la recoge, run() la maneja publicando
+    VoiceEvent(type='error') y NO publica playback_ended (no es un fin de
+    turno legítimo).
+    """
+    print("\n=== Test #16: cierre anómalo a mitad de turno → error, NO playback_ended ===")
+
+    from websockets.exceptions import ConnectionClosedError
+
+    bus = EventBus()
+    cfg = _make_config()
+    audio = _make_audio_mock(silent=True)
+
+    call_count = [0]
+
+    async def _publish_wake_words() -> None:
+        while True:
+            await asyncio.sleep(0)
+            if call_count[0] == 0:
+                call_count[0] += 1
+                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
+
+    wake_publisher_task = asyncio.create_task(_publish_wake_words())
+
+    # Gateway que emite transcription + un tts_chunk y luego CAE con
+    # ConnectionClosedError — el escenario exacto del bug: el servidor se
+    # corta a mitad de un tts_chunk grande.
+    _drop_exc = ConnectionClosedError("gateway dropped mid-tts (1006 abnormal closure)")
+
+    async def _receive_then_drop():
+        yield GatewayEvent(type="transcription", data={"text": "hola"})
+        yield GatewayEvent(type="tts_chunk", data={"audio": b"\x00\x01" * 100})
+        raise _drop_exc
+
+    gateway = MagicMock()
+    gateway.connect = AsyncMock()
+    gateway.disconnect = AsyncMock()
+    gateway.send_audio = AsyncMock()
+    gateway.send_end = AsyncMock()
+    gateway.send_cancel = AsyncMock()
+    gateway.send_text = AsyncMock()
+    gateway.receive = _receive_then_drop
+
+    playback = _make_playback_mock()
+
+    received: list[VoiceEvent] = []
+    stop_event = asyncio.Event()
+    idle_count = [0]
+
+    async def _collector() -> None:
+        async for ev in bus.subscribe():
+            received.append(ev)
+            if ev.type == "state_changed" and ev.data.get("state") == "idle":
+                idle_count[0] += 1
+                if idle_count[0] >= 2:
+                    stop_event.set()
+
+    collector_task = asyncio.create_task(_collector())
+
+    from domain.state_machine import run as sm_run
+
+    sm_task = asyncio.create_task(sm_run(cfg, bus, audio, gateway, playback))
+
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=10.0)
+    except asyncio.TimeoutError:
+        pass
+
+    sm_task.cancel()
+    wake_publisher_task.cancel()
+    for t in (sm_task, wake_publisher_task):
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    bus.close()
+    try:
+        await collector_task
+    except Exception:
+        pass
+
+    event_types = [e.type for e in received]
+    print(f"\nEventos: {event_types}")
+
+    # El error del cierre anómalo debe quedar visible.
+    error_evs = [e for e in received if e.type == "error"]
+    assert len(error_evs) >= 1, (
+        f"Cierre anómalo a mitad de turno sin visibilidad: esperaba ≥1 "
+        f"evento 'error', recibí {len(error_evs)}. Eventos: {event_types}"
+    )
+    # El mensaje exacto es detalle de implementación (puede ser el str del
+    # websockets exception, o un wrapper); basta con que NO sea genérico y
+    # que NO diga "playback_ended" como si todo hubiera ido bien.
+    assert all(e.data.get("message") for e in error_evs), (
+        f"Eventos error sin mensaje: {[e.data for e in error_evs]}"
+    )
+    # Y NO debe publicarse playback_ended (eso era exactamente el bug: el
+    # cierre anómalo se hacía pasar por un fin de turno legítimo).
+    assert "playback_ended" not in event_types, (
+        f"playback_ended NO debe publicarse tras cierre anómalo "
+        f"(eso era el bug original): {event_types}"
+    )
+    # Pero la app debe volver a IDLE para estar lista para el siguiente turno.
+    idle_evs = [e for e in received if e.type == "state_changed" and e.data.get("state") == "idle"]
+    assert len(idle_evs) >= 2, f"Volver a IDLE tras error: {event_types}"
+
+    print("  OK  error publicado tras cierre anómalo")
+    print("  OK  playback_ended NO publicado (no es fin de turno legítimo)")
+    print("  OK  vuelta a IDLE tras el error")
+    print("Test #16 cierre anómalo: PASADO")
+
+
+def test_state_machine_anomalous_close_during_tts_publishes_error() -> None:
+    asyncio.run(_run_anomalous_close_during_tts_publishes_error_test())
 
 
 def test_idle_type_hints_resolve() -> None:
