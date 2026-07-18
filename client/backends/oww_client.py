@@ -16,14 +16,31 @@ import logging
 import os
 from typing import Awaitable, Callable, Optional
 
-from config import OWWConfig
+from config import AudioConfig, OWWConfig
 
 log = logging.getLogger(__name__)
 
+# Defaults del Wyoming handshake — solo se usan si el llamador no inyecta
+# una AudioConfig (p.ej. tests legacy que construyen OWWClient solo con OWWConfig).
+# El wake word openWakeWord se entrena con audio 16-bit a 16 kHz mono, pero el
+# protocolo Wyoming no exige esos valores — acepta los que el cliente declare en
+# audio-start / audio-chunk y hace el resample/downmix interno según necesite.
+_DEFAULT_OWW_RATE = 16000
+_DEFAULT_OWW_CHANNELS = 1
+_DEFAULT_OWW_WIDTH = 2  # PCM int16: 2 bytes por muestra (constante del protocolo, no de AudioConfig)
+
 
 class OWWClient:
-    def __init__(self, cfg: OWWConfig) -> None:
+    def __init__(self, cfg: OWWConfig, audio_cfg: Optional[AudioConfig] = None) -> None:
         self._cfg = cfg
+        # Si se inyecta una AudioConfig, el cliente Wyoming debe declarar en
+        # los eventos audio-start/audio-chunk el rate y channels REALES del
+        # micrófono (la captura de la que también consume RECORDING vía
+        # get_oww_queue — colas independientes tras el fix de #9), no
+        # 16000/mono fijos. Si no, se asume los defaults Wyoming canónicos —
+        # útil para tests/integraciones que construyen OWWClient sin audio.
+        self._rate = audio_cfg.sample_rate if audio_cfg is not None else _DEFAULT_OWW_RATE
+        self._channels = audio_cfg.channels if audio_cfg is not None else _DEFAULT_OWW_CHANNELS
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
         self._connected = False
@@ -64,7 +81,7 @@ class OWWClient:
             await self._send_json(
                 {
                     "type": "audio-start",
-                    "data": {"rate": 16000, "width": 2, "channels": 1},
+                    "data": {"rate": self._rate, "width": _DEFAULT_OWW_WIDTH, "channels": self._channels},
                     "data_length": 0,
                 }
             )
@@ -95,7 +112,7 @@ class OWWClient:
             raise ConnectionError("OWWClient: no conectado")
         header = {
             "type": "audio-chunk",
-            "data": {"rate": 16000, "width": 2, "channels": 1, "timestamp": 0},
+            "data": {"rate": self._rate, "width": _DEFAULT_OWW_WIDTH, "channels": self._channels, "timestamp": 0},
             "payload_length": len(pcm_int16),
         }
         await self._send_json(header)
