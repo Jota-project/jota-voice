@@ -14,6 +14,9 @@ class _EmptyAudio:
     def get_queue(self) -> asyncio.Queue:
         return asyncio.Queue()
 
+    def get_oww_queue(self) -> asyncio.Queue:
+        return asyncio.Queue()
+
 
 async def _drop_after_handshake_server(disconnects: list) -> asyncio.base_events.Server:
     """Servidor Wyoming fake: completa el handshake (detect + audio-start) y

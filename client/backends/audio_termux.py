@@ -59,6 +59,9 @@ class TermuxBackend:
     def get_queue(self) -> asyncio.Queue[bytes]:
         return self._capture.get_queue()
 
+    def get_oww_queue(self) -> asyncio.Queue[bytes]:
+        return self._capture.get_oww_queue()
+
     def get_preroll(self) -> bytes:
         return self._capture.get_preroll()
 

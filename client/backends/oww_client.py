@@ -238,7 +238,7 @@ class OWWClient:
         """Envía audio del mic a OWW continuamente. Solo termina por cancelación."""
         import numpy as np
 
-        q = audio.get_queue()
+        q = audio.get_oww_queue()
         while True:
             frame = await q.get()
             pcm16 = (
