@@ -52,7 +52,7 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 **Objetivo:** cerrar los 12 bugs que rompen el producto en uso normal o exponen una superficie de ataque real.
 **Acceptance gate:** cero issues 🔴 abiertas, suite de tests verde, una sesión de prueba manual de 10 turnos consecutivos sin degradación de audio perceptible, `ControlServer` rechaza peticiones sin token.
 
-- [ ] **#9** 🔴 `[001]` — Cola de audio compartida entre OWW y captura — consumidores en competencia real — **M**
+- [x] **#9** 🔴 `[001]` — Cola de audio compartida entre OWW y captura — consumidores en competencia real — **M** — fan-out a colas independientes (`e124a50`, `746caf0`, `283fd75`)
 - [ ] **#10** 🔴 `[002]` — ControlServer (127.0.0.1:8765) sin autenticación — vulnerable desde cualquier pestaña de navegador — **S**
 - [ ] **#11** 🔴 `[003]` — Fallo de `audio.start()` en macOS deja el icono del menubar "vivo" sin que nada funcione — **S**
 - [ ] **#12** 🔴 `[004]` — Excepción de `capture_task` durante RECORDING nunca se comprueba — **S**
