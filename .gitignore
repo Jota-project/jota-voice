@@ -29,3 +29,6 @@ docs/superpowers/
 
 # Worktrees de git para desarrollo aislado
 .worktrees/
+
+# macOS Finder
+.DS_Store
