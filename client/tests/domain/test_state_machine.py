@@ -1281,17 +1281,19 @@ async def _run_anomalous_close_during_tts_publishes_error_test() -> None:
     event_types = [e.type for e in received]
     print(f"\nEventos: {event_types}")
 
-    # El error del cierre anómalo debe quedar visible.
+    # El error del cierre anómalo debe quedar visible Y corresponder al
+    # ConnectionClosedError inyectado — sin matchear el mensaje concreto,
+    # un fallo espurio no relacionado (p.ej. un fallo de playback.play_chunk)
+    # satisfaría la aserción y enmascararía una regresión del fix.
     error_evs = [e for e in received if e.type == "error"]
     assert len(error_evs) >= 1, (
         f"Cierre anómalo a mitad de turno sin visibilidad: esperaba ≥1 "
         f"evento 'error', recibí {len(error_evs)}. Eventos: {event_types}"
     )
-    # El mensaje exacto es detalle de implementación (puede ser el str del
-    # websockets exception, o un wrapper); basta con que NO sea genérico y
-    # que NO diga "playback_ended" como si todo hubiera ido bien.
-    assert all(e.data.get("message") for e in error_evs), (
-        f"Eventos error sin mensaje: {[e.data for e in error_evs]}"
+    assert any("1006" in e.data["message"] or "mid-tts" in e.data["message"]
+               for e in error_evs), (
+        f"Ningún evento 'error' refleja el cierre anómalo inyectado: "
+        f"{[e.data['message'] for e in error_evs]}"
     )
     # Y NO debe publicarse playback_ended (eso era exactamente el bug: el
     # cierre anómalo se hacía pasar por un fin de turno legítimo).
