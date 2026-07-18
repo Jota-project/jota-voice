@@ -38,6 +38,56 @@ def test_control_port_custom() -> None:
         os.unlink(path)
 
 
+def test_control_token_path_default() -> None:
+    path = _write_cfg({"gateway": {"host": "127.0.0.1", "client_key": "test"}, "device": {"id": "test-device"}})
+    try:
+        from config import load_config
+        cfg = load_config(path)
+        assert cfg.control.token_path is None
+    finally:
+        os.unlink(path)
+
+
+def test_control_token_path_custom() -> None:
+    path = _write_cfg({
+        "gateway": {"host": "127.0.0.1", "client_key": "test"},
+        "device": {"id": "test-device"},
+        "control": {"token_path": "/tmp/mi-token"},
+    })
+    try:
+        from config import load_config
+        cfg = load_config(path)
+        assert cfg.control.token_path == "/tmp/mi-token"
+    finally:
+        os.unlink(path)
+
+
+def test_control_rate_limit_defaults() -> None:
+    path = _write_cfg({"gateway": {"host": "127.0.0.1", "client_key": "test"}, "device": {"id": "test-device"}})
+    try:
+        from config import load_config
+        cfg = load_config(path)
+        assert cfg.control.rate_limit_max_requests == 10
+        assert cfg.control.rate_limit_window_s == 10.0
+    finally:
+        os.unlink(path)
+
+
+def test_control_rate_limit_custom() -> None:
+    path = _write_cfg({
+        "gateway": {"host": "127.0.0.1", "client_key": "test"},
+        "device": {"id": "test-device"},
+        "control": {"rate_limit_max_requests": 3, "rate_limit_window_s": 5.0},
+    })
+    try:
+        from config import load_config
+        cfg = load_config(path)
+        assert cfg.control.rate_limit_max_requests == 3
+        assert cfg.control.rate_limit_window_s == 5.0
+    finally:
+        os.unlink(path)
+
+
 def test_ws_url_prioriza_url_sobre_host_port_path() -> None:
     """Si el usuario da 'url' completa, se respeta LITERAL — sin inyectar
     scheme, puerto ni path por defecto. Caso típico: gateway detrás de
