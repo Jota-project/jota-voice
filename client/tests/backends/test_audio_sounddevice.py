@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 
 import numpy as np
+import pytest
 
 from config import AudioConfig
 from backends.audio_sounddevice import SounddeviceBackend
@@ -144,3 +145,52 @@ def test_play_chunk_nunca_encola_bytes_impares() -> None:
     # bytes 1-4 se reordena ni se descarta.
     assert b"".join(queued) == bytes([1, 2, 3, 4])
     assert be._enqueue_carry == bytes([5])
+
+
+def test_enqueue_and_wait_queues_audio_before_starting_stream() -> None:
+    """Bug: _ensure_output_stream() (que llama a stream.start(), arrancando
+    el callback de PortAudio en su hilo de tiempo real) se invocaba antes de
+    encolar el audio en _play_q. Esto deja una ventana de carrera: el
+    callback puede pedir datos justo al arrancar el stream y encontrar la
+    cola vacía, reproduciendo silencio y perdiendo el principio del audio
+    (un click al inicio de cada beep/respuesta). El audio debe estar en la
+    cola ANTES de arrancar el stream."""
+    be = SounddeviceBackend(_cfg())
+    qsize_at_ensure = []
+
+    def fake_ensure_output_stream() -> None:
+        qsize_at_ensure.append(be._play_q.qsize())
+
+    be._ensure_output_stream = fake_ensure_output_stream
+
+    asyncio.run(be.play_chunk(bytes([1, 2, 3, 4])))
+
+    assert qsize_at_ensure == [1]
+
+
+def test_enqueue_and_wait_sleeps_solo_la_duracion_real() -> None:
+    """Bug: se dormía duration + 0.05s tras encolar cada chunk. Como el
+    callback de PortAudio consume el chunk en su duración real (sin ese
+    margen extra), esos 50ms de más hacían que el productor entregara el
+    siguiente chunk más tarde de lo que el hardware tardaba en consumir el
+    anterior — la cola se vaciaba y el callback rellenaba con silencio real
+    entre chunk y chunk (huecos audibles, no distorsión)."""
+    be = SounddeviceBackend(_cfg())
+    be._ensure_output_stream = lambda: None
+    slept: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    import backends.audio_sounddevice as mod
+
+    original_sleep = mod.asyncio.sleep
+    mod.asyncio.sleep = fake_sleep
+    try:
+        audio = bytes(range(1, 1 + 240))  # 120 samples int16 → 120/24000s
+        asyncio.run(be.play_chunk(audio))
+    finally:
+        mod.asyncio.sleep = original_sleep
+
+    expected_duration = len(audio) / (24000 * 2)
+    assert slept == [pytest.approx(expected_duration)]

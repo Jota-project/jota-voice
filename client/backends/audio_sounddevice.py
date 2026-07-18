@@ -190,7 +190,6 @@ class SounddeviceBackend:
         await self._enqueue_and_wait(audio)
 
     async def _enqueue_and_wait(self, audio: bytes) -> None:
-        self._ensure_output_stream()
         # El chunking de red no garantiza alinear cada mensaje TTS a un
         # número par de bytes (tamaño de una muestra int16) — un chunk de
         # longitud impar rompería np.frombuffer en _out_callback. En vez de
@@ -205,8 +204,20 @@ class SounddeviceBackend:
         if not audio:
             return
         duration = len(audio) / (_TTS_SAMPLE_RATE * 2)
+        # El audio debe estar encolado ANTES de arrancar el stream: si
+        # _ensure_output_stream() (que llama a stream.start()) corre primero,
+        # el callback de PortAudio puede pedir datos con _play_q aún vacía
+        # justo al arrancar, reproduciendo silencio y perdiendo el principio
+        # del audio (click al inicio de cada beep/respuesta).
         self._play_q.put(audio)
-        await asyncio.sleep(duration + 0.05)
+        self._ensure_output_stream()
+        # Dormir solo la duración real del chunk: _play_q ya desacopla
+        # productor/consumidor, así que no hace falta (ni conviene) un
+        # margen extra aquí — dormir de más retrasa la entrega del
+        # siguiente chunk más de lo que el hardware tarda en consumir el
+        # actual, vaciando la cola y produciendo huecos de silencio real
+        # entre chunk y chunk (no distorsión: samples que no se juntan).
+        await asyncio.sleep(duration)
 
     async def drain(self) -> None:
         if self._output_stream is not None:
