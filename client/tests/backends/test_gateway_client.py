@@ -22,6 +22,42 @@ from config import GatewayConfig
 from backends.gateway_client import GatewayClient, _cloudflare_access_headers
 
 
+class _FakeWS:
+    """WS fake iterable async — basta para probar receive() sin servidor real."""
+
+    def __init__(self, messages: list) -> None:
+        self._messages = messages
+
+    def __aiter__(self):
+        return self._gen()
+
+    async def _gen(self):
+        for m in self._messages:
+            yield m
+
+
+async def _test_receive_separa_header_de_audio_binario() -> None:
+    """Los frames binarios de jota-gateway llevan [0xA1][turn_seq uint16 BE]
+    antes del PCM (protocolo documentado en jota-gateway/docs/client-protocol.md,
+    commit 54a55d3). receive() debe separar la cabecera y devolver solo el
+    PCM como 'audio' — si no, np.frombuffer revienta con tamaños impares
+    (bug real visto en producción: buffer size must be a multiple of element size)."""
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test")
+    client = GatewayClient(cfg)
+    pcm = b"\x01\x02\x03\x04\x05\x06"
+    frame = bytes([0xA1, 0x00, 0x01]) + pcm  # turn_seq=1
+    client._ws = _FakeWS([frame])
+
+    events = [ev async for ev in client.receive()]
+
+    assert len(events) == 1
+    assert events[0].type == "tts_chunk"
+    assert events[0].data["audio"] == pcm, (
+        f"Esperaba PCM sin la cabecera de 3 bytes, got {events[0].data['audio']!r}"
+    )
+    assert events[0].data.get("turn_seq") == 1
+
+
 async def _test_send_cancel_envia_mensaje() -> None:
     cfg = GatewayConfig(host="127.0.0.1", client_key="test")
     client = GatewayClient(cfg)
@@ -44,6 +80,10 @@ async def _test_send_cancel_sin_ws_lanza_error() -> None:
         raise AssertionError("Debería haber lanzado RuntimeError")
     except RuntimeError as exc:
         assert "no conectado" in str(exc)
+
+
+def test_receive_separa_header_de_audio_binario() -> None:
+    asyncio.run(_test_receive_separa_header_de_audio_binario())
 
 
 def test_send_cancel_envia_mensaje() -> None:

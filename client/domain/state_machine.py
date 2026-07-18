@@ -227,7 +227,18 @@ async def _recording(
         await _safe_send_cancel(gateway)
         raise _TurnCancelled()
 
-    await playback.play_notification()
+    # play_notification() es un beep puramente cosmético (confirma al
+    # usuario que se dejó de grabar). Un fallo de audio de salida (visto en
+    # producción: dispositivo Bluetooth intermitente, PaErrorCode -9986) no
+    # debe impedir gateway.send_end() — sin él, el gateway se queda sin
+    # saber que el turno terminó y el error se propaga más tarde como un
+    # fallo de conexión aparentemente no relacionado.
+    try:
+        await playback.play_notification()
+    except Exception as exc:
+        log.warning("RECORDING: fallo al reproducir notificación (no crítico): %s", exc)
+        bus.publish(VoiceEvent(type="error", data={"message": f"Notificación de audio falló: {exc}"}))
+
     await gateway.send_end()
     bus.publish(VoiceEvent(type="recording_ended", data={}))
     log.debug("RECORDING: end enviado")
@@ -247,7 +258,30 @@ async def _responding(
 
     async def _receive_loop() -> None:
         nonlocal playback_started
-        async for gw_event in gateway.receive():
+        # El protocolo de jota-gateway (docs/client-protocol.md) señala fin
+        # de turno con "turn_end", nunca con "done" — y no cierra la
+        # conexión WS tras el turno (puede haber más turnos en la misma
+        # sesión). Sin este margen, el loop dependería siempre del timeout
+        # externo de 30s para cortar, aunque la respuesta ya haya terminado.
+        TURN_END_GRACE_S = 2.0
+        gen = gateway.receive()
+        loop = asyncio.get_running_loop()
+        grace_deadline: Optional[float] = None
+
+        while True:
+            try:
+                if grace_deadline is not None:
+                    remaining = grace_deadline - loop.time()
+                    if remaining <= 0:
+                        return
+                    gw_event = await asyncio.wait_for(gen.__anext__(), timeout=remaining)
+                else:
+                    gw_event = await gen.__anext__()
+            except asyncio.TimeoutError:
+                return
+            except StopAsyncIteration:
+                return
+
             if gw_event.type == "transcription":
                 text = gw_event.data.get("text", "")
                 bus.publish(VoiceEvent(type="transcription", data={"text": text}))
@@ -269,6 +303,12 @@ async def _responding(
                     playback_started = True
                 audio_bytes = gw_event.data.get("audio", b"")
                 await playback.play_chunk(audio_bytes)
+                if grace_deadline is not None:
+                    # Sigue llegando audio en tránsito tras turn_end — no cortar aún.
+                    grace_deadline = loop.time() + TURN_END_GRACE_S
+
+            elif gw_event.type == "turn_end":
+                grace_deadline = loop.time() + TURN_END_GRACE_S
 
             else:
                 log.debug("RESPONDING: evento desconocido de gateway: %r", gw_event.type)
@@ -318,6 +358,15 @@ def _log_error(state: str, exc: Exception, bus: EventBus) -> None:
     bus.publish(VoiceEvent(type="error", data={"message": str(exc)}))
 
 
+def _log_cancelled(state: str, bus: EventBus) -> None:
+    """Sin esto, un turn cancelado (nueva wake word interrumpiendo TTS, o
+    /cancel externo vía ControlServer) es invisible para cualquier UI: no
+    hay error, no hay un nuevo "listening" garantizado, solo silencio hasta
+    que _idle() vuelve a publicar "idle" en la siguiente iteración."""
+    log.info("StateMachine: turn cancelado en %s", state)
+    bus.publish(VoiceEvent(type="cancelled", data={"state": state}))
+
+
 async def _cleanup(gateway: GatewayClient, playback: PlaybackEngine) -> None:
     try:
         await gateway.disconnect()
@@ -359,7 +408,7 @@ async def run(
         try:
             await _recording(wake_word, bus, audio, gateway, playback, cfg, cancel_event)
         except _TurnCancelled:
-            log.info("StateMachine: turn cancelado en RECORDING")
+            _log_cancelled(state, bus)
             await _cleanup(gateway, playback)
             continue
         except asyncio.CancelledError:
@@ -375,7 +424,7 @@ async def run(
         try:
             await _responding(bus, gateway, playback, cancel_event)
         except _TurnCancelled:
-            log.info("StateMachine: turn cancelado en RESPONDING")
+            _log_cancelled(state, bus)
         except asyncio.CancelledError:
             log.info("StateMachine: cancelado en RESPONDING")
             raise

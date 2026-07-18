@@ -95,7 +95,21 @@ class GatewayClient:
         try:
             async for message in self._ws:
                 if isinstance(message, bytes):
-                    yield GatewayEvent(type="tts_chunk", data={"audio": message})
+                    # Framing documentado en jota-gateway/docs/client-protocol.md:
+                    # [0xA1][turn_seq uint16 BE][PCM16 24kHz]. Sin separar la
+                    # cabecera, el PCM llega desalineado y con tamaño potencialmente
+                    # impar — np.frombuffer(..., dtype=int16) revienta.
+                    if len(message) < 3 or message[0] != 0xA1:
+                        log.warning(
+                            "Gateway: frame binario inesperado (%d bytes, primer byte=%r)",
+                            len(message), message[0] if message else None,
+                        )
+                        continue
+                    turn_seq = (message[1] << 8) | message[2]
+                    pcm16 = message[3:]
+                    yield GatewayEvent(
+                        type="tts_chunk", data={"audio": pcm16, "turn_seq": turn_seq}
+                    )
                     continue
                 try:
                     data = json.loads(message)

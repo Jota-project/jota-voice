@@ -31,6 +31,7 @@ class VoiceEvent:
         "state_changed",
         "display_text_update",  # emitido por PlaybackEngine, consumido por DisplayClient
         "error",
+        "cancelled",
     ]
     data: dict
     ts: float = field(default_factory=time.monotonic)

@@ -26,6 +26,7 @@ _STATE_ICONS = {
     "thinking":  "brain",
     "speaking":  "speaker.wave.2",
     "error":     "exclamationmark.triangle",
+    "cancelled": "xmark.circle",
 }
 
 

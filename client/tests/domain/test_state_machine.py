@@ -393,6 +393,94 @@ async def _run_error_test() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 2b: play_notification() falla (dispositivo de audio no disponible) —
+# no debe impedir gateway.send_end(). Visto en producción: un altavoz
+# Bluetooth intermitente (PaErrorCode -9986) hacía fallar el beep de
+# notificación, lo que abortaba la RECORDING entera ANTES de send_end(),
+# dejando al gateway sin saber que el turno había terminado.
+# ---------------------------------------------------------------------------
+
+async def _run_notification_failure_test() -> None:
+    print("\n=== Test: play_notification() falla, send_end() debe llamarse igual ===")
+
+    bus = EventBus()
+    cfg = _make_config()
+    audio = _make_audio_mock(silent=True)
+
+    call_count = [0]
+
+    async def _publish_wake_words() -> None:
+        while True:
+            await asyncio.sleep(0)
+            if call_count[0] == 0:
+                call_count[0] += 1
+                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
+
+    wake_publisher_task = asyncio.create_task(_publish_wake_words())
+
+    gateway = _gateway_mock_with_events([])  # RESPONDING termina rápido (sin eventos)
+
+    playback = _make_playback_mock()
+    playback.play_notification = AsyncMock(
+        side_effect=RuntimeError("Error opening OutputStream: Internal PortAudio error [PaErrorCode -9986]")
+    )
+
+    received: list[VoiceEvent] = []
+    stop_event = asyncio.Event()
+    idle_count = [0]
+
+    async def _collector() -> None:
+        async for ev in bus.subscribe():
+            received.append(ev)
+            if ev.type == "state_changed" and ev.data.get("state") == "idle":
+                idle_count[0] += 1
+                if idle_count[0] >= 2:
+                    stop_event.set()
+
+    collector_task = asyncio.create_task(_collector())
+
+    from domain.state_machine import run as sm_run
+
+    sm_task = asyncio.create_task(sm_run(cfg, bus, audio, gateway, playback))
+
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=10.0)
+    except asyncio.TimeoutError:
+        pass
+
+    sm_task.cancel()
+    wake_publisher_task.cancel()
+    for t in [sm_task, wake_publisher_task]:
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    bus.close()
+    try:
+        await collector_task
+    except Exception:
+        pass
+
+    event_types = [e.type for e in received]
+    print(f"\nEventos: {event_types}")
+
+    assert gateway.send_end.await_count >= 1, (
+        f"gateway.send_end() no fue llamado tras el fallo de play_notification(): {event_types}"
+    )
+    assert "recording_ended" in event_types, (
+        f"recording_ended no se publicó tras el fallo de play_notification(): {event_types}"
+    )
+    error_evs = [e for e in received if e.type == "error"]
+    assert len(error_evs) >= 1, f"Esperaba visibilidad del fallo vía evento error: {event_types}"
+
+    print("  OK  gateway.send_end() llamado pese al fallo del beep")
+    print("  OK  recording_ended publicado")
+    print("  OK  error publicado (visibilidad del fallo)")
+    print("Test notification failure: PASADO")
+
+
+# ---------------------------------------------------------------------------
 # Test 3: timeout en IDLE — OWW nunca detecta, debe publicar error
 # ---------------------------------------------------------------------------
 
@@ -565,11 +653,17 @@ async def _run_cancel_recording_test() -> None:
     # vuelve a IDLE (≥2 state_changed idle)
     idle_evs = [e for e in received if e.type == "state_changed" and e.data.get("state") == "idle"]
     assert len(idle_evs) >= 2, f"Esperaba ≥2 idle, got {len(idle_evs)}: {event_types}"
+    # el menubar debe enterarse de que el turn se canceló (sin esto, la
+    # cancelación es invisible: no hay error, no hay listening — nada).
+    assert "cancelled" in event_types, (
+        f"Esperaba evento 'cancelled' publicado al bus tras _TurnCancelled: {event_types}"
+    )
 
     print("  OK  recording_ended no publicado")
     print("  OK  send_cancel() llamado")
     print("  OK  send_end() no llamado")
     print("  OK  vuelve a IDLE")
+    print("  OK  evento 'cancelled' publicado")
     print("Test cancel en RECORDING: PASADO")
 
 
@@ -683,11 +777,120 @@ async def _run_cancel_responding_test() -> None:
     # vuelve a IDLE
     idle_evs = [e for e in received if e.type == "state_changed" and e.data.get("state") == "idle"]
     assert len(idle_evs) >= 2, f"Esperaba ≥2 idle, got {len(idle_evs)}"
+    # el menubar debe enterarse de que el turn se canceló.
+    assert "cancelled" in event_types, (
+        f"Esperaba evento 'cancelled' publicado al bus tras _TurnCancelled: {event_types}"
+    )
 
     print("  OK  playback_ended no publicado")
+    print("  OK  evento 'cancelled' publicado")
     print("  OK  send_cancel() llamado")
     print("  OK  vuelve a IDLE")
     print("Test cancel en RESPONDING: PASADO")
+
+
+# ---------------------------------------------------------------------------
+# Test 6: turn_end cierra el turno en un margen corto, no en 30s
+# ---------------------------------------------------------------------------
+
+async def _run_turn_end_grace_period_test() -> None:
+    """Reproduce el bug real de producción: el gateway jota-gateway señala
+    fin de turno con 'turn_end' (protocolo documentado en
+    jota-gateway/docs/client-protocol.md), nunca con 'done'. La conexión WS
+    real no se cierra tras el turno — sigue abierta por si hay más turnos.
+    Antes del fix, _receive_loop() solo reconocía 'done' para cerrar, así
+    que dependía siempre del timeout externo de 30s para cortar.
+    """
+    print("\n=== Test turn_end: cierre en margen corto, no timeout 30s ===")
+
+    bus = EventBus()
+    # recording_timeout_s corto: el mock de audio drena toda la cola en IDLE
+    # (ver _idle()), así que RECORDING siempre cierra por timeout absoluto,
+    # no por silencio. Lo dejamos corto para que el test quede casi todo el
+    # margen para lo que realmente prueba: el cierre en RESPONDING.
+    cfg = Config(
+        gateway=GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=5.0),
+        device=DeviceConfig(id="test-device"),
+        audio=AudioConfig(sample_rate=16000, frames_per_buffer=512, recording_timeout_s=0.2),
+        oww=OWWConfig(),
+    )
+    audio = _make_audio_mock(silent=True)
+
+    async def _receive_then_hang():
+        yield GatewayEvent(type="transcription", data={"text": "hola"})
+        yield GatewayEvent(type="tts_chunk", data={"audio": b"\x00\x01" * 100})
+        yield GatewayEvent(type="turn_end", data={"turn_id": "t-1"})
+        await asyncio.Event().wait()  # el WS real nunca cierra tras el turno
+
+    gateway = MagicMock()
+    gateway.connect = AsyncMock()
+    gateway.disconnect = AsyncMock()
+    gateway.send_audio = AsyncMock()
+    gateway.send_end = AsyncMock()
+    gateway.send_text = AsyncMock()
+    gateway.receive = _receive_then_hang
+
+    playback = _make_playback_mock()
+
+    call_count = [0]
+
+    async def _publish_wake_words() -> None:
+        while True:
+            await asyncio.sleep(0)
+            if call_count[0] == 0:
+                call_count[0] += 1
+                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
+
+    wake_publisher_task = asyncio.create_task(_publish_wake_words())
+
+    received: list[VoiceEvent] = []
+    stop_event = asyncio.Event()
+
+    async def _collector() -> None:
+        async for ev in bus.subscribe():
+            received.append(ev)
+            if ev.type in ("playback_ended", "error"):
+                stop_event.set()
+
+    collector_task = asyncio.create_task(_collector())
+
+    from domain.state_machine import run as sm_run
+
+    sm_task = asyncio.create_task(sm_run(cfg, bus, audio, gateway, playback))
+
+    start = asyncio.get_running_loop().time()
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=8.0)
+    except asyncio.TimeoutError:
+        pass
+    elapsed = asyncio.get_running_loop().time() - start
+
+    sm_task.cancel()
+    wake_publisher_task.cancel()
+    for t in (sm_task, wake_publisher_task):
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    bus.close()
+    try:
+        await collector_task
+    except Exception:
+        pass
+
+    event_types = [e.type for e in received]
+    print(f"\nEventos tras {elapsed:.1f}s: {event_types}")
+
+    assert "playback_ended" in event_types, (
+        f"turn_end debería cerrar el turno en un margen corto (no el timeout "
+        f"de 30s). Tras {elapsed:.1f}s, eventos: {event_types}"
+    )
+    error_evs = [e for e in received if e.type == "error"]
+    assert not error_evs, f"No debería haber timeout/error tras turn_end: {error_evs}"
+    assert elapsed < 8.0, f"Tardó demasiado en cerrar tras turn_end: {elapsed:.1f}s"
+    print("  OK  playback_ended tras un margen corto, sin error de timeout")
+    print("Test turn_end grace period: PASADO")
 
 
 # ---------------------------------------------------------------------------
@@ -709,12 +912,20 @@ def test_state_machine_idle_timeout() -> None:
     asyncio.run(_run_idle_timeout_test())
 
 
+def test_state_machine_notification_failure_does_not_block_send_end() -> None:
+    asyncio.run(_run_notification_failure_test())
+
+
 def test_state_machine_cancel_recording() -> None:
     asyncio.run(_run_cancel_recording_test())
 
 
 def test_state_machine_cancel_responding() -> None:
     asyncio.run(_run_cancel_responding_test())
+
+
+def test_state_machine_turn_end_grace_period() -> None:
+    asyncio.run(_run_turn_end_grace_period_test())
 
 
 def test_idle_type_hints_resolve() -> None:

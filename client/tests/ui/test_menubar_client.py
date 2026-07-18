@@ -194,6 +194,82 @@ def test_toggle_pause_flips_event():
     assert paused_calls == [True, False, True]
 
 
+def test_cancelled_event_sets_cancelled_state():
+    bus = EventBus()
+    backend = FakeBackend()
+    client = MenubarClient(backend)
+    ui_queue: queue.Queue = queue.Queue()
+    pause = asyncio.Event()
+
+    async def scenario():
+        task = asyncio.create_task(client.run(bus, ui_queue, pause))
+        await asyncio.sleep(0.05)
+        bus.publish(VoiceEvent(type="cancelled", data={}))
+        await asyncio.sleep(0.05)
+        bus.close()
+        await asyncio.wait_for(task, timeout=2.0)
+
+    _run(scenario())
+
+    set_state_vals = [c[1][0] for c in backend.calls if c[0] == "set_state"]
+    assert set_state_vals == ["cancelled"]
+
+
+def test_error_state_holds_before_reverting_to_idle():
+    """Sin hold, state_changed("idle") (publicado por _idle() en la siguiente
+    iteración del loop) sobreescribe el icono de error casi al instante,
+    haciéndolo imperceptible. Con hold, "idle" debe demorarse hasta que
+    pase la ventana de hold desde el último estado transitorio (error o
+    cancelled)."""
+    bus = EventBus()
+    backend = FakeBackend()
+    client = MenubarClient(backend, hold_transient_s=0.15)
+    ui_queue: queue.Queue = queue.Queue()
+    pause = asyncio.Event()
+
+    async def scenario():
+        task = asyncio.create_task(client.run(bus, ui_queue, pause))
+        await asyncio.sleep(0.02)
+        bus.publish(VoiceEvent(type="error", data={"message": "boom"}))
+        bus.publish(VoiceEvent(type="state_changed", data={"state": "idle"}))
+        await asyncio.sleep(0.05)
+        # Aún dentro de la ventana de hold: debe seguir mostrando "error".
+        assert backend.calls[-1] == ("set_state", ("error",)), backend.calls
+        await asyncio.sleep(0.2)
+        # Pasada la ventana de hold: debe haber revertido a "idle".
+        assert backend.calls[-1] == ("set_state", ("idle",)), backend.calls
+        bus.close()
+        await asyncio.wait_for(task, timeout=2.0)
+
+    _run(scenario())
+
+
+def test_new_real_event_during_hold_overrides_pending_idle():
+    """Si llega un evento real (p.ej. una nueva wake word) mientras el
+    icono de error/cancelled está retenido, debe mostrarse de inmediato —
+    no debe quedar oculto esperando a que expire el hold ni a que el idle
+    diferido se aplique por encima."""
+    bus = EventBus()
+    backend = FakeBackend()
+    client = MenubarClient(backend, hold_transient_s=0.3)
+    ui_queue: queue.Queue = queue.Queue()
+    pause = asyncio.Event()
+
+    async def scenario():
+        task = asyncio.create_task(client.run(bus, ui_queue, pause))
+        await asyncio.sleep(0.02)
+        bus.publish(VoiceEvent(type="error", data={"message": "boom"}))
+        bus.publish(VoiceEvent(type="state_changed", data={"state": "idle"}))
+        await asyncio.sleep(0.05)
+        bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_jota"}))
+        await asyncio.sleep(0.05)
+        assert backend.calls[-1] == ("set_state", ("listening",)), backend.calls
+        bus.close()
+        await asyncio.wait_for(task, timeout=2.0)
+
+    _run(scenario())
+
+
 def test_run_returns_on_bus_close():
     bus = EventBus()
     backend = FakeBackend()
