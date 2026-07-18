@@ -53,7 +53,12 @@ def _load_or_create_token(path: Path) -> str:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     token = secrets.token_hex(32)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        # Otro proceso ganó la carrera entre el is_file() de arriba y este
+        # open() — usamos el token que ya escribió, no lo pisamos.
+        return path.read_text().strip()
     with os.fdopen(fd, "w") as f:
         f.write(token)
     return token
@@ -115,7 +120,7 @@ async def _handle(
 
         if not limiter.allow():
             writer.write(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n")
-        elif not hmac.compare_digest(headers.get(TOKEN_HEADER, ""), token):
+        elif not hmac.compare_digest(headers.get(TOKEN_HEADER, "").encode(), token.encode()):
             writer.write(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n")
         elif method == "POST" and path == "/cancel":
             cancel_event.set()

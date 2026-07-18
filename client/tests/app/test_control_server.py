@@ -114,6 +114,60 @@ async def _test_post_cancel_con_token_incorrecto_rechaza_401() -> None:
             pass
 
 
+async def _test_post_cancel_con_header_no_ascii_rechaza_401() -> None:
+    """Un valor de header no-ASCII (bytes corruptos/binarios) no debe tumbar
+    la conexión sin respuesta — debe rechazarse limpiamente con 401, igual
+    que cualquier otro token inválido."""
+    from app import control_server
+
+    with tempfile.TemporaryDirectory() as tmp:
+        token_path = os.path.join(tmp, "token")
+        cancel_event = asyncio.Event()
+        cfg = ControlConfig(port=18773, token_path=token_path)
+
+        server_task = asyncio.create_task(control_server.run(cfg, cancel_event))
+        await asyncio.sleep(0.05)
+
+        request = (
+            b"POST /cancel HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"X-Jota-Control-Token: \xff\xff\xff\r\n"
+            b"Content-Length: 0\r\n"
+            b"\r\n"
+        )
+        response = await _send(18773, request)
+
+        assert b"401" in response, f"Esperaba 401, got: {response[:100]!r}"
+        assert not cancel_event.is_set()
+
+        server_task.cancel()
+        try:
+            await server_task
+        except asyncio.CancelledError:
+            pass
+
+
+async def _test_load_or_create_token_no_pisa_si_aparece_justo_al_crear(monkeypatch) -> None:
+    """Si is_file() dice que no existe (carrera con otro proceso arrancando
+    a la vez) pero el fichero aparece justo antes del open() con O_EXCL, no
+    debe perderse el token ya escrito: debe leerse el existente, no
+    sobreescribirlo con uno nuevo."""
+    from app import control_server
+
+    with tempfile.TemporaryDirectory() as tmp:
+        token_path = Path(tmp) / "token"
+        token_path.write_text("token-de-otro-proceso")
+        os.chmod(token_path, 0o600)
+
+        monkeypatch.setattr(Path, "is_file", lambda self: False)
+
+        token = control_server._load_or_create_token(token_path)
+
+        assert token == "token-de-otro-proceso", (
+            "Debería leer el token ya escrito por el otro proceso, no generar uno nuevo"
+        )
+
+
 async def _test_endpoint_desconocido_con_token_correcto_retorna_404() -> None:
     from app import control_server
 
@@ -247,6 +301,14 @@ def test_post_cancel_sin_header_rechaza_401() -> None:
 
 def test_post_cancel_con_token_incorrecto_rechaza_401() -> None:
     asyncio.run(_test_post_cancel_con_token_incorrecto_rechaza_401())
+
+
+def test_post_cancel_con_header_no_ascii_rechaza_401() -> None:
+    asyncio.run(_test_post_cancel_con_header_no_ascii_rechaza_401())
+
+
+def test_load_or_create_token_no_pisa_si_aparece_justo_al_crear(monkeypatch) -> None:
+    asyncio.run(_test_load_or_create_token_no_pisa_si_aparece_justo_al_crear(monkeypatch))
 
 
 def test_endpoint_desconocido_con_token_correcto_retorna_404() -> None:
