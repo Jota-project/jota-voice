@@ -22,6 +22,13 @@ from config import GatewayConfig
 from backends.gateway_client import GatewayClient, _cloudflare_access_headers
 
 
+class _FakeConnectionClosed(Exception):
+    """Stub para ConnectionClosed: el real (websockets.exceptions) requiere
+    frames rcvd/sent en el constructor, demasiado para este test. connect()
+    solo necesita propagar la excepción sin capturarla, así que cualquier
+    subclase de Exception sirve."""
+
+
 class _FakeWS:
     """WS fake iterable async — basta para probar receive() sin servidor real."""
 
@@ -150,3 +157,90 @@ async def _test_receive_termina_en_turn_end_sin_esperar_done() -> None:
 
 def test_receive_termina_en_turn_end_sin_esperar_done() -> None:
     asyncio.run(_test_receive_termina_en_turn_end_sin_esperar_done())
+
+
+# ---------------------------------------------------------------------------
+# Issue #15: connect() debe esperar el mensaje 'ready' antes de retornar.
+#
+# Sin esto, si el gateway rechaza el handshake (p.ej. client_key inválida),
+# el cliente envía todo el turno de audio a una conexión muerta, descubriendo
+# el error tarde y de forma genérica al final del turno.
+# ---------------------------------------------------------------------------
+
+
+async def _test_connect_espera_mensaje_ready_antes_de_retornar() -> None:
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
+    ws_mock = MagicMock()
+    ws_mock.send = AsyncMock()
+    ws_mock.recv = AsyncMock(return_value=json.dumps({"type": "ready"}))
+    sys.modules["websockets"].connect = AsyncMock(return_value=ws_mock)
+
+    client = GatewayClient(cfg)
+    await client.connect()
+
+    ws_mock.recv.assert_awaited_once()
+    ws_mock.send.assert_awaited_once()
+
+
+async def _test_connect_levanta_si_primer_mensaje_es_error() -> None:
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
+    ws_mock = MagicMock()
+    ws_mock.send = AsyncMock()
+    ws_mock.recv = AsyncMock(return_value=json.dumps({"type": "error", "message": "bad key"}))
+    sys.modules["websockets"].connect = AsyncMock(return_value=ws_mock)
+
+    client = GatewayClient(cfg)
+    try:
+        await client.connect()
+    except RuntimeError as exc:
+        assert "bad key" in str(exc), f"Mensaje del error no propagado: {exc}"
+    else:
+        raise AssertionError("connect() debería haber lanzado RuntimeError por mensaje 'error'")
+
+
+async def _test_connect_levanta_si_primer_mensaje_tipo_inesperado() -> None:
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
+    ws_mock = MagicMock()
+    ws_mock.send = AsyncMock()
+    ws_mock.recv = AsyncMock(return_value=json.dumps({"type": "transcription"}))
+    sys.modules["websockets"].connect = AsyncMock(return_value=ws_mock)
+
+    client = GatewayClient(cfg)
+    try:
+        await client.connect()
+    except RuntimeError as exc:
+        assert "transcription" in str(exc), f"Tipo inesperado no propagado: {exc}"
+    else:
+        raise AssertionError("connect() debería haber lanzado RuntimeError por tipo inesperado")
+
+
+async def _test_connect_propagar_connection_closed_si_server_cierra_antes_de_ready() -> None:
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
+    ws_mock = MagicMock()
+    ws_mock.send = AsyncMock()
+    ws_mock.recv = AsyncMock(side_effect=_FakeConnectionClosed(1008))
+    sys.modules["websockets"].connect = AsyncMock(return_value=ws_mock)
+
+    client = GatewayClient(cfg)
+    try:
+        await client.connect()
+    except _FakeConnectionClosed:
+        pass
+    else:
+        raise AssertionError("connect() debería propagar ConnectionClosed del server")
+
+
+def test_connect_espera_mensaje_ready_antes_de_retornar() -> None:
+    asyncio.run(_test_connect_espera_mensaje_ready_antes_de_retornar())
+
+
+def test_connect_levanta_si_primer_mensaje_es_error() -> None:
+    asyncio.run(_test_connect_levanta_si_primer_mensaje_es_error())
+
+
+def test_connect_levanta_si_primer_mensaje_tipo_inesperado() -> None:
+    asyncio.run(_test_connect_levanta_si_primer_mensaje_tipo_inesperado())
+
+
+def test_connect_propagar_connection_closed_si_server_cierra_antes_de_ready() -> None:
+    asyncio.run(_test_connect_propagar_connection_closed_si_server_cierra_antes_de_ready())

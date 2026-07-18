@@ -57,7 +57,34 @@ class GatewayClient:
             "output_mode": ["audio", "text", "status"],
         }
         await self._ws.send(json.dumps(handshake))
-        log.debug("Gateway conectado a %s (device=%s)", self._cfg.ws_url, self._device_id)
+        # El protocolo documentado (jota-gateway/docs/client-protocol.md)
+        # exige leer la respuesta del handshake antes de enviar audio/texto:
+        # sin esto, si client_key es inválida el gateway cierra con 1008 y el
+        # cliente envía el turno completo (hasta 15s) a una conexión muerta,
+        # descubriendo el error tarde y de forma genérica al final del turno.
+        try:
+            raw = await asyncio.wait_for(
+                self._ws.recv(),
+                timeout=self._cfg.connect_timeout_s,
+            )
+        except asyncio.TimeoutError:
+            log.error(
+                "Gateway: timeout esperando 'ready' tras handshake (%.1fs)",
+                self._cfg.connect_timeout_s,
+            )
+            raise
+        msg = json.loads(raw)
+        msg_type = msg.get("type", "")
+        if msg_type == "ready":
+            log.debug("Gateway listo (device=%s)", self._device_id)
+            return
+        if msg_type == "error":
+            raise RuntimeError(
+                f"Gateway: handshake rechazado: {msg.get('message', msg)}"
+            )
+        raise RuntimeError(
+            f"Gateway: handshake devolvió tipo inesperado {msg_type!r}: {msg}"
+        )
 
     async def disconnect(self) -> None:
         if self._ws:
