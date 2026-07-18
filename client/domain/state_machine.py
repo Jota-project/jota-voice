@@ -246,6 +246,11 @@ async def _recording(
         await _safe_send_cancel(gateway)
         raise _TurnCancelled()
 
+    if not capture_task.cancelled():
+        exc = capture_task.exception()
+        if exc is not None:
+            raise exc
+
     # play_notification() es un beep puramente cosmético (confirma al
     # usuario que se dejó de grabar). Un fallo de audio de salida (visto en
     # producción: dispositivo Bluetooth intermitente, PaErrorCode -9986) no
