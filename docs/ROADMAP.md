@@ -57,7 +57,7 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 - [x] **#11** 🔴 `[003]` — Fallo de `audio.start()` en macOS deja el icono del menubar "vivo" sin que nada funcione — **S** — try/except visible en menubar (`set_state("error")`) + "Salir" siempre cierra la app (`00bc2f6`, `984b387`)
 - [x] **#12** 🔴 `[004]` — Excepción de `capture_task` durante RECORDING nunca se comprueba — **S** — propagar `capture_task.exception()` en `_recording()` reusando el patrón de `_responding()` (`c245aa9`)
 - [x] **#13** 🔴 `[005]` — `audio_termux.py::_play()` pierde muestras en chunks de longitud impar — **S** — arrastrar byte suelto en `_play()` y reset en `stop`/`drain`/`reset`, replicando el patrón de `audio_sounddevice.py::_enqueue_carry` (`b48ff57`)
-- [ ] **#14** 🔴 `[006]` — `oww_client.py`: rate/channels hardcodeados a 16000/mono, desacoplados de `AudioConfig` — **S**
+- [x] **#14** 🔴 `[006]` — `oww_client.py`: rate/channels hardcodeados a 16000/mono, desacoplados de `AudioConfig` — **S** — inyectar `AudioConfig` (sample_rate/channels) en `OWWClient` y `WyomingBackend` para que los eventos `audio-start`/`audio-chunk` del protocolo Wyoming reflejen el rate/channels reales del micrófono en vez de los hardcodeados (`940815e`)
 - [ ] **#15** 🔴 `[007]` — `gateway_client.py::connect()` no espera el mensaje `ready` antes de enviar audio — **S**
 - [ ] **#16** 🔴 `[008]` — Cierre de conexión a mitad de turno se trata igual que un fin de turno normal — **S**
 - [ ] **#17** 🔴 `[009]` — `oww_client.run_forever`: un `ConnectionError` del envío escapa y mata la detección de wake word por completo — **M**
