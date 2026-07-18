@@ -55,7 +55,7 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 - [x] **#9** 🔴 `[001]` — Cola de audio compartida entre OWW y captura — consumidores en competencia real — **M** — fan-out a colas independientes (`e124a50`, `746caf0`, `283fd75`)
 - [x] **#10** 🔴 `[002]` — ControlServer (127.0.0.1:8765) sin autenticación — vulnerable desde cualquier pestaña de navegador — **S** — token compartido (600) + header `X-Jota-Control-Token` + rate limiting (`c27ba2a`, `a31fd42`)
 - [x] **#11** 🔴 `[003]` — Fallo de `audio.start()` en macOS deja el icono del menubar "vivo" sin que nada funcione — **S** — try/except visible en menubar (`set_state("error")`) + "Salir" siempre cierra la app (`00bc2f6`, `984b387`)
-- [ ] **#12** 🔴 `[004]` — Excepción de `capture_task` durante RECORDING nunca se comprueba — **S**
+- [x] **#12** 🔴 `[004]` — Excepción de `capture_task` durante RECORDING nunca se comprueba — **S** — propagar `capture_task.exception()` en `_recording()` reusando el patrón de `_responding()` (`c245aa9`)
 - [ ] **#13** 🔴 `[005]` — `audio_termux.py::_play()` pierde muestras en chunks de longitud impar — **S**
 - [ ] **#14** 🔴 `[006]` — `oww_client.py`: rate/channels hardcodeados a 16000/mono, desacoplados de `AudioConfig` — **S**
 - [ ] **#15** 🔴 `[007]` — `gateway_client.py::connect()` no espera el mensaje `ready` antes de enviar audio — **S**
