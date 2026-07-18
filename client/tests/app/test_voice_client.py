@@ -52,6 +52,25 @@ def _make_cfg() -> Config:
     return Config(gateway=GatewayConfig(client_key="test", host="localhost"))
 
 
+def test_call_soon_threadsafe_safe_ignores_closed_loop() -> None:
+    loop = asyncio.new_event_loop()
+    stop_event = asyncio.Event()
+    loop.close()
+
+    voice_client._call_soon_threadsafe_safe(loop, stop_event)  # no debe lanzar
+
+
+def test_call_soon_threadsafe_safe_sets_event_on_open_loop() -> None:
+    loop = asyncio.new_event_loop()
+    stop_event = asyncio.Event()
+
+    voice_client._call_soon_threadsafe_safe(loop, stop_event)
+    loop.run_until_complete(asyncio.sleep(0))
+    loop.close()
+
+    assert stop_event.is_set()
+
+
 async def _test_audio_start_failure_is_visible_and_shuts_down_cleanly(monkeypatch) -> None:
     monkeypatch.setattr(registry, "make_audio", lambda cfg: _FailingAudioBackend())
 
@@ -69,6 +88,26 @@ async def _test_audio_start_failure_is_visible_and_shuts_down_cleanly(monkeypatc
 
 def test_audio_start_failure_is_visible_and_shuts_down_cleanly(monkeypatch) -> None:
     asyncio.run(_test_audio_start_failure_is_visible_and_shuts_down_cleanly(monkeypatch))
+
+
+class _ExplodingMenubarBackend(_SpyMenubarBackend):
+    def set_state(self, state: str) -> None:
+        raise RuntimeError("menubar backend roto")
+
+
+async def _test_audio_start_failure_does_not_propagate_if_menubar_reporting_fails(monkeypatch) -> None:
+    monkeypatch.setattr(registry, "make_audio", lambda cfg: _FailingAudioBackend())
+
+    menubar = _ExplodingMenubarBackend()
+    cfg = _make_cfg()
+
+    # La excepción original de audio.start() no debe perderse su manejo
+    # por un fallo secundario al reportarla al menubar.
+    await voice_client.main(cfg, menubar, external_stop_event=asyncio.Event())
+
+
+def test_audio_start_failure_does_not_propagate_if_menubar_reporting_fails(monkeypatch) -> None:
+    asyncio.run(_test_audio_start_failure_does_not_propagate_if_menubar_reporting_fails(monkeypatch))
 
 
 def test_run_with_cocoa_menubar_survives_early_main_failure(monkeypatch) -> None:
