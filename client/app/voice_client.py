@@ -95,6 +95,18 @@ from ui.menubar_base import MenubarCommands
 from ui.menubar_client import MenubarClient
 
 
+def _call_soon_threadsafe_safe(loop: asyncio.AbstractEventLoop, stop_event: asyncio.Event) -> None:
+    """call_soon_threadsafe() revienta con RuntimeError si el loop ya se
+    cerró (p.ej. audio.start() falló y main() ya retornó) — puede invocarse
+    desde una señal OS o desde una acción de menú llegada tarde."""
+    try:
+        loop.call_soon_threadsafe(stop_event.set)
+    except RuntimeError:
+        logging.getLogger(__name__).debug(
+            "Loop de asyncio ya cerrado; señal/comando de parada ignorado"
+        )
+
+
 def _setup_logging(level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
@@ -147,7 +159,18 @@ async def main(
             loop.add_signal_handler(sig, _on_signal)
 
     # --- Arrancar captura de audio ---
-    await audio.start()
+    try:
+        await audio.start()
+    except Exception:
+        log.exception("No se pudo arrancar la captura de audio; jota-voice no puede continuar")
+        try:
+            menubar_backend.set_state("error")
+            menubar_backend.set_status_text(
+                "Error: no se pudo iniciar el audio (revisa permisos de micrófono/dispositivo)"
+            )
+        except Exception:
+            log.exception("No se pudo reflejar el error en el menubar")
+        return
     log.info("AudioCapture iniciado")
 
     cancel_event = asyncio.Event()
@@ -200,10 +223,10 @@ async def main(
         # menú (con CocoaMenubarBackend, el hilo principal) — nunca desde
         # el hilo de asyncio. asyncio.Event.set() no es thread-safe, así
         # que hay que cruzar al loop vía call_soon_threadsafe.
-        loop.call_soon_threadsafe(stop_event.set)
+        _call_soon_threadsafe_safe(loop, stop_event)
 
     def _quit() -> None:
-        loop.call_soon_threadsafe(stop_event.set)
+        _call_soon_threadsafe_safe(loop, stop_event)
 
     cmds = MenubarCommands(
         on_toggle_pause=lambda: ui_queue.put_nowait("toggle_pause"),
@@ -332,7 +355,21 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
             loop_ready.set()
             await main(cfg, menubar_backend, external_stop_event=stop_event)
 
-        asyncio.run(_runner())
+        try:
+            asyncio.run(_runner())
+        except Exception:
+            log.exception("El hilo de asyncio terminó con un error no controlado")
+            # Por si el fallo ocurrió antes de que _runner() llegara a
+            # loop_ready.set(): el hilo principal no debe quedarse
+            # esperando los 5s completos del timeout.
+            loop_ready.set()
+            try:
+                menubar_backend.set_state("error")
+                menubar_backend.set_status_text(
+                    "Error interno: revisa los logs de jota-voice"
+                )
+            except Exception:
+                log.exception("No se pudo reflejar el error en el menubar")
 
     t = threading.Thread(target=_asyncio_thread, name="jota-asyncio", daemon=False)
     t.start()
@@ -343,8 +380,9 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
         log.info("Señal de parada recibida (%s)", signum)
         loop = loop_holder.get("loop")
         stop_event = stop_holder.get("stop_event")
-        if loop is not None and stop_event is not None:
-            loop.call_soon_threadsafe(stop_event.set)
+        if loop is None or stop_event is None:
+            return
+        _call_soon_threadsafe_safe(loop, stop_event)
 
     signal.signal(signal.SIGINT, _handle_os_signal)
     signal.signal(signal.SIGTERM, _handle_os_signal)

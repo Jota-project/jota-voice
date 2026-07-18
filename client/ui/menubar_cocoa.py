@@ -265,3 +265,9 @@ class CocoaMenubarBackend:
     def quitApp_(self, _sender) -> None:
         if self._commands is not None:
             self._commands.on_quit()
+        else:
+            # set_commands() nunca se wireó (p.ej. audio.start() falló antes
+            # de llegar a esa línea de main()) — no hay a quién delegar el
+            # apagado limpio del asyncio loop, así que cerramos la app
+            # directamente en vez de dejar "Salir" sin efecto.
+            self.stop()
