@@ -170,6 +170,25 @@ async def _recording(
     bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": wake_word}))
     bus.publish(VoiceEvent(type="recording_started", data={}))
 
+    # Descarta el backlog acumulado en get_queue() mientras _idle() esperaba
+    # la wake word: desde el fan-out de audio (issue #9), esa cola ya no
+    # tiene ningún consumidor durante esa espera (antes, OWWClient la
+    # drenaba como efecto secundario de compartir la misma cola). Sin este
+    # descarte, _capture_loop consumiría ese ruido de ambiente como si fuera
+    # la voz del usuario y podría agotar silence_frames_needed antes de
+    # llegar al audio real — cortando el turno sin haber oído nada nuevo.
+    # get_preroll() ya cubre el contexto de los últimos segundos antes de la
+    # wake word. Se descarta AQUÍ (antes de connect()/preroll), no dentro de
+    # _capture_loop(): si se descartara después, se perderían también los
+    # frames legítimos capturados durante el propio connect() al gateway.
+    q = audio.get_queue()
+    drained = 0
+    while not q.empty():
+        q.get_nowait()
+        drained += 1
+    if drained:
+        log.debug("RECORDING: descartados %d frames stale de la cola", drained)
+
     await asyncio.wait_for(
         gateway.connect(),
         timeout=cfg.gateway.connect_timeout_s,
@@ -183,23 +202,6 @@ async def _recording(
 
     async def _capture_loop() -> None:
         q = audio.get_queue()
-
-        # Descarta el backlog acumulado en get_queue() mientras _idle()
-        # esperaba la wake word: desde el fan-out de audio (issue #9), esa
-        # cola ya no tiene ningún consumidor durante esa espera (antes,
-        # OWWClient la drenaba como efecto secundario de compartir la misma
-        # cola). Sin este descarte, _capture_loop consumiría ese ruido de
-        # ambiente como si fuera la voz del usuario y podría agotar
-        # silence_frames_needed antes de llegar al audio real — cortando el
-        # turno sin haber oído nada nuevo. get_preroll() ya cubre el
-        # contexto de los últimos segundos antes de la wake word.
-        drained = 0
-        while not q.empty():
-            q.get_nowait()
-            drained += 1
-        if drained:
-            log.debug("RECORDING: descartados %d frames stale de la cola", drained)
-
         silence_frames_needed = max(1, int(
             cfg.audio.silence_timeout_s * cfg.audio.sample_rate / cfg.audio.frames_per_buffer
         ))

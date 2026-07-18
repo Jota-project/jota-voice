@@ -935,13 +935,11 @@ async def _run_recording_discards_stale_idle_backlog_test() -> None:
     audio._capture_q = asyncio.Queue()
     audio._oww_q = asyncio.Queue()
 
-    gateway = MagicMock()
-    gateway.connect = AsyncMock()
-    gateway.disconnect = AsyncMock()
-    gateway.send_audio = AsyncMock()
-    gateway.send_end = AsyncMock()
-    gateway.send_cancel = AsyncMock()
-    gateway.receive = lambda: (x for x in [])  # nunca se usa (no llega a RESPONDING)
+    # A diferencia de _run_cancel_recording_test, aquí RECORDING termina por
+    # silencio (no por cancelación) y SÍ llega a RESPONDING — necesita un
+    # gateway.receive() real (async generator), no el lambda sync que usan
+    # los tests que nunca salen de RECORDING.
+    gateway = _gateway_mock_with_events([])
 
     playback = _make_playback_mock()
 
