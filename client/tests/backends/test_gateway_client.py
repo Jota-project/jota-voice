@@ -230,6 +230,52 @@ async def _test_connect_propagar_connection_closed_si_server_cierra_antes_de_rea
         raise AssertionError("connect() debería propagar ConnectionClosed del server")
 
 
+async def _test_connect_levanta_timeout_si_server_no_responde_ready() -> None:
+    """El recv() del handshake respeta cfg.connect_timeout_s: si el gateway
+    no envía ready a tiempo, asyncio.TimeoutError se loguea y se re-lanza.
+    Pinea la rama del except (sin capturarla genéricamente como
+    ConnectionClosed) para que un cambio accidental futuro no la trague."""
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=0.05)
+
+    async def _slow_recv() -> str:
+        await asyncio.sleep(1.0)
+        return json.dumps({"type": "ready"})
+
+    ws_mock = MagicMock()
+    ws_mock.send = AsyncMock()
+    ws_mock.recv = _slow_recv
+    sys.modules["websockets"].connect = AsyncMock(return_value=ws_mock)
+
+    client = GatewayClient(cfg)
+    try:
+        await client.connect()
+    except asyncio.TimeoutError:
+        pass
+    else:
+        raise AssertionError("connect() debería haber levantado TimeoutError esperando ready")
+
+
+async def _test_connect_propagar_json_invalido_en_respuesta_handshake() -> None:
+    """Si el primer mensaje no es JSON (p.ej. proxy/LB devolviendo HTML 502
+    antes del WS), connect() propaga json.JSONDecodeError sin capturarla.
+    Es la política 'fail fast' del handshake, deliberadamente distinta del
+    'tolerant skip' de receive() — un cambio accidental aquí debe romper este
+    test, no degradar silenciosamente."""
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
+    ws_mock = MagicMock()
+    ws_mock.send = AsyncMock()
+    ws_mock.recv = AsyncMock(return_value="<html>502 Bad Gateway</html>")
+    sys.modules["websockets"].connect = AsyncMock(return_value=ws_mock)
+
+    client = GatewayClient(cfg)
+    try:
+        await client.connect()
+    except json.JSONDecodeError:
+        pass
+    else:
+        raise AssertionError("connect() debería propagar JSONDecodeError del handshake")
+
+
 def test_connect_espera_mensaje_ready_antes_de_retornar() -> None:
     asyncio.run(_test_connect_espera_mensaje_ready_antes_de_retornar())
 
@@ -244,3 +290,11 @@ def test_connect_levanta_si_primer_mensaje_tipo_inesperado() -> None:
 
 def test_connect_propagar_connection_closed_si_server_cierra_antes_de_ready() -> None:
     asyncio.run(_test_connect_propagar_connection_closed_si_server_cierra_antes_de_ready())
+
+
+def test_connect_levanta_timeout_si_server_no_responde_ready() -> None:
+    asyncio.run(_test_connect_levanta_timeout_si_server_no_responde_ready())
+
+
+def test_connect_propagar_json_invalido_en_respuesta_handshake() -> None:
+    asyncio.run(_test_connect_propagar_json_invalido_en_respuesta_handshake())

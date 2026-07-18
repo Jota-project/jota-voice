@@ -57,11 +57,15 @@ class GatewayClient:
             "output_mode": ["audio", "text", "status"],
         }
         await self._ws.send(json.dumps(handshake))
-        # El protocolo documentado (jota-gateway/docs/client-protocol.md)
-        # exige leer la respuesta del handshake antes de enviar audio/texto:
-        # sin esto, si client_key es inválida el gateway cierra con 1008 y el
-        # cliente envía el turno completo (hasta 15s) a una conexión muerta,
-        # descubriendo el error tarde y de forma genérica al final del turno.
+        # Protocolo (jota-gateway/docs/client-protocol.md): leer respuesta del
+        # handshake antes de enviar audio. Sin esto, client_key inválida →
+        # close 1008 → el cliente envía el turno entero (hasta 15s) a una
+        # conexión muerta y solo lo descubre al final, de forma genérica.
+        # Coste: un RTT extra por turno (arquitectura reconnect-per-turn); #24
+        # migrará a sesión WS persistente donde el handshake ocurre una vez.
+        # Deuda técnica conocida (no expandido): capabilities.tts/barge_in/
+        # transcriber y session_id del ready no se capturan — relevante cuando
+        # #24 haga la sesión persistente.
         try:
             raw = await asyncio.wait_for(
                 self._ws.recv(),
