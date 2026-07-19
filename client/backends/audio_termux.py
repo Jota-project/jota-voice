@@ -8,7 +8,7 @@ import asyncio
 import logging
 
 from config import AudioConfig
-from .audio_capture import AudioCapture
+from platforms.termux.audio_capture_termux import AudioCapture
 from .notification_tone import synth_notification_tone
 
 log = logging.getLogger(__name__)
