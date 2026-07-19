@@ -30,6 +30,10 @@ class VoiceEvent:
         # Sistema
         "state_changed",
         "display_text_update",  # emitido por PlaybackEngine, consumido por DisplayClient
+        # Emitido por el gateway mid-turno (degradación de
+        # orchestrator/transcriber/tts). Estado informativo, el turno
+        # continúa — ver issue #18.
+        "gateway_status",
         "error",
         "cancelled",
     ]
