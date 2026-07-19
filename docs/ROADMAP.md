@@ -61,7 +61,7 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 - [x] **#15** 🔴 `[007]` — `gateway_client.py::connect()` no espera el mensaje `ready` antes de enviar audio — **S** — leer + validar primer mensaje tras handshake (`ready`/`error`/inesperado); `ConnectionClosed(1008)` propagado sin capturar; `cfg.connect_timeout_s` acotando la espera; 6 nuevos tests (`1cd78d8`, `45a565e`)
 - [x] **#16** 🔴 `[008]` — Cierre de conexión a mitad de turno se trata igual que un fin de turno normal — **S** — distinguir `ConnectionClosedOK` (silencioso) vs `ConnectionClosedError` (propaga y publica `error`); `max_size=None` en `websockets.connect()` para no auto-cierre 1009 por frame binario TTS grande (`3b365e1`, `8a94850`)
 - [x] **#17** 🔴 `[009]` — `oww_client.run_forever`: un `ConnectionError` del envío escapa y mata la detección de wake word por completo — **M** — except paralelo en `await send_task` que traga `ConnectionError`/`OSError`/`IncompleteReadError` y loguea; `wait_for_detection` también captura `UnicodeDecodeError` y `asyncio.LimitOverrunError` (`8f875a3`)
-- [ ] **#18** 🔴 `[010]` — Mensajes `status`/`error` del protocolo del gateway nunca se manejan — **S**
+- [x] **#18** 🔴 `[010]` — Mensajes `status`/`error` del protocolo del gateway nunca se manejan — **S** — `status` publica `VoiceEvent(type='gateway_status')`; `error` levanta `_GatewayError(code, message, fatal)` que `run()` publica con `code/message/fatal` propagados (no el genérico `Timeout en estado RESPONDING`); 2 nuevos tests (`705a8c7`)
 - [ ] **#19** 🔴 `[011]` — `menubar_cocoa.py::stop()` mata el proceso entero de forma abrupta — **S**
 - [ ] **#20** 🔴 `[012]` — SIGINT/SIGTERM solo se procesan cuando dispara el NSTimer — latencia de hasta 1s — **M**
 
