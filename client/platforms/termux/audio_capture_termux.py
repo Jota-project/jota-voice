@@ -11,7 +11,6 @@ parec usa PulseAudio → OpenSL_ES_source → micrófono real.
 """
 
 import asyncio
-import collections
 import logging
 import os
 import subprocess
@@ -21,14 +20,11 @@ from typing import Optional
 import numpy as np
 
 from config import AudioConfig
+from core.audio.framing import int16_to_float32
+from core.audio.preroll import PrerollBuffer
+from core.audio.vad import is_silence as _is_silence
 
 logger = logging.getLogger(__name__)
-
-
-def _int16_to_float32(data: bytes) -> bytes:
-    """Convierte frames PCM int16 a float32 normalizado [-1.0, 1.0]."""
-    arr = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
-    return arr.tobytes()
 
 
 class AudioCapture:
@@ -44,11 +40,10 @@ class AudioCapture:
         self._stop_event = threading.Event()
         self._read_thread: Optional[threading.Thread] = None
 
-        preroll_frames = int(
-            cfg.preroll_seconds * cfg.sample_rate / cfg.frames_per_buffer
-        )
-        self._preroll: collections.deque[bytes] = collections.deque(
-            maxlen=preroll_frames
+        self._preroll = PrerollBuffer(
+            seconds=cfg.preroll_seconds,
+            sample_rate=cfg.sample_rate,
+            frames_per_buffer=cfg.frames_per_buffer,
         )
 
     # ------------------------------------------------------------------
@@ -150,18 +145,15 @@ class AudioCapture:
     def get_preroll(self) -> bytes:
         """Devuelve los últimos N segundos de audio como bytes float32 concatenados."""
         with self._lock:
-            return b"".join(self._preroll)
+            return self._preroll.get()
 
     def is_silence(self, frame: bytes) -> bool:
-        """
-        Devuelve True si el frame está por debajo del umbral de VAD.
+        """Devuelve True si el frame está por debajo del umbral de VAD.
 
-        El frame se interpreta como float32 normalizado; se escala a rango int16
-        para comparar con vad_rms_threshold (umbral expresado en unidades int16).
+        El frame se interpreta como float32 normalizado (vad_rms_threshold está
+        expresado en unidades int16 en la config; se normaliza aquí).
         """
-        samples = np.frombuffer(frame, dtype=np.float32)
-        rms = float(np.sqrt(np.mean(samples ** 2))) * 32768.0
-        return rms < self._cfg.vad_rms_threshold
+        return _is_silence(frame, threshold_rms=self._cfg.vad_rms_threshold / 32768.0)
 
     # ------------------------------------------------------------------
     # Hilo lector
@@ -180,7 +172,7 @@ class AudioCapture:
             if not in_data:
                 logger.warning("AudioCapture._read_loop: parec cerró stdout")
                 break
-            float32_bytes = _int16_to_float32(in_data)
+            float32_bytes = int16_to_float32(in_data)
             if _first:
                 arr = np.frombuffer(float32_bytes, np.float32)
                 rms = float(np.sqrt(np.mean(arr ** 2))) * 32768.0

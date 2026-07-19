@@ -6,7 +6,6 @@ Plataformas: macOS (CoreAudio), Linux (ALSA/PulseAudio). No funciona en Termux
 from __future__ import annotations
 
 import asyncio
-import collections
 import logging
 import queue as queue_mod
 import threading
@@ -14,6 +13,8 @@ import threading
 import numpy as np
 
 from config import AudioConfig
+from core.audio.preroll import PrerollBuffer
+from core.audio.vad import is_silence as _is_silence
 from .notification_tone import synth_notification_tone
 
 log = logging.getLogger(__name__)
@@ -41,10 +42,11 @@ class SounddeviceBackend:
         self._capture_thread: threading.Thread | None = None
         self._capture_stop = threading.Event()
 
-        preroll_frames = int(
-            cfg.preroll_seconds * cfg.sample_rate / cfg.frames_per_buffer
+        self._preroll = PrerollBuffer(
+            seconds=cfg.preroll_seconds,
+            sample_rate=cfg.sample_rate,
+            frames_per_buffer=cfg.frames_per_buffer,
         )
-        self._preroll: collections.deque[bytes] = collections.deque(maxlen=preroll_frames)
         self._lock = threading.Lock()
 
     # --- captura ---
@@ -133,14 +135,10 @@ class SounddeviceBackend:
 
     def get_preroll(self) -> bytes:
         with self._lock:
-            return b"".join(self._preroll)
+            return self._preroll.get()
 
     def is_silence(self, frame: bytes) -> bool:
-        samples = np.frombuffer(frame, dtype=np.float32)
-        if samples.size == 0:
-            return True
-        rms = float(np.sqrt(np.mean(samples ** 2))) * 32768.0
-        return rms < self._cfg.vad_rms_threshold
+        return _is_silence(frame, threshold_rms=self._cfg.vad_rms_threshold / 32768.0)
 
     # --- reproducción ---
 

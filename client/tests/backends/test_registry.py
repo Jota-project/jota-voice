@@ -18,7 +18,7 @@ def _cfg(audio_backend: str | None = None, display_backend: str | None = None) -
 
 
 def test_make_audio_unsupported_os(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(registry, "is_termux", lambda: False)
+    monkeypatch.delenv("PREFIX", raising=False)
     monkeypatch.setattr(registry.sys, "platform", "win32")
     with pytest.raises(ConfigError, match="SO no soportado"):
         registry.make_audio(_cfg())
@@ -42,14 +42,14 @@ def test_make_audio_sounddevice_override(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_make_audio_default_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(registry, "is_termux", lambda: False)
+    monkeypatch.delenv("PREFIX", raising=False)
     monkeypatch.setattr(registry.sys, "platform", "darwin")
     inst = registry.make_audio(_cfg())
     assert inst.__class__.__name__ == "SounddeviceBackend"
 
 
 def test_make_audio_default_termux(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(registry, "is_termux", lambda: True)
+    monkeypatch.setenv("PREFIX", "/data/data/com.termux/files/usr")
     monkeypatch.setattr(registry.sys, "platform", "linux")
     inst = registry.make_audio(_cfg())
     assert inst.__class__.__name__ == "TermuxBackend"

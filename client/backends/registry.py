@@ -9,19 +9,19 @@ import logging
 import sys
 
 from config import Config
+from core.platform_key import detect_platform
 
 from .errors import ConfigError
-from .platform_detect import is_termux
 
 
 def _default_audio_backend() -> str:
-    if is_termux():
+    platform_key = detect_platform()
+    if platform_key.family == "termux":
         return "termux"
-    s = sys.platform
-    if s == "darwin" or s.startswith("linux"):
+    if platform_key.family in ("darwin", "linux"):
         return "sounddevice"
     raise ConfigError(
-        f"SO no soportado: {s!r}. Instala el backend de audio correspondiente."
+        f"SO no soportado: {platform_key.family!r}. Instala el backend de audio correspondiente."
     )
 
 
