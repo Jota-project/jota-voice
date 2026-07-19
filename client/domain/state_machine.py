@@ -42,6 +42,38 @@ class _TurnCancelled(Exception):
     """Lanzada cuando cancel_event gana la race en RECORDING o RESPONDING."""
 
 
+class _GatewayError(Exception):
+    """Error reportado por el gateway mid-turno (issue #18).
+
+    El orquestador caído emite `{"type":"error","code":"TURN_ERROR",
+    "message":"...","fatal":false}` y deja de mandar más eventos para ese
+    turno. Antes del fix, _receive_loop() lo tragaba en el `else` final
+    (solo log.debug) y el cliente esperaba los 30s del timeout externo
+    para reportar el genérico "Timeout en estado RESPONDING" — perdiendo
+    el code/message que el servidor ya había dado.
+
+    Levantar esta excepción desde _receive_loop() hace que
+    receive_task.exception() la propague al dispatcher externo, que la
+    re-raise, que run() la capture y _log_error() publique los campos
+    code/message/fatal directamente al bus (no envueltos en str(exc)).
+    """
+
+    def __init__(self, code: str, message: str, fatal: object) -> None:
+        self.code = code
+        self.message = message
+        # El protocolo del gateway define fatal como JSON boolean. Aceptar
+        # cualquier valor truthy (p.ej. bool("false") == True en Python) haría
+        # que strings no-vacíos y enteros disparasen el camino de fatal=True
+        # sin ser realmente fatales — false positivo en la severidad del
+        # log y en el payload publicado al bus. Solo True/False literales
+        # cuentan como boolean; cualquier otra cosa cae al camino no-fatal.
+        self.fatal = fatal if isinstance(fatal, bool) else False
+        super().__init__(message)
+
+    def __str__(self) -> str:
+        return self.message
+
+
 async def _safe_send_cancel(gateway: GatewayClient) -> None:
     try:
         await gateway.send_cancel()
@@ -170,6 +202,25 @@ async def _recording(
     bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": wake_word}))
     bus.publish(VoiceEvent(type="recording_started", data={}))
 
+    # Descarta el backlog acumulado en get_queue() mientras _idle() esperaba
+    # la wake word: desde el fan-out de audio (issue #9), esa cola ya no
+    # tiene ningún consumidor durante esa espera (antes, OWWClient la
+    # drenaba como efecto secundario de compartir la misma cola). Sin este
+    # descarte, _capture_loop consumiría ese ruido de ambiente como si fuera
+    # la voz del usuario y podría agotar silence_frames_needed antes de
+    # llegar al audio real — cortando el turno sin haber oído nada nuevo.
+    # get_preroll() ya cubre el contexto de los últimos segundos antes de la
+    # wake word. Se descarta AQUÍ (antes de connect()/preroll), no dentro de
+    # _capture_loop(): si se descartara después, se perderían también los
+    # frames legítimos capturados durante el propio connect() al gateway.
+    q = audio.get_queue()
+    drained = 0
+    while not q.empty():
+        q.get_nowait()
+        drained += 1
+    if drained:
+        log.debug("RECORDING: descartados %d frames stale de la cola", drained)
+
     await asyncio.wait_for(
         gateway.connect(),
         timeout=cfg.gateway.connect_timeout_s,
@@ -226,6 +277,11 @@ async def _recording(
     if cancel_task in done:
         await _safe_send_cancel(gateway)
         raise _TurnCancelled()
+
+    if not capture_task.cancelled():
+        exc = capture_task.exception()
+        if exc is not None:
+            raise exc
 
     # play_notification() es un beep puramente cosmético (confirma al
     # usuario que se dejó de grabar). Un fallo de audio de salida (visto en
@@ -310,6 +366,28 @@ async def _responding(
             elif gw_event.type == "turn_end":
                 grace_deadline = loop.time() + TURN_END_GRACE_S
 
+            elif gw_event.type == "status":
+                # Issue #18 — informativo: el gateway reporta degradación
+                # de orchestrator/transcriber/tts mid-turno sin matar la
+                # sesión. Antes del fix caía en el else con log.debug,
+                # invisible para la UI (TTS degradado, fallback engine…).
+                bus.publish(VoiceEvent(type="gateway_status", data=gw_event.data))
+                log.info("RESPONDING: status de gateway → %r", gw_event.data)
+
+            elif gw_event.type == "error":
+                # Issue #18 — propagar AHORA el error del gateway con su
+                # code/message/fatal, en vez de esperar al timeout externo
+                # de 30s (que reportaría el genérico "Timeout en estado
+                # RESPONDING") o devolver en silencio (que publicaría
+                # playback_ended como si el turno hubiera terminado bien).
+                # No publicamos playback_ended ni playback.drain() — el
+                # turno termina con error, no con éxito.
+                raise _GatewayError(
+                    code=str(gw_event.data.get("code", "")),
+                    message=str(gw_event.data.get("message", "")),
+                    fatal=gw_event.data.get("fatal", False),
+                )
+
             else:
                 log.debug("RESPONDING: evento desconocido de gateway: %r", gw_event.type)
 
@@ -354,6 +432,23 @@ async def _responding(
 # ---------------------------------------------------------------------------
 
 def _log_error(state: str, exc: Exception, bus: EventBus) -> None:
+    # Issue #18 — los errores del gateway llegan con code/message/fatal
+    # estructurados. Publicarlos directamente al bus (no envueltos en
+    # str(exc)) permite que la UI los muestre literalmente y que un
+    # orquestador caído (TURN_ERROR) no aparezca como el genérico
+    # "Timeout en estado RESPONDING".
+    if isinstance(exc, _GatewayError):
+        level = log.error if exc.fatal else log.warning
+        level(
+            "Error en estado %s: gateway code=%r message=%r fatal=%s",
+            state, exc.code, exc.message, exc.fatal,
+        )
+        bus.publish(VoiceEvent(type="error", data={
+            "code": exc.code,
+            "message": exc.message,
+            "fatal": exc.fatal,
+        }))
+        return
     log.error("Error en estado %s: %s", state, exc)
     bus.publish(VoiceEvent(type="error", data={"message": str(exc)}))
 

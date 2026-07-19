@@ -72,3 +72,41 @@ def test_set_commands_does_not_raise(backend):
         on_quit=lambda: None,
     )
     backend.set_commands(cmds)
+
+
+def test_quit_with_commands_calls_on_quit(backend):
+    from ui.menubar_base import MenubarCommands
+
+    called = []
+    cmds = MenubarCommands(
+        on_toggle_pause=lambda: None,
+        on_open_logs=lambda: None,
+        on_open_config=lambda: None,
+        on_shutdown_service=lambda: None,
+        on_quit=lambda: called.append(True),
+    )
+    backend.set_commands(cmds)
+    backend.quitApp_(None)
+    assert called == [True]
+
+
+def test_quit_without_commands_stops_app_cleanly(backend):
+    """Si audio.start() falló antes de que set_commands() se wireara,
+    'Salir' debe cerrar la app igualmente en vez de no hacer nada."""
+    selectors = []
+    posted_events = []
+
+    class FakeApp:
+        def performSelectorOnMainThread_withObject_waitUntilDone_(self, sel, obj, wait):
+            selectors.append(sel)
+
+        def postEvent_atStart_(self, event, at_start):
+            posted_events.append((event, at_start))
+
+    backend._app = FakeApp()
+    backend.quitApp_(None)
+
+    assert selectors == ["stop:"]
+    assert [(event.type(), at_start) for event, at_start in posted_events] == [
+        (AppKit.NSEventTypeApplicationDefined, True)
+    ]

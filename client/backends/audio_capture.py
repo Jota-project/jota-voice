@@ -38,6 +38,7 @@ class AudioCapture:
         self._cfg = cfg
         self._proc: Optional[subprocess.Popen] = None
         self._queue: Optional[asyncio.Queue[bytes]] = None
+        self._oww_queue: Optional[asyncio.Queue[bytes]] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -58,6 +59,7 @@ class AudioCapture:
         """Arranca parec y el hilo lector. Reintenta con backoff si parec muere."""
         self._loop = asyncio.get_running_loop()
         self._queue = asyncio.Queue()
+        self._oww_queue = asyncio.Queue()
         self._stop_event.clear()
 
         pulse_path = os.environ.get("PULSE_RUNTIME_PATH", os.path.expanduser("~/.pulse"))
@@ -137,6 +139,14 @@ class AudioCapture:
             raise RuntimeError("AudioCapture.get_queue() llamado antes de start()")
         return self._queue
 
+    def get_oww_queue(self) -> asyncio.Queue[bytes]:
+        """Cola independiente de la de get_queue(), alimentada por el mismo
+        punto de captura — evita que OWW y el consumidor de RECORDING se
+        roben frames mutuamente (issue #9)."""
+        if self._oww_queue is None:
+            raise RuntimeError("AudioCapture.get_oww_queue() llamado antes de start()")
+        return self._oww_queue
+
     def get_preroll(self) -> bytes:
         """Devuelve los últimos N segundos de audio como bytes float32 concatenados."""
         with self._lock:
@@ -176,7 +186,16 @@ class AudioCapture:
                 rms = float(np.sqrt(np.mean(arr ** 2))) * 32768.0
                 logger.info("AudioCapture: primer frame de parec, RMS=%.1f", rms)
                 _first = False
-            with self._lock:
-                self._preroll.append(float32_bytes)
-            if self._loop is not None and not self._loop.is_closed():
-                self._loop.call_soon_threadsafe(self._queue.put_nowait, float32_bytes)
+            self._on_frame(float32_bytes)
+
+    def _on_frame(self, float32_bytes: bytes) -> None:
+        """Punto único de entrada de cada frame capturado — hace fan-out a
+        las dos colas independientes (RECORDING y OWW, ver get_queue() /
+        get_oww_queue()) para que ningún consumidor le robe frames al otro
+        (issue #9: antes ambos hacían `await q.get()` sobre la misma cola)."""
+        with self._lock:
+            self._preroll.append(float32_bytes)
+        if self._loop is None or self._loop.is_closed():
+            return
+        self._loop.call_soon_threadsafe(self._queue.put_nowait, float32_bytes)
+        self._loop.call_soon_threadsafe(self._oww_queue.put_nowait, float32_bytes)

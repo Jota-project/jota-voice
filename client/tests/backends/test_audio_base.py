@@ -12,6 +12,11 @@ def test_get_queue_type_hints_resolve() -> None:
     assert hints["return"] is not None
 
 
+def test_get_oww_queue_type_hints_resolve() -> None:
+    hints = typing.get_type_hints(AudioBackend.get_oww_queue)
+    assert hints["return"] is not None
+
+
 def test_run_forever_type_hints_resolve() -> None:
     hints = typing.get_type_hints(OwWBackend.run_forever)
     assert hints["audio"] is AudioBackend

@@ -95,6 +95,18 @@ from ui.menubar_base import MenubarCommands
 from ui.menubar_client import MenubarClient
 
 
+def _call_soon_threadsafe_safe(loop: asyncio.AbstractEventLoop, stop_event: asyncio.Event) -> None:
+    """call_soon_threadsafe() revienta con RuntimeError si el loop ya se
+    cerró (p.ej. audio.start() falló y main() ya retornó) — puede invocarse
+    desde una señal OS o desde una acción de menú llegada tarde."""
+    try:
+        loop.call_soon_threadsafe(stop_event.set)
+    except RuntimeError:
+        logging.getLogger(__name__).debug(
+            "Loop de asyncio ya cerrado; señal/comando de parada ignorado"
+        )
+
+
 def _setup_logging(level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
@@ -147,7 +159,18 @@ async def main(
             loop.add_signal_handler(sig, _on_signal)
 
     # --- Arrancar captura de audio ---
-    await audio.start()
+    try:
+        await audio.start()
+    except Exception:
+        log.exception("No se pudo arrancar la captura de audio; jota-voice no puede continuar")
+        try:
+            menubar_backend.set_state("error")
+            menubar_backend.set_status_text(
+                "Error: no se pudo iniciar el audio (revisa permisos de micrófono/dispositivo)"
+            )
+        except Exception:
+            log.exception("No se pudo reflejar el error en el menubar")
+        return
     log.info("AudioCapture iniciado")
 
     cancel_event = asyncio.Event()
@@ -200,10 +223,10 @@ async def main(
         # menú (con CocoaMenubarBackend, el hilo principal) — nunca desde
         # el hilo de asyncio. asyncio.Event.set() no es thread-safe, así
         # que hay que cruzar al loop vía call_soon_threadsafe.
-        loop.call_soon_threadsafe(stop_event.set)
+        _call_soon_threadsafe_safe(loop, stop_event)
 
     def _quit() -> None:
-        loop.call_soon_threadsafe(stop_event.set)
+        _call_soon_threadsafe_safe(loop, stop_event)
 
     cmds = MenubarCommands(
         on_toggle_pause=lambda: ui_queue.put_nowait("toggle_pause"),
@@ -275,9 +298,6 @@ async def main(
         except asyncio.CancelledError:
             pass
 
-        if hasattr(menubar_backend, "stop"):
-            menubar_backend.stop()
-
         sm_task.cancel()
         oww_task.cancel()
         display_task.cancel()
@@ -304,6 +324,9 @@ async def main(
         bus.close()
         log.info("jota-voice apagado limpiamente")
 
+        if hasattr(menubar_backend, "stop"):
+            menubar_backend.stop()
+
 
 async def _on_wake(bus: EventBus, name: str) -> None:
     """Callback por defecto de wake word — publica en el bus."""
@@ -318,6 +341,16 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
     del proceso para conectar con WindowServer; construir el NSStatusItem
     en un hilo y correr NSApp.run() en otro distinto cuelga el proceso
     (comprobado empíricamente durante el desarrollo de este módulo).
+
+    Captura de señales (#20): CPython solo ejecuta un signal handler
+    cuando el hilo principal corre bytecode Python — aquí está bloqueado
+    en NSApp.run(), así que el handler no se invoca hasta el siguiente
+    tick del NSTimer (hasta 1/refresh_hz segundos, indefinido si el
+    timer se invalida o si tick_ lanza). El fix instala
+    signal.set_wakeup_fd() y vigila el read_fd del pipe resultante
+    desde el run loop de Cocoa vía NSFileHandle; cuando CPython escribe
+    un byte al write_fd tras recibir una señal, NSFileHandle notifica a
+    NSApp inmediatamente, que ejecuta el handler sin esperar al timer.
     """
     log = logging.getLogger(__name__)
     loop_holder: dict = {}
@@ -332,7 +365,21 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
             loop_ready.set()
             await main(cfg, menubar_backend, external_stop_event=stop_event)
 
-        asyncio.run(_runner())
+        try:
+            asyncio.run(_runner())
+        except Exception:
+            log.exception("El hilo de asyncio terminó con un error no controlado")
+            # Por si el fallo ocurrió antes de que _runner() llegara a
+            # loop_ready.set(): el hilo principal no debe quedarse
+            # esperando los 5s completos del timeout.
+            loop_ready.set()
+            try:
+                menubar_backend.set_state("error")
+                menubar_backend.set_status_text(
+                    "Error interno: revisa los logs de jota-voice"
+                )
+            except Exception:
+                log.exception("No se pudo reflejar el error en el menubar")
 
     t = threading.Thread(target=_asyncio_thread, name="jota-asyncio", daemon=False)
     t.start()
@@ -343,8 +390,51 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
         log.info("Señal de parada recibida (%s)", signum)
         loop = loop_holder.get("loop")
         stop_event = stop_holder.get("stop_event")
+        if loop is None or stop_event is None:
+            return
+        _call_soon_threadsafe_safe(loop, stop_event)
+
+    # --- Issue #20: wakeup_fd para que las señales despierten el run loop
+    # de Cocoa sin esperar al NSTimer. set_wakeup_fd hace que CPython
+    # escriba al pipe cada vez que entrega una señal; el watcher de
+    # NSFileHandle en read_fd notifica al run loop inmediatamente.
+    import os as _os
+    _read_fd, _write_fd = _os.pipe()
+    # Ambos extremos deben ser no-bloqueantes: set_wakeup_fd exige el
+    # write_fd (CPython escribe con O_NONBLOCK para no bloquearse bajo
+    # carga), y readInBackgroundAndNotify asume el read_fd no-bloqueante.
+    import fcntl as _fcntl
+    for _fd in (_read_fd, _write_fd):
+        _flags = _fcntl.fcntl(_fd, _fcntl.F_GETFL)
+        _fcntl.fcntl(_fd, _fcntl.F_SETFL, _flags | _os.O_NONBLOCK)
+    signal.set_wakeup_fd(_write_fd)
+    # Mantener el write_fd vivo durante toda la vida del proceso — si se
+    # recogiese el int, CPython lo cerraría y las señales volverían al
+    # camino lento (NSTimer).
+    _write_fd_holder: list[int] = [_write_fd]  # noqa: F841 — ref intencional
+
+    import AppKit  # noqa: F401 — import lazy para no romper tests no-Cocoa
+    import Foundation
+    _fh = AppKit.NSFileHandle.alloc().initWithFileDescriptor_(_read_fd)
+
+    def _on_wakeup_fd_data(_notification) -> None:
+        try:
+            _os.read(_read_fd, 4096)
+        except BlockingIOError:
+            pass
+        _fh.readInBackgroundAndNotify()
+        loop = loop_holder.get("loop")
+        stop_event = stop_holder.get("stop_event")
         if loop is not None and stop_event is not None:
-            loop.call_soon_threadsafe(stop_event.set)
+            _call_soon_threadsafe_safe(loop, stop_event)
+
+    Foundation.NSNotificationCenter.defaultCenter().addObserverForName_object_queue_usingBlock_(
+        Foundation.NSFileHandleReadCompletionNotification,
+        _fh,
+        None,
+        lambda _note: _on_wakeup_fd_data(_note),
+    )
+    _fh.readInBackgroundAndNotify()
 
     signal.signal(signal.SIGINT, _handle_os_signal)
     signal.signal(signal.SIGTERM, _handle_os_signal)

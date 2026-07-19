@@ -36,6 +36,11 @@ class TermuxBackend:
         self._pa = None
         self._stream = None
         self._lock = asyncio.Lock()
+        # Byte suelto arrastrado al siguiente chunk cuando la red entrega un
+        # mensaje TTS de longitud impar: sin esto, PyAudio.Stream.write()
+        # calcula frames como len(data) // 2 y descarta el último byte
+        # silenciosamente, perdiendo 1 muestra por cada chunk impar.
+        self._enqueue_carry: bytes = b""
 
     async def start(self) -> None:
         await self._capture.start()
@@ -44,6 +49,7 @@ class TermuxBackend:
         log.debug("TermuxBackend: PyAudio inicializado")
 
     async def stop(self) -> None:
+        self._enqueue_carry = b""
         await self._capture.stop()
         if self._stream is not None:
             try:
@@ -58,6 +64,9 @@ class TermuxBackend:
 
     def get_queue(self) -> asyncio.Queue[bytes]:
         return self._capture.get_queue()
+
+    def get_oww_queue(self) -> asyncio.Queue[bytes]:
+        return self._capture.get_oww_queue()
 
     def get_preroll(self) -> bytes:
         return self._capture.get_preroll()
@@ -76,6 +85,19 @@ class TermuxBackend:
     async def _play(self, audio: bytes) -> None:
         if not audio or self._pa is None:
             return
+        # El chunking de red no garantiza alinear cada mensaje TTS a un
+        # número par de bytes (tamaño de una muestra int16): sin este
+        # acarreo, PyAudio.Stream.write() calcularía frames como
+        # len(data) // 2 y descartaría el último byte silenciosamente.
+        # Pegamos el byte suelto al siguiente chunk en lugar de perderlo.
+        audio = self._enqueue_carry + audio
+        if len(audio) % 2 != 0:
+            self._enqueue_carry = audio[-1:]
+            audio = audio[:-1]
+        else:
+            self._enqueue_carry = b""
+        if not audio:
+            return
         async with self._lock:
             if self._stream is None:
                 pyaudio = _require_pyaudio()
@@ -89,6 +111,7 @@ class TermuxBackend:
             await loop.run_in_executor(None, self._stream.write, audio)
 
     async def drain(self) -> None:
+        self._enqueue_carry = b""
         async with self._lock:
             if self._stream is not None:
                 try:
@@ -101,5 +124,8 @@ class TermuxBackend:
                     self._stream = None
 
     def reset(self) -> None:
-        # No hay buffer interno de texto en TermuxBackend (lo mantiene PlaybackEngine).
-        pass
+        # No hay buffer interno de texto en TermuxBackend (lo mantiene PlaybackEngine),
+        # pero sí el byte suelto arrastrado: si un turno se cancela a medias
+        # (reset() entre turnos), reproducirlo al principio del siguiente
+        # sería ruido audible sin contexto.
+        self._enqueue_carry = b""

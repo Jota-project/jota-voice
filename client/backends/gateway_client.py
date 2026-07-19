@@ -43,8 +43,17 @@ class GatewayClient:
     async def connect(self) -> None:
         headers = _cloudflare_access_headers()
         try:
+            # max_size=None desactiva el límite de 1 MiB del default de websockets:
+            # un tts_chunk grande o un mensaje de control voluminoso dispararía
+            # 1009 (payload too big) y un cierre anómalo silencioso. El framing
+            # binario TTS ([0xA1][seq][PCM16]) no acota tamaño por chunk — el
+            # gateway puede serializar varios segundos de audio en un único frame.
             self._ws = await asyncio.wait_for(
-                websockets.connect(self._cfg.ws_url, additional_headers=headers or None),
+                websockets.connect(
+                    self._cfg.ws_url,
+                    additional_headers=headers or None,
+                    max_size=None,
+                ),
                 timeout=self._cfg.connect_timeout_s,
             )
         except asyncio.TimeoutError:
@@ -57,7 +66,38 @@ class GatewayClient:
             "output_mode": ["audio", "text", "status"],
         }
         await self._ws.send(json.dumps(handshake))
-        log.debug("Gateway conectado a %s (device=%s)", self._cfg.ws_url, self._device_id)
+        # Protocolo (jota-gateway/docs/client-protocol.md): leer respuesta del
+        # handshake antes de enviar audio. Sin esto, client_key inválida →
+        # close 1008 → el cliente envía el turno entero (hasta 15s) a una
+        # conexión muerta y solo lo descubre al final, de forma genérica.
+        # Coste: un RTT extra por turno (arquitectura reconnect-per-turn); #24
+        # migrará a sesión WS persistente donde el handshake ocurre una vez.
+        # Deuda técnica conocida (no expandido): capabilities.tts/barge_in/
+        # transcriber y session_id del ready no se capturan — relevante cuando
+        # #24 haga la sesión persistente.
+        try:
+            raw = await asyncio.wait_for(
+                self._ws.recv(),
+                timeout=self._cfg.connect_timeout_s,
+            )
+        except asyncio.TimeoutError:
+            log.error(
+                "Gateway: timeout esperando 'ready' tras handshake (%.1fs)",
+                self._cfg.connect_timeout_s,
+            )
+            raise
+        msg = json.loads(raw)
+        msg_type = msg.get("type", "")
+        if msg_type == "ready":
+            log.debug("Gateway listo (device=%s)", self._device_id)
+            return
+        if msg_type == "error":
+            raise RuntimeError(
+                f"Gateway: handshake rechazado: {msg.get('message', msg)}"
+            )
+        raise RuntimeError(
+            f"Gateway: handshake devolvió tipo inesperado {msg_type!r}: {msg}"
+        )
 
     async def disconnect(self) -> None:
         if self._ws:
@@ -127,6 +167,16 @@ class GatewayClient:
                 if event_type == "token":
                     event_type = "llm_token"
                 yield GatewayEvent(type=event_type, data=data)
-        except websockets.exceptions.ConnectionClosed as exc:
-            log.warning("Gateway: conexión cerrada inesperadamente: %s", exc)
+        except websockets.exceptions.ConnectionClosedOK:
+            # Cierre limpio (1000/1001). El turno ya terminó vía turn_end;
+            # la sesión puede continuar en otro turno. Terminar en silencio
+            # es lo correcto — state_machine ya publicó playback_ended.
             return
+        except websockets.exceptions.ConnectionClosedError as exc:
+            # Cierre anómalo (1006 abnormal closure, 1009 payload too big,
+            # 1011 internal error…). Antes del fix de #16 se tragaba con un
+            # `return` y state_machine.publicaba playback_ended "todo bien" —
+            # el usuario oía la respuesta cortarse sin saber qué pasó. Ahora
+            # se propaga para que run() publique VoiceEvent(type='error').
+            log.warning("Gateway: conexión cerrada con error: %s", exc)
+            raise

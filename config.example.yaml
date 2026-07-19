@@ -58,6 +58,9 @@ logging:
 
 control:
   port: 8765
+  # token_path: null            # null = ~/.jota-voice/control_token (se autogenera, chmod 600)
+  # rate_limit_max_requests: 10  # peticiones máx. por ventana antes de responder 429
+  # rate_limit_window_s: 10.0
 
 # menubar:
 #   enabled: true                # false desactiva el UI nativo (macOS)

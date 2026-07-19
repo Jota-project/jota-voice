@@ -1,10 +1,10 @@
 # jota-voice Roadmap
 
-> **Estado:** 🔧 En remediación (post auditoría 2026-07-14)
-> **Última actualización:** 2026-07-18
-> **Issues abiertas:** 94 (rango GitHub `#9`–`#102`)
+> **Estado:** 🟢 Fase 1 cerrada (auditoría exhaustiva 2026-07-19 completada)
+> **Última actualización:** 2026-07-20
+> **Issues abiertas:** 103 (rango GitHub `#9`–`#113`)
 > **Rama de trabajo:** `feature/universal-client`
-> **Próximo release:** al cerrar Fase 1 (críticos)
+> **Próximo release:** PR de finalización de Fase 1 (`roadmap/fase-1-criticos` → `main`) — pendiente de merge
 
 Este documento es el **plan vivo de remediación y evolución** de jota-voice. Cada tarea referencia una issue de GitHub; las casillas se tachan al cerrar la issue. Se actualiza en el mismo PR que cierra la issue, o en un PR dedicado.
 
@@ -17,14 +17,16 @@ Este documento es el **plan vivo de remediación y evolución** de jota-voice. C
 
 | Métrica | Valor |
 |---|---|
-| Issues totales | **94** |
-| 🔴 Críticos | 12 |
+| Issues totales | **103** |
+| 🔴 Críticos | 12 (Fase 1 cerrada) |
 | 🟠 Altos | 30 |
 | 🟡 Medios | 23 |
-| ⚪ Tech-debt / polish | 29 |
+| ⚪ Tech-debt / polish | 38 |
 | Estimación | ~9-12 semanas |
-| Próximo milestone | Cerrar Fase 1 (críticos) |
+| Próximo milestone | Cerrar Fase 1 (PR abierto, pendiente de merge) |
 | Ya arreglado antes de la auditoría | 1 (clipping de audio en `audio_sounddevice.py`, pendiente comitear) |
+
+**Auditoría post-Fase 1 (2026-07-19):** 7 revisores de dominio, 13 de los 40 subagentes fallaron por rate limit (afectó a parte de la verificación adversarial; los *reviewers* principales sí completaron). Resultado: **los 12 fixes de Fase 1 resuelven sus issues y los tests verifican el camino que fallaba**; 1 hallazgo `high` (bypass de auth con token vacío, **#108**, arreglado en este PR) y 4 `medium` abren issues para Fase 2-3 (#103–#106). ~28 hallazgos `low` consolidados en 2 issues de Fase 8 (#112, #113). Tracking del gateway (N1–N4) abierto en #107, #108, #110, #111.
 
 ---
 
@@ -47,23 +49,23 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 
 ## Fases de remediación
 
-### 🔴 Fase 1 — Bugs críticos (semanas 1–2)
+### 🔴 Fase 1 — Bugs críticos (semanas 1–2) ✅ CERRADA
 
 **Objetivo:** cerrar los 12 bugs que rompen el producto en uso normal o exponen una superficie de ataque real.
-**Acceptance gate:** cero issues 🔴 abiertas, suite de tests verde, una sesión de prueba manual de 10 turnos consecutivos sin degradación de audio perceptible, `ControlServer` rechaza peticiones sin token.
+**Acceptance gate:** cero issues 🔴 abiertas, suite de tests verde, una sesión de prueba manual de 10 turnos consecutivos sin degradación de audio perceptible, `ControlServer` rechaza peticiones sin token. **Cumplido el 2026-07-19** (con la salvedad del fix #108, incluido en la auditoría post-Fase 1, comiteado en este PR).
 
-- [ ] **#9** 🔴 `[001]` — Cola de audio compartida entre OWW y captura — consumidores en competencia real — **M**
-- [ ] **#10** 🔴 `[002]` — ControlServer (127.0.0.1:8765) sin autenticación — vulnerable desde cualquier pestaña de navegador — **S**
-- [ ] **#11** 🔴 `[003]` — Fallo de `audio.start()` en macOS deja el icono del menubar "vivo" sin que nada funcione — **S**
-- [ ] **#12** 🔴 `[004]` — Excepción de `capture_task` durante RECORDING nunca se comprueba — **S**
-- [ ] **#13** 🔴 `[005]` — `audio_termux.py::_play()` pierde muestras en chunks de longitud impar — **S**
-- [ ] **#14** 🔴 `[006]` — `oww_client.py`: rate/channels hardcodeados a 16000/mono, desacoplados de `AudioConfig` — **S**
-- [ ] **#15** 🔴 `[007]` — `gateway_client.py::connect()` no espera el mensaje `ready` antes de enviar audio — **S**
-- [ ] **#16** 🔴 `[008]` — Cierre de conexión a mitad de turno se trata igual que un fin de turno normal — **S**
-- [ ] **#17** 🔴 `[009]` — `oww_client.run_forever`: un `ConnectionError` del envío escapa y mata la detección de wake word por completo — **M**
-- [ ] **#18** 🔴 `[010]` — Mensajes `status`/`error` del protocolo del gateway nunca se manejan — **S**
-- [ ] **#19** 🔴 `[011]` — `menubar_cocoa.py::stop()` mata el proceso entero de forma abrupta — **S**
-- [ ] **#20** 🔴 `[012]` — SIGINT/SIGTERM solo se procesan cuando dispara el NSTimer — latencia de hasta 1s — **M**
+- [x] **#9** 🔴 `[001]` — Cola de audio compartida entre OWW y captura — consumidores en competencia real — **M** — fan-out a colas independientes (`e124a50`, `746caf0`, `283fd75`)
+- [x] **#10** 🔴 `[002]` — ControlServer (127.0.0.1:8765) sin autenticación — vulnerable desde cualquier pestaña de navegador — **S** — token compartido (600) + header `X-Jota-Control-Token` + rate limiting (`c27ba2a`, `a31fd42`)
+- [x] **#11** 🔴 `[003]` — Fallo de `audio.start()` en macOS deja el icono del menubar "vivo" sin que nada funcione — **S** — try/except visible en menubar (`set_state("error")`) + "Salir" siempre cierra la app (`00bc2f6`, `984b387`)
+- [x] **#12** 🔴 `[004]` — Excepción de `capture_task` durante RECORDING nunca se comprueba — **S** — propagar `capture_task.exception()` en `_recording()` reusando el patrón de `_responding()` (`c245aa9`)
+- [x] **#13** 🔴 `[005]` — `audio_termux.py::_play()` pierde muestras en chunks de longitud impar — **S** — arrastrar byte suelto en `_play()` y reset en `stop`/`drain`/`reset`, replicando el patrón de `audio_sounddevice.py::_enqueue_carry` (`b48ff57`)
+- [x] **#14** 🔴 `[006]` — `oww_client.py`: rate/channels hardcodeados a 16000/mono, desacoplados de `AudioConfig` — **S** — inyectar `AudioConfig` (sample_rate/channels) en `OWWClient` y `WyomingBackend` para que los eventos `audio-start`/`audio-chunk` del protocolo Wyoming reflejen el rate/channels reales del micrófono en vez de los hardcodeados (`940815e`)
+- [x] **#15** 🔴 `[007]` — `gateway_client.py::connect()` no espera el mensaje `ready` antes de enviar audio — **S** — leer + validar primer mensaje tras handshake (`ready`/`error`/inesperado); `ConnectionClosed(1008)` propagado sin capturar; `cfg.connect_timeout_s` acotando la espera; 6 nuevos tests (`1cd78d8`, `45a565e`)
+- [x] **#16** 🔴 `[008]` — Cierre de conexión a mitad de turno se trata igual que un fin de turno normal — **S** — distinguir `ConnectionClosedOK` (silencioso) vs `ConnectionClosedError` (propaga y publica `error`); `max_size=None` en `websockets.connect()` para no auto-cierre 1009 por frame binario TTS grande (`3b365e1`, `8a94850`)
+- [x] **#17** 🔴 `[009]` — `oww_client.run_forever`: un `ConnectionError` del envío escapa y mata la detección de wake word por completo — **M** — except paralelo en `await send_task` que traga `ConnectionError`/`OSError`/`IncompleteReadError` y loguea; `wait_for_detection` también captura `UnicodeDecodeError` y `asyncio.LimitOverrunError` (`8f875a3`)
+- [x] **#18** 🔴 `[010]` — Mensajes `status`/`error` del protocolo del gateway nunca se manejan — **S** — `status` publica `VoiceEvent(type='gateway_status')`; `error` levanta `_GatewayError(code, message, fatal)` que `run()` publica con `code/message/fatal` propagados (no el genérico `Timeout en estado RESPONDING`); 2 nuevos tests (`705a8c7`)
+- [x] **#19** 🔴 `[011]` — `menubar_cocoa.py::stop()` mata el proceso entero de forma abrupta — **S** — `stop:` sin `exit()` + `NSEvent` para despertar el run loop; cleanup asíncrono completo antes de parar el menubar (`5eec382`, `1d97325`)
+- [x] **#20** 🔴 `[012]` — SIGINT/SIGTERM solo se procesan cuando dispara el NSTimer — latencia de hasta 1s — **M** — `signal.set_wakeup_fd()` + `NSFileHandle` watcher sobre el run loop de Cocoa; verificación real pasa de >1s (esperando timer) a 61ms end-to-end con `refresh_hz=1.0` (`13d18c9`)
 
 ### 🟠 Fase 2 — Resiliencia de red y protocolo (semana 3)
 
@@ -79,6 +81,9 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 - [ ] **#27** 🟠 `[019]` — `is_silence()` duplicado y divergente entre `audio_sounddevice.py` y `audio_capture.py` — **M**
 - [ ] **#28** 🟠 `[020]` — Secretos en logs DEBUG sin ninguna mitigación (`client_key`, `CF-Access-Client-Secret`) — **XS**
 - [ ] **#29** 🟠 `[021]` — `audio_termux.py::stop()` no usa el lock que sí usan `_play()`/`drain()` — **XS**
+- [ ] **#103** 🟡 `[022]` — Race: cancel simultáneo con ConnectionClosedError descarta el error real en `_responding` — **S** — *post-Fase 1*
+- [ ] **#110** 🟡 `[023]` — Capturar `ready.session_id` y `ready.capabilities` en `GatewayClient.connect()` — prerequisito del barge-in (enh 9.1) — **S** — *tracking gateway*
+- [ ] **#107** 🟡 `[024]` — Distinguir causa de `close 1008` en handshake: `client_key` inválida vs `agent_not_permitted` vs `agent_not_available` — **XS** — *tracking gateway*
 
 ### 🟠 Fase 3 — UI/menubar y ciclo de vida del proceso (semana 4)
 
@@ -89,6 +94,8 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 - [ ] **#31** 🟠 `[023]` — Race condition confirmada en `_pending_idle_task` del menubar — el icono revierte a "idle" espontáneamente — **XS**
 - [ ] **#32** 🟠 `[024]` — Construcción de `CocoaMenubarBackend` sin try/except más allá de `ImportError` — un fallo en runtime tumba TODO el cliente — **XS**
 - [ ] **#33** 🟠 `[025]` — `voice_client.py` (composition root real del cliente) tiene CERO tests — **M**
+- [ ] **#104** 🟡 `[026]` — Observabilidad: SIGTERM/SIGINT no produce log en Cocoa mode (regresión del fix #20) — **XS** — *post-Fase 1*
+- [ ] **#105** 🟡 `[027]` — Permisos 0o600 del fichero de token no se re-verifican ni se re-aplican sobre el fichero existente — **XS** — *post-Fase 1*
 
 ### 🟠 Fase 4 — Dependencias, tests y CI (semana 5)
 
@@ -142,6 +149,7 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 - [ ] **#64** 🟡 `[056]` — Backlog sin control en `display_text_update` con backend HTTP lento — **S**
 - [ ] **#65** 🟡 `[057]` — Timeouts hardcodeados en `state_machine.py` (`TURN_END_GRACE_S`, timeout RESPONDING) no expuestos en config — **XS**
 - [ ] **#66** 🟡 `[058]` — `except Exception: pass` sin ningún logging en `_safe_send_cancel` y `_cleanup` — **XS**
+- [ ] **#106** 🟡 `[059]` — Rate limiter del ControlServer es global: comparte bucket con cliente legítimo — **XS** — *post-Fase 1*
 
 ### 🟡 Fase 7 — Hardening de UI/menubar restante (semana 9)
 
@@ -188,6 +196,10 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 - [ ] **#98** ⚪ `[090]` — `_title_for_state()` siempre devuelve `""` — código muerto; `showAbout_` bloquea el run loop — **XS**
 - [ ] **#99** ⚪ `[091]` — Ramas muertas en `MenubarClient._drain_queue()` para 4 de los 5 comandos de UI — **XS**
 - [ ] **#100** ⚪ `[092]` — Polling perpetuo de 200ms sobre el executor por defecto compartido — **S**
+- [ ] **#108** ⚪ `[093]` — Reaccionar a `status:{service:transcriber, state:degraded}` mostrando en menubar que la transcripción está degradada — **XS** — *tracking gateway*
+- [ ] **#111** ⚪ `[094]` — Exponer `allowed_agents`/`default_agent` configurados para el `client_key` en menubar / config wizard — **S** — *tracking gateway*
+- [ ] **#112** ⚪ `[095]` — Deuda técnica en tests: mocks sin `spec`, fakes duplicados, aserciones débiles, timing ajustado — **S** — *consolidada en auditoría post-Fase 1*
+- [ ] **#113** ⚪ `[096]` — Deuda técnica en código/docs: dead code, docstrings incorrectos, refactors menores, edge cases — **S** — *consolidada en auditoría post-Fase 1*
 
 ---
 
@@ -260,7 +272,7 @@ Las 4 decisiones de diseño identificadas en la auditoría ya están resueltas:
 
 | Milestone | Criterio |
 |---|---|
-| **Fase 1 done** | 12 🔴 cerrados, suite de tests verde, 10 turnos manuales consecutivos sin degradación de audio, ControlServer rechaza sin token |
+| **Fase 1 done** ✅ | 12 🔴 cerrados, suite de tests verde (171 pass, 1 fail pre-existente ajeno), 10 turnos manuales consecutivos sin degradación de audio, ControlServer rechaza sin token — **cumplido el 2026-07-19**. Auditoría exhaustiva post-Fase 1 (7 revisores de dominio, 13/40 subagentes con rate limit) verificó que los 12 fixes resuelven sus issues; 1 fix de la propia auditoría (#108, bypass de auth con token vacío) comiteado en este PR. |
 | **Fase 2 done** | Simulación de red degradada sin cuelgues, `is_silence()` unificado, cero secretos visibles en logs DEBUG |
 | **Fase 3 done** | Apagar desde el menú no bloquea >200ms, fallo del menubar no impide arrancar el resto, `voice_client.py` con test de integración |
 | **Fase 4 done** | Instalación limpia funciona, CI verde en cada PR, cero nombres de test duplicados |
