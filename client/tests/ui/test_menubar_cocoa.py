@@ -90,15 +90,23 @@ def test_quit_with_commands_calls_on_quit(backend):
     assert called == [True]
 
 
-def test_quit_without_commands_terminates_app_directly(backend):
+def test_quit_without_commands_stops_app_cleanly(backend):
     """Si audio.start() falló antes de que set_commands() se wireara,
     'Salir' debe cerrar la app igualmente en vez de no hacer nada."""
-    calls = []
+    selectors = []
+    posted_events = []
 
     class FakeApp:
         def performSelectorOnMainThread_withObject_waitUntilDone_(self, sel, obj, wait):
-            calls.append(sel)
+            selectors.append(sel)
+
+        def postEvent_atStart_(self, event, at_start):
+            posted_events.append((event, at_start))
 
     backend._app = FakeApp()
     backend.quitApp_(None)
-    assert "terminate:" in calls
+
+    assert selectors == ["stop:"]
+    assert [(event.type(), at_start) for event, at_start in posted_events] == [
+        (AppKit.NSEventTypeApplicationDefined, True)
+    ]
