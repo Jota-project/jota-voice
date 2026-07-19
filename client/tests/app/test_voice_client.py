@@ -7,9 +7,21 @@ señal inválidos, y que el run loop Cocoa se detenga tras el cleanup asíncrono
 from __future__ import annotations
 
 import asyncio
+import sys
+
+import pytest
 
 from app import voice_client
 from backends import registry
+
+# Los tests que invocan _run_with_cocoa_menubar hacen AppKit/Foundation
+# en runtime (signal.set_wakeup_fd + NSFileHandle watcher, fix de #20).
+# En Linux/Termux, AppKit no existe y el import lazy fallaría — solo se
+# puede ejercitar este path en macOS.
+pytestmark_cocoa = pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="Cocoa runloop solo instalable con AppKit (macOS)",
+)
 from config import Config, GatewayConfig
 
 
@@ -109,6 +121,7 @@ def test_audio_start_failure_does_not_propagate_if_menubar_reporting_fails(monke
     asyncio.run(_test_audio_start_failure_does_not_propagate_if_menubar_reporting_fails(monkeypatch))
 
 
+@pytestmark_cocoa
 def test_run_with_cocoa_menubar_survives_early_main_failure(monkeypatch) -> None:
     async def _fake_main(cfg, menubar_backend, *, external_stop_event=None):
         raise RuntimeError("fallo antes de construir nada")
@@ -130,6 +143,7 @@ def test_run_with_cocoa_menubar_survives_early_main_failure(monkeypatch) -> None
     assert "error" in menubar.states
 
 
+@pytestmark_cocoa
 def test_run_with_cocoa_menubar_signal_handler_survives_closed_loop(monkeypatch) -> None:
     async def _fake_main(cfg, menubar_backend, *, external_stop_event=None):
         raise RuntimeError("fallo antes de construir nada")
@@ -159,6 +173,7 @@ def test_run_with_cocoa_menubar_signal_handler_survives_closed_loop(monkeypatch)
 # ---------------------------------------------------------------------------
 
 
+@pytestmark_cocoa
 def test_run_with_cocoa_menubar_sets_wakeup_fd(monkeypatch) -> None:
     """CPython solo invoca un handler de signal cuando el hilo principal
     ejecuta bytecode Python — en Cocoa mode el hilo está bloqueado en
