@@ -175,7 +175,7 @@ class OWWClient:
                         log.info("Wake word detectado: %s", name)
                         return matched
                     log.info("Detección ignorada (no configurada): name=%r stem=%r", name, stem)
-        except (OSError, asyncio.IncompleteReadError, ConnectionError):
+        except (OSError, asyncio.IncompleteReadError, ConnectionError, UnicodeDecodeError, asyncio.LimitOverrunError):
             self._connected = False
             raise
 
@@ -238,6 +238,11 @@ class OWWClient:
                     await send_task
                 except asyncio.CancelledError:
                     pass
+                except (ConnectionError, OSError, asyncio.IncompleteReadError) as send_exc:
+                    log.warning(
+                        "OWW send_task terminó con %s, continuando reconexión",
+                        send_exc,
+                    )
                 await self.disconnect()
 
                 # connect_with_backoff() solo espera si el connect() TCP

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+from unittest.mock import AsyncMock
 
 from config import AudioConfig, OWWConfig
 from backends.oww_client import OWWClient
@@ -306,3 +308,127 @@ async def _test_audio_chunk_refleja_rate_y_channels_de_audio_config() -> None:
 
 def test_audio_chunk_refleja_rate_y_channels_de_audio_config() -> None:
     asyncio.run(_test_audio_chunk_refleja_rate_y_channels_de_audio_config())
+
+
+async def _test_run_forever_recupera_connection_error_de_send_task(caplog) -> None:
+    client = OWWClient(OWWConfig(reconnect_backoff_s=[0.0]))
+    send_finished = asyncio.Event()
+
+    async def _fail_sending(_audio) -> None:
+        send_finished.set()
+        raise ConnectionError("fallo de envío")
+
+    async def _fail_receiving() -> str:
+        await send_finished.wait()
+        await asyncio.sleep(0)
+        raise ConnectionError("fallo de recepción")
+
+    client.connect_with_backoff = AsyncMock(
+        side_effect=[None, asyncio.CancelledError()]
+    )
+    client._send_audio_loop = AsyncMock(side_effect=_fail_sending)
+    client.wait_for_detection = AsyncMock(side_effect=_fail_receiving)
+    client.disconnect = AsyncMock()
+
+    async def _on_wake(_name: str) -> None:
+        pass
+
+    with caplog.at_level(logging.WARNING, logger="backends.oww_client"):
+        try:
+            await client.run_forever(_EmptyAudio(), _on_wake)
+        except asyncio.CancelledError:
+            pass
+
+    assert client.connect_with_backoff.await_count == 2
+    client.disconnect.assert_awaited_once()
+    assert (
+        "OWW send_task terminó con fallo de envío, continuando reconexión"
+        in caplog.text
+    )
+
+
+def test_run_forever_recupera_connection_error_de_send_task(caplog) -> None:
+    asyncio.run(_test_run_forever_recupera_connection_error_de_send_task(caplog))
+
+
+# ---------------------------------------------------------------------------
+# Issue #17 (fix secundario): wait_for_detection() debe propagar
+# UnicodeDecodeError y asyncio.LimitOverrunError igual que el resto de
+# excepciones de protocolo, en vez de dejar que escapen y maten
+# run_forever() sin reconexión ordenada. Sin este catch, una línea
+# corrupta o un mensaje >64KB del servidor mata la detección de wake
+# word sin disconnect(), sin backoff, sin log.
+# ---------------------------------------------------------------------------
+
+
+class _FakeReader:
+    """StreamReader mínimo para ejercitar el decode/parsing de wait_for_detection."""
+
+    def __init__(self, lines: list[bytes]) -> None:
+        self._lines = list(lines)
+        self._closed = False
+
+    async def readline(self) -> bytes:
+        if not self._lines:
+            raise asyncio.IncompleteReadError(b"", 0)
+        return self._lines.pop(0)
+
+    async def readexactly(self, n: int) -> bytes:
+        return b""
+
+    def at_eof(self) -> bool:
+        return self._closed
+
+
+async def _test_wait_for_detection_propaga_unicode_decode_error() -> None:
+    """Si el servidor OWW emite bytes inválidos (p.ej. un proxy metiendo
+    basura), line.decode() lanza UnicodeDecodeError — antes del fix de
+    #17 escapaba del except (OSError, IncompleteReadError, ConnectionError)
+    y mataba run_forever() sin marcar _connected=False."""
+    client = OWWClient(OWWConfig())
+    # Línea con bytes no-UTF-8 válidos: 0x80 solo no es un code point UTF-8
+    client._reader = _FakeReader([b"\x80\xff\xfe garbage\n"])  # type: ignore[assignment]
+    try:
+        await client.wait_for_detection()
+    except UnicodeDecodeError:
+        pass  # propagación esperada: ahora se captura en el except general
+    else:
+        raise AssertionError(
+            "wait_for_detection() debería propagar UnicodeDecodeError "
+            "(ahora en el except junto a ConnectionError/OSError)"
+        )
+    assert client._connected is False, (
+        "Tras propagar, _connected debe quedar False para que el bucle "
+        "externo de run_forever detecte el cierre y haga backoff"
+    )
+
+
+async def _test_wait_for_detection_propaga_limit_overrun_error() -> None:
+    """StreamReader.readline() puede lanzar asyncio.LimitOverrunError si
+    una línea excede el buffer — subclase de Exception, no OSError, así
+    que también escapaba antes del fix. Ahora se incluye en el except."""
+    client = OWWClient(OWWConfig())
+
+    class _OverflowReader(_FakeReader):
+        async def readline(self) -> bytes:  # type: ignore[override]
+            raise asyncio.LimitOverrunError("line too long", 65536)
+
+    client._reader = _OverflowReader([])  # type: ignore[assignment]
+    try:
+        await client.wait_for_detection()
+    except asyncio.LimitOverrunError:
+        pass
+    else:
+        raise AssertionError(
+            "wait_for_detection() debería propagar LimitOverrunError "
+            "(ahora en el except junto a ConnectionError/OSError)"
+        )
+    assert client._connected is False
+
+
+def test_wait_for_detection_propaga_unicode_decode_error() -> None:
+    asyncio.run(_test_wait_for_detection_propaga_unicode_decode_error())
+
+
+def test_wait_for_detection_propaga_limit_overrun_error() -> None:
+    asyncio.run(_test_wait_for_detection_propaga_limit_overrun_error())
