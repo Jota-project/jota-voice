@@ -341,6 +341,16 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
     del proceso para conectar con WindowServer; construir el NSStatusItem
     en un hilo y correr NSApp.run() en otro distinto cuelga el proceso
     (comprobado empíricamente durante el desarrollo de este módulo).
+
+    Captura de señales (#20): CPython solo ejecuta un signal handler
+    cuando el hilo principal corre bytecode Python — aquí está bloqueado
+    en NSApp.run(), así que el handler no se invoca hasta el siguiente
+    tick del NSTimer (hasta 1/refresh_hz segundos, indefinido si el
+    timer se invalida o si tick_ lanza). El fix instala
+    signal.set_wakeup_fd() y vigila el read_fd del pipe resultante
+    desde el run loop de Cocoa vía NSFileHandle; cuando CPython escribe
+    un byte al write_fd tras recibir una señal, NSFileHandle notifica a
+    NSApp inmediatamente, que ejecuta el handler sin esperar al timer.
     """
     log = logging.getLogger(__name__)
     loop_holder: dict = {}
@@ -383,6 +393,48 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
         if loop is None or stop_event is None:
             return
         _call_soon_threadsafe_safe(loop, stop_event)
+
+    # --- Issue #20: wakeup_fd para que las señales despierten el run loop
+    # de Cocoa sin esperar al NSTimer. set_wakeup_fd hace que CPython
+    # escriba al pipe cada vez que entrega una señal; el watcher de
+    # NSFileHandle en read_fd notifica al run loop inmediatamente.
+    import os as _os
+    _read_fd, _write_fd = _os.pipe()
+    # Ambos extremos deben ser no-bloqueantes: set_wakeup_fd exige el
+    # write_fd (CPython escribe con O_NONBLOCK para no bloquearse bajo
+    # carga), y readInBackgroundAndNotify asume el read_fd no-bloqueante.
+    import fcntl as _fcntl
+    for _fd in (_read_fd, _write_fd):
+        _flags = _fcntl.fcntl(_fd, _fcntl.F_GETFL)
+        _fcntl.fcntl(_fd, _fcntl.F_SETFL, _flags | _os.O_NONBLOCK)
+    signal.set_wakeup_fd(_write_fd)
+    # Mantener el write_fd vivo durante toda la vida del proceso — si se
+    # recogiese el int, CPython lo cerraría y las señales volverían al
+    # camino lento (NSTimer).
+    _write_fd_holder: list[int] = [_write_fd]  # noqa: F841 — ref intencional
+
+    import AppKit  # noqa: F401 — import lazy para no romper tests no-Cocoa
+    import Foundation
+    _fh = AppKit.NSFileHandle.alloc().initWithFileDescriptor_(_read_fd)
+
+    def _on_wakeup_fd_data(_notification) -> None:
+        try:
+            _os.read(_read_fd, 4096)
+        except BlockingIOError:
+            pass
+        _fh.readInBackgroundAndNotify()
+        loop = loop_holder.get("loop")
+        stop_event = stop_holder.get("stop_event")
+        if loop is not None and stop_event is not None:
+            _call_soon_threadsafe_safe(loop, stop_event)
+
+    Foundation.NSNotificationCenter.defaultCenter().addObserverForName_object_queue_usingBlock_(
+        Foundation.NSFileHandleReadCompletionNotification,
+        _fh,
+        None,
+        lambda _note: _on_wakeup_fd_data(_note),
+    )
+    _fh.readInBackgroundAndNotify()
 
     signal.signal(signal.SIGINT, _handle_os_signal)
     signal.signal(signal.SIGTERM, _handle_os_signal)
