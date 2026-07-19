@@ -329,3 +329,102 @@ def test_token_se_autogenera_con_permisos_600() -> None:
 
 def test_token_existente_se_reutiliza_tal_cual() -> None:
     asyncio.run(_test_token_existente_se_reutiliza_tal_cual())
+
+
+async def _test_load_or_create_token_regenera_si_fichero_esta_vacio() -> None:
+    """Si el fichero de token existe pero está vacío (corrupción, truncado,
+    edición manual accidental), no se devuelve la cadena vacía — eso
+    convertiría compare_digest(b'', b'') en True y abriría un bypass de
+    auth (cualquier petición sin header se aceptaría como token válido)."""
+    from app import control_server
+
+    with tempfile.TemporaryDirectory() as tmp:
+        token_path = Path(tmp) / "token"
+        token_path.write_text("")  # fichero existente pero vacío
+        os.chmod(token_path, 0o600)
+
+        token = control_server._load_or_create_token(token_path)
+
+        assert token != "", "Un fichero vacío debe regenerar el token, no devolver ''"
+        assert len(token) == 64, f"secrets.token_hex(32) produce 64 chars; got {len(token)}"
+        on_disk = token_path.read_text().strip()
+        assert on_disk == token, "El fichero en disco debe contener el token regenerado"
+
+
+async def _test_load_or_create_token_regenera_si_fichero_solo_whitespace() -> None:
+    """Variante del anterior: contenido con solo whitespace también cuenta
+    como 'vacío' a efectos de auth (compare_digest sobre strip vacío es
+    True). Mismo tratamiento."""
+    from app import control_server
+
+    with tempfile.TemporaryDirectory() as tmp:
+        token_path = Path(tmp) / "token"
+        token_path.write_text("   \n\n\t  \n")
+        os.chmod(token_path, 0o600)
+
+        token = control_server._load_or_create_token(token_path)
+
+        assert token, "Fichero solo-whitespace debe regenerar el token"
+        assert len(token) == 64
+
+
+async def _test_control_server_con_token_vacio_rechaza_peticiones() -> None:
+    """End-to-end: con el fichero de token vacío preexistente, el servidor
+    NO debe dejar pasar una petición que no envíe el token. Sin el fix,
+    el servidor leería '' del fichero y compare_digest(b'', b'') sería
+    True → 200 en vez de 401."""
+    from app import control_server
+
+    with tempfile.TemporaryDirectory() as tmp:
+        token_path = Path(tmp) / "token"
+        token_path.write_text("")  # bypass latente
+        os.chmod(token_path, 0o600)
+        cancel_event = asyncio.Event()
+        cfg = ControlConfig(port=18774, token_path=token_path)
+
+        server_task = asyncio.create_task(control_server.run(cfg, cancel_event))
+        await asyncio.sleep(0.05)
+
+        # Petición sin token: debe ser 401, no 200
+        response = await _send(18774, _cancel_request(None))
+        assert b"401" in response, (
+            f"Bypass de auth: con token vacío, petición sin token devuelve "
+            f"{response[:100]!r} en vez de 401"
+        )
+        assert not cancel_event.is_set(), (
+            "cancel_event NO debería activarse si hay bypass de auth"
+        )
+
+        # Petición con token vacío explícito: también 401
+        response_empty = await _send(18774, _cancel_request(""))
+        assert b"401" in response_empty, (
+            f"Bypass de auth: token vacío explícito devuelve "
+            f"{response_empty[:100]!r} en vez de 401"
+        )
+
+        # El token nuevo en disco SÍ funciona (control server lo regeneró)
+        new_token = token_path.read_text().strip()
+        assert new_token, "El servidor debió regenerar el token"
+        response_ok = await _send(18774, _cancel_request(new_token))
+        assert b"200" in response_ok, (
+            f"Con el token regenerado, la petición con ese token debe pasar: "
+            f"{response_ok[:100]!r}"
+        )
+
+        server_task.cancel()
+        try:
+            await server_task
+        except asyncio.CancelledError:
+            pass
+
+
+def test_load_or_create_token_regenera_si_fichero_esta_vacio() -> None:
+    asyncio.run(_test_load_or_create_token_regenera_si_fichero_esta_vacio())
+
+
+def test_load_or_create_token_regenera_si_fichero_solo_whitespace() -> None:
+    asyncio.run(_test_load_or_create_token_regenera_si_fichero_solo_whitespace())
+
+
+def test_control_server_con_token_vacio_rechaza_peticiones() -> None:
+    asyncio.run(_test_control_server_con_token_vacio_rechaza_peticiones())

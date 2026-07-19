@@ -19,6 +19,7 @@ import hmac
 import logging
 import os
 import secrets
+import stat
 from pathlib import Path
 
 from config import ControlConfig
@@ -48,8 +49,27 @@ class _RateLimiter:
 
 
 def _load_or_create_token(path: Path) -> str:
+    existing_mode: int = 0o600
     if path.is_file():
-        return path.read_text().strip()
+        existing = path.read_text().strip()
+        if existing:
+            return existing
+        # Fichero existe pero está vacío (o solo whitespace). Devolver '' tal
+        # cual provocaría que compare_digest(b'', b'') sea True y un atacante
+        # local sin token consiga 200 en vez de 401 (#108). Regeneramos y
+        # conservamos los permisos previos del fichero.
+        log.warning(
+            "ControlServer: fichero de token en %s está vacío — regenerando",
+            path,
+        )
+        try:
+            existing_mode = stat.S_IMODE(path.stat().st_mode)
+        except OSError:
+            existing_mode = 0o600
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
 
     path.parent.mkdir(parents=True, exist_ok=True)
     token = secrets.token_hex(32)
@@ -59,6 +79,8 @@ def _load_or_create_token(path: Path) -> str:
         # Otro proceso ganó la carrera entre el is_file() de arriba y este
         # open() — usamos el token que ya escribió, no lo pisamos.
         return path.read_text().strip()
+    if existing_mode != 0o600:
+        os.chmod(path, existing_mode)
     with os.fdopen(fd, "w") as f:
         f.write(token)
     return token
