@@ -63,7 +63,7 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 - [x] **#17** 🔴 `[009]` — `oww_client.run_forever`: un `ConnectionError` del envío escapa y mata la detección de wake word por completo — **M** — except paralelo en `await send_task` que traga `ConnectionError`/`OSError`/`IncompleteReadError` y loguea; `wait_for_detection` también captura `UnicodeDecodeError` y `asyncio.LimitOverrunError` (`8f875a3`)
 - [x] **#18** 🔴 `[010]` — Mensajes `status`/`error` del protocolo del gateway nunca se manejan — **S** — `status` publica `VoiceEvent(type='gateway_status')`; `error` levanta `_GatewayError(code, message, fatal)` que `run()` publica con `code/message/fatal` propagados (no el genérico `Timeout en estado RESPONDING`); 2 nuevos tests (`705a8c7`)
 - [x] **#19** 🔴 `[011]` — `menubar_cocoa.py::stop()` mata el proceso entero de forma abrupta — **S** — `stop:` sin `exit()` + `NSEvent` para despertar el run loop; cleanup asíncrono completo antes de parar el menubar (`5eec382`, `1d97325`)
-- [ ] **#20** 🔴 `[012]` — SIGINT/SIGTERM solo se procesan cuando dispara el NSTimer — latencia de hasta 1s — **M**
+- [x] **#20** 🔴 `[012]` — SIGINT/SIGTERM solo se procesan cuando dispara el NSTimer — latencia de hasta 1s — **M** — `signal.set_wakeup_fd()` + `NSFileHandle` watcher sobre el run loop de Cocoa; verificación real pasa de >1s (esperando timer) a 61ms end-to-end con `refresh_hz=1.0` (`13d18c9`)
 
 ### 🟠 Fase 2 — Resiliencia de red y protocolo (semana 3)
 
