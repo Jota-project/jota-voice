@@ -1326,3 +1326,293 @@ def test_idle_type_hints_resolve() -> None:
 
     hints = typing.get_type_hints(state_machine._recording)
     assert hints["audio"] is state_machine.AudioBackend
+
+
+# ---------------------------------------------------------------------------
+# Issue #18: mensajes `status` y `error` del gateway durante un turno activo
+# deben tener manejo explícito en state_machine._receive_loop.
+#
+# Antes del fix, esos eventos caían en el else final del dispatcher
+# (`log.debug("evento desconocido de gateway: %r", gw_event.type)`) y se
+# quedaban invisibles en producción. El orquestador caído a mitad de un
+# turno publicaba `{"type":"error","code":"TURN_ERROR","message":"...",
+# "fatal":false}` y dejaba de mandar más eventos; el cliente ignoraba ese
+# mensaje y esperaba los 30s del timeout externo para reportar el genérico
+# "Timeout en estado RESPONDING" — perdiendo el code/message específico
+# que el servidor ya había dado, y malgastando ~30s de espera evitable.
+# ---------------------------------------------------------------------------
+
+
+async def _run_gateway_status_event_publishes_to_bus_test() -> None:
+    """status es informativo: el gateway puede publicar un `status` mid-turno
+    (p.ej. "TTS degradado, fallback engine") sin matar el turno — debe ser
+    visible al bus como VoiceEvent(type='gateway_status'), NO solo logueado
+    en DEBUG como "evento desconocido".
+    """
+    print("\n=== Test #18: status del gateway → VoiceEvent(gateway_status) ===")
+
+    bus = EventBus()
+    # recording_timeout_s corto: el mock de audio drena toda la cola en IDLE
+    # y nunca produce frames nuevos, así que RECORDING termina por timeout
+    # absoluto (no por silencio). Acortarlo deja casi todo el margen para lo
+    # que realmente prueba el test: visibilidad del status mid-turn.
+    cfg = Config(
+        gateway=GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=5.0),
+        device=DeviceConfig(id="test-device"),
+        audio=AudioConfig(sample_rate=16000, frames_per_buffer=512, recording_timeout_s=0.2),
+        oww=OWWConfig(),
+    )
+    audio = _make_audio_mock(silent=True)
+
+    call_count = [0]
+
+    async def _publish_wake_words() -> None:
+        while True:
+            await asyncio.sleep(0)
+            if call_count[0] == 0:
+                call_count[0] += 1
+                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
+
+    wake_publisher_task = asyncio.create_task(_publish_wake_words())
+
+    gw_events = [
+        GatewayEvent(type="transcription", data={"text": "hola"}),
+        GatewayEvent(type="status", data={
+            "component": "tts",
+            "level": "degraded",
+            "message": "fallback engine",
+        }),
+        GatewayEvent(type="tts_chunk", data={"audio": b"\x00\x01" * 100}),
+        GatewayEvent(type="turn_end", data={"turn_id": "t-1"}),
+    ]
+    gateway = _gateway_mock_with_events(gw_events)
+    playback = _make_playback_mock()
+
+    received: list[VoiceEvent] = []
+    stop_event = asyncio.Event()
+
+    async def _collector() -> None:
+        async for ev in bus.subscribe():
+            received.append(ev)
+            if ev.type == "playback_ended":
+                stop_event.set()
+
+    collector_task = asyncio.create_task(_collector())
+
+    from domain.state_machine import run as sm_run
+    sm_task = asyncio.create_task(sm_run(cfg, bus, audio, gateway, playback))
+
+    start = asyncio.get_running_loop().time()
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=10.0)
+    except asyncio.TimeoutError:
+        pass
+    elapsed = asyncio.get_running_loop().time() - start
+
+    sm_task.cancel()
+    wake_publisher_task.cancel()
+    for t in (sm_task, wake_publisher_task):
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    bus.close()
+    try:
+        await collector_task
+    except Exception:
+        pass
+
+    event_types = [e.type for e in received]
+    print(f"\nEventos tras {elapsed:.1f}s: {event_types}")
+
+    status_evs = [e for e in received if e.type == "gateway_status"]
+    assert len(status_evs) >= 1, (
+        f"gateway_status no publicado tras un 'status' del gateway "
+        f"(bug #18: caía en else → solo log.debug invisible): {event_types}"
+    )
+    assert status_evs[0].data.get("component") == "tts", (
+        f"Status data no propagado al bus: {status_evs[0].data}"
+    )
+    assert status_evs[0].data.get("level") == "degraded", (
+        f"Status level no propagado: {status_evs[0].data}"
+    )
+    # status es informativo — el turno debe completarse con éxito
+    assert "playback_ended" in event_types, (
+        f"status informativo no debe terminar el turno: {event_types}"
+    )
+    error_evs = [e for e in received if e.type == "error"]
+    assert not error_evs, f"status informativo no debe generar error: {error_evs}"
+
+    print("  OK  gateway_status publicado al bus con data completo")
+    print("  OK  turno continúa hasta playback_ended")
+    print("  OK  sin error (status es informativo)")
+    print("Test #18 status: PASADO")
+
+
+async def _run_gateway_error_event_terminates_immediately_test() -> None:
+    """Error mid-turno del gateway (orquestador caído, code=TURN_ERROR,
+    fatal=false) debe terminar el turno AHORA con el código/mensaje
+    específico del servidor — NO esperar al timeout externo de 30s para
+    reportar el genérico 'Timeout en estado RESPONDING'.
+    """
+    print("\n=== Test #18: error mid-turno del gateway → error inmediato con code/message/fatal ===")
+
+    bus = EventBus()
+    # recording_timeout_s corto por la misma razón que en el test de status:
+    # el audio mock no produce frames nuevos tras el drain de IDLE, así que
+    # RECORDING corre hasta el timeout absoluto si no lo acortamos.
+    cfg = Config(
+        gateway=GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=5.0),
+        device=DeviceConfig(id="test-device"),
+        audio=AudioConfig(sample_rate=16000, frames_per_buffer=512, recording_timeout_s=0.2),
+        oww=OWWConfig(),
+    )
+    audio = _make_audio_mock(silent=True)
+
+    call_count = [0]
+
+    async def _publish_wake_words() -> None:
+        while True:
+            await asyncio.sleep(0)
+            if call_count[0] == 0:
+                call_count[0] += 1
+                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
+
+    wake_publisher_task = asyncio.create_task(_publish_wake_words())
+
+    # Escenario exacto de la issue: transcribe → orchestrator cae mid-turn →
+    # error con code/message/fatal → no llegan más eventos (el mock termina
+    # tras la lista, simulando que el WS se queda mudo por el orquestador
+    # caído). `fatal` viaja como STRING "false" (no bool) para ejercer el
+    # mismo coercion bug: bool("false") == True en Python, y sin la guarda
+    # isinstance(fatal, bool) el fatal real se publicaría como True.
+    gw_events = [
+        GatewayEvent(type="transcription", data={"text": "hola"}),
+        GatewayEvent(type="error", data={
+            "code": "TURN_ERROR",
+            "message": "orchestrator unavailable",
+            "fatal": "false",
+        }),
+    ]
+    gateway = _gateway_mock_with_events(gw_events)
+    playback = _make_playback_mock()
+
+    received: list[VoiceEvent] = []
+    stop_event = asyncio.Event()
+
+    async def _collector() -> None:
+        async for ev in bus.subscribe():
+            received.append(ev)
+            # Esperar al SEGUNDO state_changed(idle): el primero es el idle
+            # inicial previo al turno; el segundo es el que demuestra que
+            # state_machine volvió a IDLE tras el error del gateway.
+            if (
+                ev.type == "state_changed"
+                and ev.data.get("state") == "idle"
+                and sum(
+                    1 for e in received
+                    if e.type == "state_changed" and e.data.get("state") == "idle"
+                ) >= 2
+            ):
+                stop_event.set()
+
+    collector_task = asyncio.create_task(_collector())
+
+    from domain.state_machine import run as sm_run
+    sm_task = asyncio.create_task(sm_run(cfg, bus, audio, gateway, playback))
+
+    start = asyncio.get_running_loop().time()
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=10.0)
+    except asyncio.TimeoutError:
+        pass
+    elapsed = asyncio.get_running_loop().time() - start
+
+    sm_task.cancel()
+    wake_publisher_task.cancel()
+    for t in (sm_task, wake_publisher_task):
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    bus.close()
+    try:
+        await collector_task
+    except Exception:
+        pass
+
+    event_types = [e.type for e in received]
+    print(f"\nEventos tras {elapsed:.1f}s: {event_types}")
+
+    error_evs = [e for e in received if e.type == "error"]
+    assert len(error_evs) >= 1, (
+        f"error mid-turno del gateway sin visibilidad: {event_types}"
+    )
+    # code/message/fatal del gateway deben propagarse al bus, no quedar
+    # envueltos en el str de un timeout genérico.
+    err = error_evs[0]
+    assert err.data.get("code") == "TURN_ERROR", (
+        f"code del gateway debe propagarse al bus: {err.data}"
+    )
+    assert err.data.get("message") == "orchestrator unavailable", (
+        f"message del gateway debe propagarse tal cual: {err.data}"
+    )
+    assert err.data.get("fatal") is False, (
+        f"fatal debe propagarse al bus: {err.data}"
+    )
+    assert "Timeout en estado RESPONDING" not in str(err.data), (
+        f"NO debe aparecer el mensaje genérico del timeout 30s: {err.data}"
+    )
+    # El turno debe haber terminado rápidamente, NO esperar 30s del timeout
+    # externo (que era el bug original de la issue #18).
+    assert elapsed < 5.0, (
+        f"El error del gateway debe propagarse inmediato, no esperar el "
+        f"timeout externo de 30s: tardó {elapsed:.1f}s"
+    )
+    # playback_ended NO debe publicarse (no es fin de turno legítimo)
+    assert "playback_ended" not in event_types, (
+        f"playback_ended NO debe publicarse tras error mid-turno: {event_types}"
+    )
+    # playback.drain() NO debe llamarse — termina con error, no con éxito
+    assert playback.drain.await_count == 0, (
+        f"playback.drain() NO debe llamarse tras error mid-turno: {event_types}"
+    )
+    # Debe haber al menos 2 idle: el inicial previo al turno y el recovery
+    # tras el error del gateway. Más fuerte que un any() suelto, que sería
+    # satisfecho por el idle inicial sin probar la recuperación.
+    idle_evs = [e for e in received if e.type == "state_changed"
+                and e.data.get("state") == "idle"]
+    assert len(idle_evs) >= 2, (
+        f"Debe volver a IDLE tras el error del gateway (esperaba ≥2 idle, "
+        f"recibí {len(idle_evs)}): {event_types}"
+    )
+    # Y ese segundo idle debe ocurrir DESPUÉS del error — no solo existir,
+    # sino ser respuesta al fallo.
+    error_idx = next(i for i, e in enumerate(received) if e.type == "error")
+    idle_after_error = next(
+        (i for i, e in enumerate(received)
+         if i > error_idx and e.type == "state_changed"
+         and e.data.get("state") == "idle"),
+        None,
+    )
+    assert idle_after_error is not None, (
+        f"Debe haber un state_changed(idle) DESPUÉS del evento error "
+        f"(recovered to IDLE tras el fallo del gateway): {event_types}"
+    )
+
+    print(f"  OK  error publicado tras {elapsed:.2f}s con code=TURN_ERROR / fatal=False")
+    print("  OK  mensaje del gateway propagado, NO 'Timeout en estado RESPONDING'")
+    print("  OK  playback_ended NO publicado (no es fin de turno legítimo)")
+    print("  OK  playback.drain() NO llamado")
+    print("  OK  vuelta a IDLE (segundo idle, posterior al error)")
+    print("Test #18 error: PASADO")
+
+
+def test_state_machine_gateway_status_event_publishes_to_bus() -> None:
+    asyncio.run(_run_gateway_status_event_publishes_to_bus_test())
+
+
+def test_state_machine_gateway_error_event_terminates_immediately() -> None:
+    asyncio.run(_run_gateway_error_event_terminates_immediately_test())
