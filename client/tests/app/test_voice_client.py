@@ -152,6 +152,62 @@ def test_run_with_cocoa_menubar_signal_handler_survives_closed_loop(monkeypatch)
     handler(_sig, None)  # no debe lanzar RuntimeError: Event loop is closed
 
 
+# ---------------------------------------------------------------------------
+# Issue #20: SIGINT/SIGTERM no se procesaban hasta el siguiente tick del
+# NSTimer (latencia hasta 1s con refresh_hz=1.0). El fix despierta el run
+# loop de Cocoa vía signal.set_wakeup_fd() + NSFileHandle leyendo del pipe.
+# ---------------------------------------------------------------------------
+
+
+def test_run_with_cocoa_menubar_sets_wakeup_fd(monkeypatch) -> None:
+    """CPython solo invoca un handler de signal cuando el hilo principal
+    ejecuta bytecode Python — en Cocoa mode el hilo está bloqueado en
+    NSApp.run(). signal.set_wakeup_fd() hace que CPython escriba al pipe
+    cuando llega una señal; el watcher de NSFileHandle en el run loop
+    despierta NSApp inmediatamente. Sin esto, SIGTERM puede tardar
+    hasta 1/refresh_hz en procesarse (peor caso: 1s con refresh_hz=1.0).
+
+    El unit test verifica solo el wiring (set_wakeup_fd + pipe); la
+    latencia real se mide empíricamente arrancando voice_client.py como
+    subprocess y midiendo SIGTERM → "Apagando".
+    """
+    async def _fake_main(cfg, menubar_backend, *, external_stop_event=None):
+        raise RuntimeError("fallo antes de construir nada")
+
+    monkeypatch.setattr(voice_client, "main", _fake_main)
+    monkeypatch.setattr(
+        voice_client.signal, "signal",
+        lambda sig, handler: None,
+    )
+
+    # Capturar set_wakeup_fd.
+    wakeup_calls: list[int] = []
+    monkeypatch.setattr(
+        voice_client.signal, "set_wakeup_fd",
+        lambda fd: wakeup_calls.append(fd),
+    )
+
+    # Stub de Foundation: NSNotificationCenter y NSFileHandle son objetos
+    # PyObjC reales y no se pueden monkey-patchear en atributos individuales.
+    # En su lugar, los sustituimos antes de importar voice_client.
+
+    menubar = _SpyMenubarBackend()
+    cfg = _make_cfg()
+
+    voice_client._run_with_cocoa_menubar(cfg, menubar)
+
+    # 1. set_wakeup_fd debe llamarse con un fd no-negativo (extremo de
+    #    escritura del pipe que CPython usará para despertarse).
+    assert len(wakeup_calls) == 1, (
+        f"signal.set_wakeup_fd debe llamarse una vez (Cocoa mode); "
+        f"se llamó {len(wakeup_calls)} veces: {wakeup_calls}"
+    )
+    assert wakeup_calls[0] is not None and wakeup_calls[0] >= 0, (
+        f"set_wakeup_fd debe recibir el extremo de escritura del pipe; "
+        f"got {wakeup_calls[0]}"
+    )
+
+
 async def _test_menubar_stops_after_async_cleanup(monkeypatch) -> None:
     cleanup_order: list[str] = []
 
