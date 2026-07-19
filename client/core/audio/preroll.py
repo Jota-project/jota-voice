@@ -10,8 +10,15 @@ class PrerollBuffer:
         maxlen = int(seconds * sample_rate / frames_per_buffer)
         self._buffer: collections.deque[bytes] = collections.deque(maxlen=maxlen)
 
+    @property
+    def maxlen(self) -> int:
+        return self._buffer.maxlen
+
     def append(self, frame: bytes) -> None:
         self._buffer.append(frame)
+
+    def clear(self) -> None:
+        self._buffer.clear()
 
     def get(self) -> bytes:
         """Devuelve los frames acumulados como bytes float32 concatenados."""

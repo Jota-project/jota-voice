@@ -26,3 +26,15 @@ def test_maxlen_discards_oldest_frames():
     for frame in frames:
         buf.append(frame)
     assert buf.get() == b"".join(frames[-10:])
+
+
+def test_maxlen_property_reflects_configured_window():
+    buf = _make_buffer(seconds=1.0, sample_rate=16000, frames_per_buffer=1600)
+    assert buf.maxlen == 10
+
+
+def test_clear_empties_the_buffer():
+    buf = _make_buffer(seconds=1.0, sample_rate=16000, frames_per_buffer=1600)
+    buf.append(b"aaaa")
+    buf.clear()
+    assert buf.get() == b""
