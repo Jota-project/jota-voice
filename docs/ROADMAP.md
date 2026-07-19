@@ -1,10 +1,10 @@
 # jota-voice Roadmap
 
-> **Estado:** 🟢 Fase 1 cerrada (auditoría exhaustiva 2026-07-19 completada)
+> **Estado:** 🟢 Fase 1 cerrada y mergeada a `main` (PR #114, 2026-07-20); Fase A (extracción del audio kit a `core/`) completada y mergeada a `main` el mismo día
 > **Última actualización:** 2026-07-20
-> **Issues abiertas:** 103 (rango GitHub `#9`–`#113`)
-> **Rama de trabajo:** `feature/universal-client`
-> **Próximo release:** PR de finalización de Fase 1 (`roadmap/fase-1-criticos` → `main`) — pendiente de merge
+> **Issues abiertas:** 102 (rango GitHub `#9`–`#113`, `#27` cerrada por Fase A)
+> **Rama de trabajo:** `main`
+> **Próximo release:** continuar Fase 2 (resiliencia de red y protocolo) — `#28`, `#26`, `#22`, `#21`, `#23`, `#24` (ver `docs/fase-2-briefing.md`)
 
 Este documento es el **plan vivo de remediación y evolución** de jota-voice. Cada tarea referencia una issue de GitHub; las casillas se tachan al cerrar la issue. Se actualiza en el mismo PR que cierra la issue, o en un PR dedicado.
 
@@ -23,7 +23,7 @@ Este documento es el **plan vivo de remediación y evolución** de jota-voice. C
 | 🟡 Medios | 23 |
 | ⚪ Tech-debt / polish | 38 |
 | Estimación | ~9-12 semanas |
-| Próximo milestone | Cerrar Fase 1 (PR abierto, pendiente de merge) |
+| Próximo milestone | Continuar Fase 2 (resiliencia de red) tras cerrar Fase A |
 | Ya arreglado antes de la auditoría | 1 (clipping de audio en `audio_sounddevice.py`, pendiente comitear) |
 
 **Auditoría post-Fase 1 (2026-07-19):** 7 revisores de dominio, 13 de los 40 subagentes fallaron por rate limit (afectó a parte de la verificación adversarial; los *reviewers* principales sí completaron). Resultado: **los 12 fixes de Fase 1 resuelven sus issues y los tests verifican el camino que fallaba**; 1 hallazgo `high` (bypass de auth con token vacío, **#108**, arreglado en este PR) y 4 `medium` abren issues para Fase 2-3 (#103–#106). ~28 hallazgos `low` consolidados en 2 issues de Fase 8 (#112, #113). Tracking del gateway (N1–N4) abierto en #107, #108, #110, #111.
@@ -70,7 +70,7 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 ### 🟠 Fase 2 — Resiliencia de red y protocolo (semana 3)
 
 **Objetivo:** que el cliente se comporte de forma predecible ante red degradada/caída, y no se apoye en timeouts anidados que no hacen lo que aparentan.
-**Acceptance gate:** simulación de red degradada (`tc netem` o similar) durante 20 turnos sin cuelgues; `is_silence()` unificado; ningún secreto visible en logs con `logging.level: DEBUG`.
+**Acceptance gate:** simulación de red degradada (`tc netem` o similar) durante 20 turnos sin cuelgues; `is_silence()` unificado ✅ (cerrado por Fase A, ver `#27`); ningún secreto visible en logs con `logging.level: DEBUG`.
 
 - [ ] **#21** 🟠 `[013]` — Shutdown no cancela realmente los tasks anidados — proceso reiniciado a mitad de turno deja tareas huérfanas — **M**
 - [ ] **#22** 🟠 `[014]` — Sin health-check ni feedback de que OWW (wake word) está caído — **S**
@@ -78,7 +78,7 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 - [ ] **#24** 🟠 `[016]` — Arquitectura de reconexión por turno contradice el protocolo (diseñado para sesión persistente) — `turn_seq` muerto — **L** — ✅ *decidido: migrar a sesión persistente, ver "Decisiones tomadas"*
 - [ ] **#25** 🟠 `[017]` — `audio_sounddevice.py::start()` sin reintentos si `sd.InputStream()` falla al abrir — **S**
 - [ ] **#26** 🟠 `[018]` — Timeouts de conexión triplemente anidados — el más interno (websockets, 10s) nunca se sobreescribe — **XS**
-- [ ] **#27** 🟠 `[019]` — `is_silence()` duplicado y divergente entre `audio_sounddevice.py` y `audio_capture.py` — **M**
+- [x] **#27** 🟠 `[019]` — `is_silence()` duplicado y divergente entre `audio_sounddevice.py` y `audio_capture.py` — **M** — unificado en `client/core/audio/vad.py` (RMS sobre float32 normalizado, guard de frame vacío) como parte de la extracción del audio kit a core/ ("Fase A", spec `docs/superpowers/specs/2026-07-18-fase-a-audio-kit-design.md`); de paso arregla `test_make_audio_default_termux` introduciendo `client/core/platform_key.py`
 - [ ] **#28** 🟠 `[020]` — Secretos en logs DEBUG sin ninguna mitigación (`client_key`, `CF-Access-Client-Secret`) — **XS**
 - [ ] **#29** 🟠 `[021]` — `audio_termux.py::stop()` no usa el lock que sí usan `_play()`/`drain()` — **XS**
 - [ ] **#103** 🟡 `[022]` — Race: cancel simultáneo con ConnectionClosedError descarta el error real en `_responding` — **S** — *post-Fase 1*
@@ -273,7 +273,7 @@ Las 4 decisiones de diseño identificadas en la auditoría ya están resueltas:
 | Milestone | Criterio |
 |---|---|
 | **Fase 1 done** ✅ | 12 🔴 cerrados, suite de tests verde (171 pass, 1 fail pre-existente ajeno), 10 turnos manuales consecutivos sin degradación de audio, ControlServer rechaza sin token — **cumplido el 2026-07-19**. Auditoría exhaustiva post-Fase 1 (7 revisores de dominio, 13/40 subagentes con rate limit) verificó que los 12 fixes resuelven sus issues; 1 fix de la propia auditoría (#108, bypass de auth con token vacío) comiteado en este PR. |
-| **Fase 2 done** | Simulación de red degradada sin cuelgues, `is_silence()` unificado, cero secretos visibles en logs DEBUG |
+| **Fase 2 done** | Simulación de red degradada sin cuelgues, `is_silence()` unificado ✅ (Fase A), cero secretos visibles en logs DEBUG |
 | **Fase 3 done** | Apagar desde el menú no bloquea >200ms, fallo del menubar no impide arrancar el resto, `voice_client.py` con test de integración |
 | **Fase 4 done** | Instalación limpia funciona, CI verde en cada PR, cero nombres de test duplicados |
 | **Fase 5 done** | `install.sh` continúa tras fallo no crítico, permisos 600 re-verificados en arranque, historial de git limpio de hostname personal |
