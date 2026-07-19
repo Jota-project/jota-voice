@@ -203,14 +203,35 @@ class CocoaMenubarBackend:
     def stop(self) -> None:
         """Detiene NSApp. Seguro de llamar desde cualquier hilo: salta al
         hilo principal (donde corre run_forever) vía
-        performSelectorOnMainThread_withObject_waitUntilDone_."""
+        performSelectorOnMainThread_withObject_waitUntilDone_. ``stop:`` hace
+        retornar el run loop; ``terminate:`` llamaría a exit() y podría cortar
+        el apagado asíncrono a mitad."""
         if self._timer is not None:
             self._timer.invalidate()
             self._timer = None
         if self._app is not None:
             self._app.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "terminate:", None, False
+                "stop:", None, False
             )
+            # stop: solo se observa al terminar de procesar un NSEvent; el
+            # selector del run loop no genera uno por sí mismo.
+            make_event = getattr(
+                AppKit.NSEvent,
+                "otherEventWithType_location_modifierFlags_timestamp_"
+                "windowNumber_context_subtype_data1_data2_",
+            )
+            wake_event = make_event(
+                AppKit.NSEventTypeApplicationDefined,
+                (0.0, 0.0),
+                0,
+                0.0,
+                0,
+                None,
+                0,
+                0,
+                0,
+            )
+            self._app.postEvent_atStart_(wake_event, True)
 
     # ------------------------------------------------------------------
     # Tick del NSTimer (corre en hilo Cocoa)

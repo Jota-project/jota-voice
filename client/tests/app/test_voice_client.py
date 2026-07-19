@@ -1,9 +1,8 @@
-"""test_voice_client.py — Tests focalizados del fix #11.
+"""Tests focalizados de ciclo de vida en voice_client.
 
-Cubre solo la lógica NUEVA: que un fallo de audio.start() quede visible en
-el menubar y apague limpiamente en vez de propagar/colgar, y que el hilo de
-asyncio de _run_with_cocoa_menubar no muera en silencio ni deje handlers de
-señal que revienten sobre un loop ya cerrado.
+Cubre que los fallos de audio.start() queden visibles en el menubar y apaguen
+limpiamente, que el hilo de asyncio no muera en silencio ni deje handlers de
+señal inválidos, y que el run loop Cocoa se detenga tras el cleanup asíncrono.
 """
 from __future__ import annotations
 
@@ -151,3 +150,69 @@ def test_run_with_cocoa_menubar_signal_handler_survives_closed_loop(monkeypatch)
     assert len(signal_calls) == 2
     _sig, handler = signal_calls[0]
     handler(_sig, None)  # no debe lanzar RuntimeError: Event loop is closed
+
+
+async def _test_menubar_stops_after_async_cleanup(monkeypatch) -> None:
+    cleanup_order: list[str] = []
+
+    class _AudioBackend:
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            cleanup_order.append("audio.stop")
+
+    class _OwwBackend:
+        async def run_forever(self, audio, on_wake) -> None:
+            await asyncio.Future()
+
+        async def disconnect(self) -> None:
+            cleanup_order.append("oww.disconnect")
+
+    class _GatewayClient:
+        def __init__(self, cfg, device_id) -> None:
+            pass
+
+        async def disconnect(self) -> None:
+            cleanup_order.append("gateway.disconnect")
+
+    class _IdleClient:
+        def __init__(self, *args) -> None:
+            pass
+
+        async def run(self, *args) -> None:
+            await asyncio.Future()
+
+    class _MenubarBackend(_SpyMenubarBackend):
+        def stop(self) -> None:
+            cleanup_order.append("menubar.stop")
+
+    async def _idle_control_server(*args) -> None:
+        await asyncio.Future()
+
+    async def _completed_state_machine(*args) -> None:
+        pass
+
+    monkeypatch.setattr(registry, "make_audio", lambda cfg: _AudioBackend())
+    monkeypatch.setattr(registry, "make_oww", lambda cfg, on_wake_word: _OwwBackend())
+    monkeypatch.setattr(registry, "make_display", lambda cfg: object())
+    monkeypatch.setattr(voice_client, "GatewayClient", _GatewayClient)
+    monkeypatch.setattr(voice_client, "DisplayClient", _IdleClient)
+    monkeypatch.setattr(voice_client, "MenubarClient", _IdleClient)
+    monkeypatch.setattr(voice_client.control_server, "run", _idle_control_server)
+    monkeypatch.setattr(voice_client, "sm_run", _completed_state_machine)
+
+    await voice_client.main(
+        _make_cfg(), _MenubarBackend(), external_stop_event=asyncio.Event()
+    )
+
+    assert cleanup_order == [
+        "audio.stop",
+        "gateway.disconnect",
+        "oww.disconnect",
+        "menubar.stop",
+    ]
+
+
+def test_menubar_stops_after_async_cleanup(monkeypatch) -> None:
+    asyncio.run(_test_menubar_stops_after_async_cleanup(monkeypatch))

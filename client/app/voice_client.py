@@ -298,9 +298,6 @@ async def main(
         except asyncio.CancelledError:
             pass
 
-        if hasattr(menubar_backend, "stop"):
-            menubar_backend.stop()
-
         sm_task.cancel()
         oww_task.cancel()
         display_task.cancel()
@@ -326,6 +323,9 @@ async def main(
 
         bus.close()
         log.info("jota-voice apagado limpiamente")
+
+        if hasattr(menubar_backend, "stop"):
+            menubar_backend.stop()
 
 
 async def _on_wake(bus: EventBus, name: str) -> None:
