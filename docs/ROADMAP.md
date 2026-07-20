@@ -72,7 +72,7 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 **Objetivo:** que el cliente se comporte de forma predecible ante red degradada/caída, y no se apoye en timeouts anidados que no hacen lo que aparentan.
 **Acceptance gate:** simulación de red degradada (`tc netem` o similar) durante 20 turnos sin cuelgues; `is_silence()` unificado ✅ (cerrado por Fase A, ver `#27`); ningún secreto visible en logs con `logging.level: DEBUG`.
 
-- [ ] **#21** 🟠 `[013]` — Shutdown no cancela realmente los tasks anidados — proceso reiniciado a mitad de turno deja tareas huérfanas — **M**
+- [x] **#21** 🟠 `[013]` — Shutdown no cancela realmente los tasks anidados — proceso reiniciado a mitad de turno deja tareas huérfanas — **M** — try/finally en `_recording`/`_responding`/`_oww_loop` cancela y drena tasks hijos (capture_task, cancel_task, receive_task, wake_task) cuando la tarea externa recibe `cancel()` desde fuera; replicado el patrón de `_wait_wake_or_cancel`. Regresión cubierta por `client/tests/domain/test_state_machine_cancel.py` (parametrizado sobre los tres puntos).
 - [ ] **#22** 🟠 `[014]` — Sin health-check ni feedback de que OWW (wake word) está caído — **S**
 - [ ] **#23** 🟠 `[015]` — `recording_timeout_s` no es un límite duro frente a una conexión de red degradada — **S**
 - [ ] **#24** 🟠 `[016]` — Arquitectura de reconexión por turno contradice el protocolo (diseñado para sesión persistente) — `turn_seq` muerto — **L** — ✅ *decidido: migrar a sesión persistente, ver "Decisiones tomadas"*
