@@ -6,6 +6,7 @@ import pytest
 from config import Config, GatewayConfig, AudioConfig, DisplayConfig, OWWConfig, DeviceConfig, MenubarConfig
 from backends.errors import ConfigError
 from backends import registry
+from core.platform_key import sys as platform_key_sys
 
 
 def _cfg(audio_backend: str | None = None, display_backend: str | None = None) -> Config:
@@ -19,7 +20,7 @@ def _cfg(audio_backend: str | None = None, display_backend: str | None = None) -
 
 def test_make_audio_unsupported_os(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PREFIX", raising=False)
-    monkeypatch.setattr(registry.sys, "platform", "win32")
+    monkeypatch.setattr(platform_key_sys, "platform", "win32")
     with pytest.raises(ConfigError, match="SO no soportado"):
         registry.make_audio(_cfg())
 
@@ -30,7 +31,7 @@ def test_make_audio_unsupported_os_no_enumerated_platform(monkeypatch: pytest.Mo
     envolverlo en ConfigError para no romper el contrato de excepciones
     del módulo (cualquier SO no soportado -> ConfigError('SO no soportado...'))."""
     monkeypatch.delenv("PREFIX", raising=False)
-    monkeypatch.setattr(registry.sys, "platform", "freebsd13")
+    monkeypatch.setattr(platform_key_sys, "platform", "freebsd13")
     with pytest.raises(ConfigError, match="SO no soportado"):
         registry.make_audio(_cfg())
 
@@ -41,27 +42,27 @@ def test_make_audio_unknown_backend() -> None:
 
 
 def test_make_audio_termux_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(registry.sys, "platform", "darwin")
+    monkeypatch.setattr(platform_key_sys, "platform", "darwin")
     inst = registry.make_audio(_cfg(audio_backend="termux"))
     assert inst.__class__.__name__ == "TermuxBackend"
 
 
 def test_make_audio_sounddevice_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(registry.sys, "platform", "linux")
+    monkeypatch.setattr(platform_key_sys, "platform", "linux")
     inst = registry.make_audio(_cfg(audio_backend="sounddevice"))
     assert inst.__class__.__name__ == "SounddeviceBackend"
 
 
 def test_make_audio_default_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PREFIX", raising=False)
-    monkeypatch.setattr(registry.sys, "platform", "darwin")
+    monkeypatch.setattr(platform_key_sys, "platform", "darwin")
     inst = registry.make_audio(_cfg())
     assert inst.__class__.__name__ == "SounddeviceBackend"
 
 
 def test_make_audio_default_termux(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PREFIX", "/data/data/com.termux/files/usr")
-    monkeypatch.setattr(registry.sys, "platform", "linux")
+    monkeypatch.setattr(platform_key_sys, "platform", "linux")
     inst = registry.make_audio(_cfg())
     assert inst.__class__.__name__ == "TermuxBackend"
 
@@ -154,13 +155,13 @@ def test_make_menubar_disabled_returns_null() -> None:
 
 
 def test_make_menubar_linux_returns_null(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(registry.sys, "platform", "linux")
+    monkeypatch.setattr(platform_key_sys, "platform", "linux")
     inst = registry.make_menubar(_cfg_with_menubar())
     assert inst.__class__.__name__ == "NullMenubarBackend"
 
 
 def test_make_menubar_darwin_no_pyobjc_returns_null(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(registry.sys, "platform", "darwin")
+    monkeypatch.setattr(platform_key_sys, "platform", "darwin")
 
     orig_import = __import__
 
@@ -175,7 +176,7 @@ def test_make_menubar_darwin_no_pyobjc_returns_null(monkeypatch: pytest.MonkeyPa
 
 
 def test_make_menubar_darwin_with_pyobjc_returns_cocoa(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(registry.sys, "platform", "darwin")
+    monkeypatch.setattr(platform_key_sys, "platform", "darwin")
     import types
     import sys as _sys
 
