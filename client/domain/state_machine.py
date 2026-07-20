@@ -263,25 +263,38 @@ async def _recording(
     # escuchando al usuario y su propia voz produciría falsos positivos. El
     # wake_word solo puede interrumpir durante RESPONDING (TTS sonando).
 
-    done, pending = await asyncio.wait(
-        [capture_task, cancel_task],
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-    for t in pending:
-        t.cancel()
-        try:
-            await t
-        except asyncio.CancelledError:
-            pass
+    try:
+        done, pending = await asyncio.wait(
+            [capture_task, cancel_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in pending:
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
 
-    if cancel_task in done:
-        await _safe_send_cancel(gateway)
-        raise _TurnCancelled()
+        if cancel_task in done:
+            await _safe_send_cancel(gateway)
+            raise _TurnCancelled()
 
-    if not capture_task.cancelled():
-        exc = capture_task.exception()
-        if exc is not None:
-            raise exc
+        if not capture_task.cancelled():
+            exc = capture_task.exception()
+            if exc is not None:
+                raise exc
+    finally:
+        # Issue #21: si la tarea externa fue cancelada durante el wait
+        # (SIGTERM durante shutdown), el código de arriba no se ejecuta
+        # pero los tasks hijos sí. Drenarlos siempre, replicando el patrón
+        # de _wait_wake_or_cancel (líneas 175-181).
+        for t in (capture_task, cancel_task):
+            if not t.done():
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
 
     # play_notification() es un beep puramente cosmético (confirma al
     # usuario que se dejó de grabar). Un fallo de audio de salida (visto en
@@ -397,30 +410,43 @@ async def _responding(
     cancel_task = asyncio.create_task(cancel_event.wait())
     wake_task = asyncio.create_task(_wait_wake_or_cancel(bus, cancel_event, "RESPONDING"))
 
-    done, pending = await asyncio.wait(
-        [receive_task, cancel_task, wake_task],
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-    for t in pending:
-        t.cancel()
-        try:
-            await t
-        except (asyncio.CancelledError, asyncio.TimeoutError):
-            pass
+    try:
+        done, pending = await asyncio.wait(
+            [receive_task, cancel_task, wake_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in pending:
+            t.cancel()
+            try:
+                await t
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
 
-    if cancel_task in done:
-        await _safe_send_cancel(gateway)
-        playback.reset()
-        raise _TurnCancelled()
+        if cancel_task in done:
+            await _safe_send_cancel(gateway)
+            playback.reset()
+            raise _TurnCancelled()
 
-    if not receive_task.cancelled():
-        exc = receive_task.exception()
-        if exc is not None:
-            if isinstance(exc, asyncio.TimeoutError):
-                log.warning("RESPONDING: timeout 30s")
-                bus.publish(VoiceEvent(type="error", data={"message": "Timeout en estado RESPONDING"}))
-                return
-            raise exc
+        if not receive_task.cancelled():
+            exc = receive_task.exception()
+            if exc is not None:
+                if isinstance(exc, asyncio.TimeoutError):
+                    log.warning("RESPONDING: timeout 30s")
+                    bus.publish(VoiceEvent(type="error", data={"message": "Timeout en estado RESPONDING"}))
+                    return
+                raise exc
+    finally:
+        # Issue #21: si la tarea externa fue cancelada durante el wait
+        # (SIGTERM durante shutdown), el código de arriba no se ejecuta
+        # pero los tasks hijos sí. Drenarlos siempre, replicando el patrón
+        # de _wait_wake_or_cancel (líneas 175-181) y _recording.
+        for t in (receive_task, cancel_task, wake_task):
+            if not t.done():
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
 
     await playback.drain()
     bus.publish(VoiceEvent(type="playback_ended", data={}))
