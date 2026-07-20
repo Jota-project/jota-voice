@@ -155,6 +155,15 @@ class AudioCapture:
         """
         return _is_silence(frame, threshold_rms=self._cfg.vad_rms_threshold / 32768.0)
 
+    def reset(self) -> None:
+        """Limpia el preroll entre turnos (PlaybackEngine.reset() / StateMachine).
+
+        Sin esto, audio capturado antes de un turno cancelado se cuela en el
+        siguiente wake-word. Asimetría histórica con SounddeviceBackend que se
+        resuelve en este fix de revisión post-Fase A."""
+        with self._lock:
+            self._preroll.clear()
+
     # ------------------------------------------------------------------
     # Hilo lector
     # ------------------------------------------------------------------

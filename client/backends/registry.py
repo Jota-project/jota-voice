@@ -1,7 +1,7 @@
 """Registro y factory de backends.
 
 Selecciona implementación concreta de AudioBackend / DisplayBackend / OwWBackend
-según sys.platform + overrides de Config.
+según PlatformKey (detect_platform) + overrides de Config.
 """
 from __future__ import annotations
 
@@ -9,13 +9,20 @@ import logging
 import sys
 
 from config import Config
-from core.platform_key import detect_platform
+from core.platform_key import UnsupportedPlatformError, detect_platform
 
 from .errors import ConfigError
 
 
 def _default_audio_backend() -> str:
-    platform_key = detect_platform()
+    try:
+        platform_key = detect_platform()
+    except UnsupportedPlatformError as exc:
+        # Contrato del módulo: cualquier SO no soportado -> ConfigError
+        # (no la UnsupportedPlatformError interna de core.platform_key).
+        raise ConfigError(
+            f"SO no soportado: {exc!s}. Instala el backend de audio correspondiente."
+        ) from exc
     if platform_key.family == "termux":
         return "termux"
     if platform_key.family in ("darwin", "linux"):
@@ -64,7 +71,16 @@ def make_menubar(cfg: Config):
     if not cfg.menubar.enabled:
         return NullMenubarBackend()
 
-    if sys.platform != "darwin":
+    # Hallazgo de la revisión multi-agente post-Fase A: este factory usaba
+    # sys.platform directamente mientras _default_audio_backend() (3 líneas
+    # arriba) ya migró a detect_platform().family. Alinear para que
+    # cualquier refinamiento de la detección de plataforma en
+    # core/platform_key.py se aplique a todo el módulo de una vez.
+    try:
+        platform_key = detect_platform()
+    except UnsupportedPlatformError:
+        return NullMenubarBackend()
+    if platform_key.family != "darwin":
         return NullMenubarBackend()
 
     try:

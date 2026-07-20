@@ -134,6 +134,19 @@ def test_reset_resets_carry() -> None:
     assert be._enqueue_carry == b""
 
 
+def test_reset_clears_preroll() -> None:
+    """Reset debe limpiar también el preroll (audio pre-wake-word capturado
+    antes de que se cancelara el turno), para que no se cuele en la
+    siguiente transcripción. Asimetría con SounddeviceBackend.reset() que
+    sí lo hace — ver hallazgo de revisión post-Fase A."""
+    be, _ = _backend_with_fake_stream()
+    be._capture._preroll.append(b"stale-audio-from-prev-turn")
+
+    be.reset()
+
+    assert be.get_preroll() == b""
+
+
 def test_play_chunk_un_solo_byte_se_acumula_en_carry() -> None:
     """Un chunk de 1 byte no produce ninguna muestra completa: el byte
     debe quedar en carry sin escribirse a PyAudio, y un chunk posterior

@@ -127,5 +127,8 @@ class TermuxBackend:
         # No hay buffer interno de texto en TermuxBackend (lo mantiene PlaybackEngine),
         # pero sí el byte suelto arrastrado: si un turno se cancela a medias
         # (reset() entre turnos), reproducirlo al principio del siguiente
-        # sería ruido audible sin contexto.
+        # sería ruido audible sin contexto. Y también el preroll del
+        # AudioCapture subyacente (revisión post-Fase A): audio previo al
+        # cancel se colaría en la siguiente transcripción.
         self._enqueue_carry = b""
+        self._capture.reset()
