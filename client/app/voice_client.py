@@ -255,21 +255,34 @@ async def main(
                 continue
             t = asyncio.create_task(oww.run_forever(audio, _oww_on_wake))
             pause_wait = asyncio.create_task(pause_event.wait())
-            done, pending = await asyncio.wait(
-                [t, pause_wait],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for p in pending:
-                p.cancel()
+            try:
+                done, pending = await asyncio.wait(
+                    [t, pause_wait],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for p in pending:
+                    p.cancel()
+                    try:
+                        await p
+                    except asyncio.CancelledError:
+                        pass
+                t.cancel()
                 try:
-                    await p
+                    await t
                 except asyncio.CancelledError:
                     pass
-            t.cancel()
-            try:
-                await t
-            except asyncio.CancelledError:
-                pass
+            finally:
+                # Issue #21: si el shutdown cancela _oww_loop desde fuera
+                # (SIGTERM), el código de arriba no se ejecuta pero los tasks
+                # hijos sí. Drenarlos siempre, replicando el patrón del
+                # state_machine (fix _recording/_responding).
+                for task in (t, pause_wait):
+                    if not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
 
     oww_task = asyncio.create_task(_oww_loop(), name="oww_listener")
 
