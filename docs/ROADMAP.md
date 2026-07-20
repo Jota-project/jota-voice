@@ -79,7 +79,7 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 - [ ] **#25** 🟠 `[017]` — `audio_sounddevice.py::start()` sin reintentos si `sd.InputStream()` falla al abrir — **S**
 - [ ] **#26** 🟠 `[018]` — Timeouts de conexión triplemente anidados — el más interno (websockets, 10s) nunca se sobreescribe — **XS**
 - [x] **#27** 🟠 `[019]` — `is_silence()` duplicado y divergente entre `audio_sounddevice.py` y `audio_capture.py` — **M** — unificado en `client/core/audio/vad.py` (RMS sobre float32 normalizado, guard de frame vacío) como parte de la extracción del audio kit a core/ ("Fase A", spec `docs/superpowers/specs/2026-07-18-fase-a-audio-kit-design.md`); de paso arregla `test_make_audio_default_termux` introduciendo `client/core/platform_key.py`
-- [ ] **#28** 🟠 `[020]` — Secretos en logs DEBUG sin ninguna mitigación (`client_key`, `CF-Access-Client-Secret`) — **XS**
+- [x] **#28** 🟠 `[020]` — Secretos en logs DEBUG sin ninguna mitigación (`client_key`, `CF-Access-Client-Secret`) — **XS** — `getLogger('websockets').setLevel(INFO)` en `_setup_logging` después de `basicConfig`, independiente del nivel raíz
 - [ ] **#29** 🟠 `[021]` — `audio_termux.py::stop()` no usa el lock que sí usan `_play()`/`drain()` — **XS**
 - [ ] **#103** 🟡 `[022]` — Race: cancel simultáneo con ConnectionClosedError descarta el error real en `_responding` — **S** — *post-Fase 1*
 - [ ] **#110** 🟡 `[023]` — Capturar `ready.session_id` y `ready.capabilities` en `GatewayClient.connect()` — prerequisito del barge-in (enh 9.1) — **S** — *tracking gateway*
