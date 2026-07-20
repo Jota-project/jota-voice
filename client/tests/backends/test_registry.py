@@ -24,6 +24,17 @@ def test_make_audio_unsupported_os(monkeypatch: pytest.MonkeyPatch) -> None:
         registry.make_audio(_cfg())
 
 
+def test_make_audio_unsupported_os_no_enumerated_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Para un sys.platform fuera de {darwin, linux*, win*} y sin PREFIX
+    (detect_platform() lanza UnsupportedPlatformError), registry debe
+    envolverlo en ConfigError para no romper el contrato de excepciones
+    del módulo (cualquier SO no soportado -> ConfigError('SO no soportado...'))."""
+    monkeypatch.delenv("PREFIX", raising=False)
+    monkeypatch.setattr(registry.sys, "platform", "freebsd13")
+    with pytest.raises(ConfigError, match="SO no soportado"):
+        registry.make_audio(_cfg())
+
+
 def test_make_audio_unknown_backend() -> None:
     with pytest.raises(ConfigError, match="audio backend desconocido"):
         registry.make_audio(_cfg(audio_backend="alsa"))
