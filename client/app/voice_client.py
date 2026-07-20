@@ -113,6 +113,12 @@ def _setup_logging(level: str) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    # Issue #28: la librería `websockets` emite DEBUG con las cabeceras
+    # HTTP del handshake (incluido CF-Access-Client-Secret) y el primer
+    # JSON con client_key. Forzamos INFO aquí para que ningún nivel
+    # del logger raíz (incluido DEBUG en config.yaml) haga que herede
+    # DEBUG — fix sugerido por la propia issue, mínimo y robusto.
+    logging.getLogger("websockets").setLevel(logging.INFO)
 
 
 async def main(
