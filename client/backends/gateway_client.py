@@ -53,6 +53,7 @@ class GatewayClient:
                     self._cfg.ws_url,
                     additional_headers=headers or None,
                     max_size=None,
+                    open_timeout=self._cfg.connect_timeout_s,
                 ),
                 timeout=self._cfg.connect_timeout_s,
             )

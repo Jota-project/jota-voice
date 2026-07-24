@@ -5,7 +5,9 @@ import asyncio
 import json
 import sys
 import types
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 # --- Stubs ---
 # Sobreescribimos ConnectionClosed/OK/Error con fakes laxos que aceptan
@@ -40,7 +42,7 @@ def _ensure_exception_subclasses() -> None:
 
 _ensure_exception_subclasses()
 
-from config import GatewayConfig
+from config import GatewayConfig, AudioConfig, DeviceConfig, Config
 from backends.gateway_client import GatewayClient, _cloudflare_access_headers
 
 
@@ -411,3 +413,44 @@ def test_receive_propagates_connection_closed_error() -> None:
 
 def test_receive_silently_terminates_on_connection_closed_ok() -> None:
     asyncio.run(_test_receive_silently_terminates_on_connection_closed_ok())
+
+
+# ---------------------------------------------------------------------------
+# Issue #26: open_timeout de websockets debe heredar connect_timeout_s.
+# ---------------------------------------------------------------------------
+
+
+def _cfg(connect_timeout_s: float = 30.0) -> Config:
+    return Config(
+        gateway=GatewayConfig(host="127.0.0.1", client_key="x", connect_timeout_s=connect_timeout_s),
+        device=DeviceConfig(id="test"),
+        audio=AudioConfig(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_connect_passes_open_timeout_to_websockets() -> None:
+    """websockets.connect() debe recibir open_timeout=cfg.connect_timeout_s;
+    de lo contrario, websockets usa open_timeout=10 (default) y un valor
+    superior en connect_timeout_s es un no-op silencioso."""
+    cfg = _cfg(connect_timeout_s=30.0)
+    client = GatewayClient(cfg.gateway, device_id="test")
+    mock_ws = AsyncMock()
+    mock_ws.recv = AsyncMock(side_effect=asyncio.CancelledError)
+    with patch("backends.gateway_client.websockets") as mock_websockets:
+        mock_websockets.connect = AsyncMock(return_value=mock_ws)
+        try:
+            await client.connect()
+        except (asyncio.CancelledError, Exception):
+            pass
+        # Verifica que open_timeout se ha pasado explícitamente
+        assert mock_websockets.connect.called, "websockets.connect() no se llamó"
+        call_kwargs = mock_websockets.connect.call_args.kwargs
+        assert "open_timeout" in call_kwargs, (
+            "open_timeout no se ha pasado a websockets.connect() — "
+            "issue #26 sigue vigente"
+        )
+        assert call_kwargs["open_timeout"] == 30.0, (
+            f"open_timeout esperaba 30.0 (de connect_timeout_s), "
+            f"obtuve {call_kwargs['open_timeout']}"
+        )
