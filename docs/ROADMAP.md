@@ -77,7 +77,7 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 - [ ] **#23** 🟠 `[015]` — `recording_timeout_s` no es un límite duro frente a una conexión de red degradada — **S**
 - [ ] **#24** 🟠 `[016]` — Arquitectura de reconexión por turno contradice el protocolo (diseñado para sesión persistente) — `turn_seq` muerto — **L** — ✅ *decidido: migrar a sesión persistente, ver "Decisiones tomadas"*
 - [ ] **#25** 🟠 `[017]` — `audio_sounddevice.py::start()` sin reintentos si `sd.InputStream()` falla al abrir — **S**
-- [ ] **#26** 🟠 `[018]` — Timeouts de conexión triplemente anidados — el más interno (websockets, 10s) nunca se sobreescribe — **XS**
+- [x] **#26** 🟠 `[018]` — Timeouts de conexión triplemente anidados — el más interno (websockets, 10s) nunca se sobreescribe — **XS** — `open_timeout=self._cfg.connect_timeout_s` en `websockets.connect()`
 - [x] **#27** 🟠 `[019]` — `is_silence()` duplicado y divergente entre `audio_sounddevice.py` y `audio_capture.py` — **M** — unificado en `client/core/audio/vad.py` (RMS sobre float32 normalizado, guard de frame vacío) como parte de la extracción del audio kit a core/ ("Fase A", spec `docs/superpowers/specs/2026-07-18-fase-a-audio-kit-design.md`); de paso arregla `test_make_audio_default_termux` introduciendo `client/core/platform_key.py`
 - [x] **#28** 🟠 `[020]` — Secretos en logs DEBUG sin ninguna mitigación (`client_key`, `CF-Access-Client-Secret`) — **XS** — `getLogger('websockets').setLevel(INFO)` en `_setup_logging` después de `basicConfig`, independiente del nivel raíz
 - [ ] **#29** 🟠 `[021]` — `audio_termux.py::stop()` no usa el lock que sí usan `_play()`/`drain()` — **XS**
