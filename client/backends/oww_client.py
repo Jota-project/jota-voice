@@ -17,6 +17,7 @@ import os
 from typing import Awaitable, Callable, Optional
 
 from config import AudioConfig, OWWConfig
+from domain.event_bus import EventBus, VoiceEvent
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +32,12 @@ _DEFAULT_OWW_WIDTH = 2  # PCM int16: 2 bytes por muestra (constante del protocol
 
 
 class OWWClient:
-    def __init__(self, cfg: OWWConfig, audio_cfg: Optional[AudioConfig] = None) -> None:
+    def __init__(
+        self,
+        cfg: OWWConfig,
+        audio_cfg: Optional[AudioConfig] = None,
+        bus: Optional[EventBus] = None,
+    ) -> None:
         self._cfg = cfg
         # Si se inyecta una AudioConfig, el cliente Wyoming debe declarar en
         # los eventos audio-start/audio-chunk el rate y channels REALES del
@@ -45,6 +51,12 @@ class OWWClient:
         self._writer: Optional[asyncio.StreamWriter] = None
         self._connected = False
         self._last_trigger_at: dict[str, float] = {}
+        # Bus opcional para publicar health-checks (issue #22). Si es None,
+        # run_forever conserva el comportamiento legacy (solo log.warning).
+        self._bus = bus
+        # Flag interno: True entre el momento en que se publica oww_degraded
+        # y el siguiente reconectar exitoso. Evita spam en el bus.
+        self._degraded_published = False
 
     # ------------------------------------------------------------------
     # Public interface
@@ -221,7 +233,11 @@ class OWWClient:
         while True:
             await self.connect_with_backoff()
             log.info("OWW run_forever: conectado, escuchando audio del mic")
-            consecutive_drops = 0
+            # NO reseteamos consecutive_drops a 0 aquí: ese reset hacía que
+            # el contador solo alcanzara valor 1 entre dos drops, lo que
+            # inutilizaba el threshold de oww_degraded (issue #22). El
+            # backoff sigue capado por min(consecutive_drops, len-1) y se
+            # resetea por sí solo cuando wait_for_detection retorne OK.
 
             # Task 1: enviar audio del mic a OWW en loop
             send_task = asyncio.create_task(self._send_audio_loop(audio))
@@ -230,6 +246,13 @@ class OWWClient:
                 while True:
                     name = await self.wait_for_detection()
                     log.info("OWW run_forever: detectado → %r, invocando callback", name)
+                    # Issue #22: una detección exitosa es la señal real de
+                    # recuperación. Publicar oww_recovered UNA vez aquí (no
+                    # en cada connect_with_backoff exitoso, que disparaba
+                    # falsos positivos entre drops seguidos).
+                    if self._bus is not None and self._degraded_published:
+                        self._bus.publish(VoiceEvent(type="oww_recovered", data={}))
+                        self._degraded_published = False
                     await on_wake_word(name)
             except (ConnectionError, OSError, asyncio.IncompleteReadError) as exc:
                 log.warning("OWW run_forever: conexión perdida (%s), reconectando", exc)
@@ -252,6 +275,21 @@ class OWWClient:
                 # ningún delay, martilleando el servidor en un hot-loop.
                 delay = backoff[min(consecutive_drops, len(backoff) - 1)]
                 consecutive_drops += 1
+                # Issue #22: tras N reintentos consecutivos fallidos,
+                # publicar UNA vez oww_degraded al EventBus.
+                if (
+                    self._bus is not None
+                    and not self._degraded_published
+                    and consecutive_drops >= self._cfg.oww_healthcheck_threshold
+                ):
+                    self._bus.publish(VoiceEvent(
+                        type="oww_degraded",
+                        data={
+                            "consecutive_failures": consecutive_drops,
+                            "backoff_s": delay,
+                        },
+                    ))
+                    self._degraded_published = True
                 log.warning("OWW run_forever: esperando %.1fs antes de reconectar", delay)
                 await asyncio.sleep(delay)
                 continue
