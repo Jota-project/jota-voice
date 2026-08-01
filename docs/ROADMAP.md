@@ -1,10 +1,10 @@
 # jota-voice Roadmap
 
-> **Estado:** 🟢 Fase 1 cerrada y mergeada a `main` (PR #114, 2026-07-20); Fase A (extracción del audio kit a `core/`) completada y mergeada a `main` el mismo día
-> **Última actualización:** 2026-07-20
-> **Issues abiertas:** 102 (rango GitHub `#9`–`#113`, `#27` cerrada por Fase A)
+> **Estado:** 🟢 Fase 1 cerrada y mergeada a `main` (PR #114, 2026-07-20); Fase A completada y mergeada a `main` el mismo día; Fase 2 con 5/9 issues cerradas en local (`#21`, `#22`, `#26`, `#28`, `#29`, y las post-Fase 1). Pendiente: push y `gh issue close` de las cerradas en local
+> **Última actualización:** 2026-07-29
+> **Issues abiertas:** 100 (rango GitHub `#9`–`#115`, `#21`/`#22`/`#26`/`#27`/`#28`/`#29` cerradas por Fase 2/A; pendiente `gh issue close`)
 > **Rama de trabajo:** `main`
-> **Próximo release:** continuar Fase 2 (resiliencia de red y protocolo) — `#28`, `#26`, `#22`, `#21`, `#23`, `#24` (ver `docs/fase-2-briefing.md`)
+> **Próximo release:** terminar bloque de red (`#23`, `#25`) y abrir `#24` (sesión WebSocket persistente, requiere brainstorming → spec → plan) — ver `docs/fase-2-briefing.md`
 
 Este documento es el **plan vivo de remediación y evolución** de jota-voice. Cada tarea referencia una issue de GitHub; las casillas se tachan al cerrar la issue. Se actualiza en el mismo PR que cierra la issue, o en un PR dedicado.
 
@@ -74,13 +74,13 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 
 - [x] **#21** 🟠 `[013]` — Shutdown no cancela realmente los tasks anidados — proceso reiniciado a mitad de turno deja tareas huérfanas — **M** — try/finally en `_recording`/`_responding`/`_oww_loop` cancela y drena tasks hijos (capture_task, cancel_task, receive_task, wake_task) cuando la tarea externa recibe `cancel()` desde fuera; replicado el patrón de `_wait_wake_or_cancel`. Regresión cubierta por `client/tests/domain/test_state_machine_cancel.py` (parametrizado sobre los tres puntos).
 - [x] **#22** 🟠 `[014]` — Sin health-check ni feedback de que OWW (wake word) está caído — **S** — `OWWClient.run_forever` publica `VoiceEvent("oww_degraded", {consecutive_failures, backoff_s})` al cruzar `OWWConfig.oww_healthcheck_threshold` (default 3) reintentos consecutivos, y `VoiceEvent("oww_recovered", {})` tras una detección exitosa. `bus` opcional en `__init__` (legacy preservado); `consecutive_drops` ya no se resetea tras cada `connect_with_backoff` exitoso (bug que inutilizaba el threshold). Limitación: `WyomingBackend` aún no propaga `bus`, así que la degradación NO se publica desde `make_oww` — el fix aplica a `OWWClient` directo. Tests en `client/tests/backends/test_oww_healthcheck.py`.
-- [ ] **#23** 🟠 `[015]` — `recording_timeout_s` no es un límite duro frente a una conexión de red degradada — **S**
+- [x] **#23** 🟠 `[015]` — `recording_timeout_s` no es un límite duro frente a una conexión de red degradada — **S** — `gateway.send_audio(frame)` ahora envuelto con `asyncio.wait_for(..., timeout=remaining)` dentro de `_capture_loop`; `TimeoutError` rompe el bucle con warning. `recording_timeout_s` (default 15s) pasa de promesa soft a límite duro. Tests en `client/tests/domain/test_state_machine_recording_timeout.py`.
 - [ ] **#24** 🟠 `[016]` — Arquitectura de reconexión por turno contradice el protocolo (diseñado para sesión persistente) — `turn_seq` muerto — **L** — ✅ *decidido: migrar a sesión persistente, ver "Decisiones tomadas"*
 - [ ] **#25** 🟠 `[017]` — `audio_sounddevice.py::start()` sin reintentos si `sd.InputStream()` falla al abrir — **S**
 - [x] **#26** 🟠 `[018]` — Timeouts de conexión triplemente anidados — el más interno (websockets, 10s) nunca se sobreescribe — **XS** — `open_timeout=self._cfg.connect_timeout_s` en `websockets.connect()`
 - [x] **#27** 🟠 `[019]` — `is_silence()` duplicado y divergente entre `audio_sounddevice.py` y `audio_capture.py` — **M** — unificado en `client/core/audio/vad.py` (RMS sobre float32 normalizado, guard de frame vacío) como parte de la extracción del audio kit a core/ ("Fase A", spec `docs/superpowers/specs/2026-07-18-fase-a-audio-kit-design.md`); de paso arregla `test_make_audio_default_termux` introduciendo `client/core/platform_key.py`
 - [x] **#28** 🟠 `[020]` — Secretos en logs DEBUG sin ninguna mitigación (`client_key`, `CF-Access-Client-Secret`) — **XS** — `getLogger('websockets').setLevel(INFO)` en `_setup_logging` después de `basicConfig`, independiente del nivel raíz
-- [ ] **#29** 🟠 `[021]` — `audio_termux.py::stop()` no usa el lock que sí usan `_play()`/`drain()` — **XS**
+- [x] **#29** 🟠 `[021]` — `audio_termux.py::stop()` no usa el lock que sí usan `_play()`/`drain()` — **XS** — `stop()` envuelve `_capture.stop()` + cierre de stream + `pa.terminate()` en `async with self._lock:`. `self._enqueue_carry = b""` queda fuera (assignment atómico). Tests de race + idempotencia en `client/tests/backends/test_audio_termux.py`.
 - [ ] **#103** 🟡 `[022]` — Race: cancel simultáneo con ConnectionClosedError descarta el error real en `_responding` — **S** — *post-Fase 1*
 - [ ] **#110** 🟡 `[023]` — Capturar `ready.session_id` y `ready.capabilities` en `GatewayClient.connect()` — prerequisito del barge-in (enh 9.1) — **S** — *tracking gateway*
 - [ ] **#107** 🟡 `[024]` — Distinguir causa de `close 1008` en handshake: `client_key` inválida vs `agent_not_permitted` vs `agent_not_available` — **XS** — *tracking gateway*
