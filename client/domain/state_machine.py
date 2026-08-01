@@ -247,7 +247,23 @@ async def _recording(
                 frame = await asyncio.wait_for(q.get(), timeout=min(remaining, 0.1))
             except asyncio.TimeoutError:
                 continue
-            await gateway.send_audio(frame)
+            # Issue #23: el check `while loop.time() < deadline` solo se
+            # ejecuta al INICIO de cada iteración. Sin este wait_for, un
+            # `gateway.send_audio(frame)` bloqueante (red degradada,
+            # WebSocket congestionado, tc netem) podría colgar el await
+            # indefinidamente aunque el deadline ya haya pasado. Acotar
+            # send_audio con el `remaining` del deadline lo convierte en
+            # un límite duro: si la red no responde, capturamos el
+            # TimeoutError y rompemos el bucle para que _recording
+            # continúe con send_end.
+            try:
+                await asyncio.wait_for(gateway.send_audio(frame), timeout=remaining)
+            except asyncio.TimeoutError:
+                log.warning(
+                    "RECORDING: deadline alcanzado durante send_audio "
+                    "(%.1fs excedido)", cfg.audio.recording_timeout_s,
+                )
+                break
             if audio.is_silence(frame):
                 silence_count += 1
                 if silence_count >= silence_frames_needed:
