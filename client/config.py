@@ -67,6 +67,10 @@ class OWWConfig:
     idle_detection_timeout_s: float = 0.0  # 0.0 = sin timeout
     debounce_s: float = 2.0
     backend: str = "wyoming"
+    # Tras N reintentos consecutivos fallidos en run_forever, se publica
+    # un evento oww_degraded al EventBus (issue #22). Subir este valor en
+    # redes muy degradadas para evitar spam al usuario.
+    oww_healthcheck_threshold: int = 3
 
 
 @dataclass
@@ -171,6 +175,7 @@ def _oww_from_dict(d: dict) -> OWWConfig:
         reconnect_backoff_s=[float(x) for x in d.get("reconnect_backoff_s", [5, 10, 20, 60])],
         idle_detection_timeout_s=float(d.get("idle_detection_timeout_s", 0.0)),
         debounce_s=float(d.get("debounce_s", 2.0)),
+        oww_healthcheck_threshold=int(d.get("oww_healthcheck_threshold", 3)),
     )
 
 
