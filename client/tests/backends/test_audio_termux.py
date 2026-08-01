@@ -7,6 +7,7 @@ lógica de alineamiento a muestras int16.
 from __future__ import annotations
 
 import asyncio
+import threading
 
 from config import AudioConfig
 from backends.audio_termux import TermuxBackend
@@ -193,3 +194,82 @@ def test_play_chunk_vacio_con_carry_pendiente_no_escribe() -> None:
 
     assert stream.written == []
     assert be._enqueue_carry == bytes([0xAB])
+
+
+def test_stop_no_close_stream_during_concurrent_play() -> None:
+    """Regresión #29: stop() debe adquirir self._lock para serializar con
+    _play() y drain().
+
+    Escenario real de fallo: _play() entra en `async with self._lock` y
+    delega en `run_in_executor(None, self._stream.write, audio)`. Si una
+    coroutine de shutdown llama stop() concurrentemente y stop() no adquiere
+    el lock, puede ejecutar self._stream.stop_stream() / self._stream.close()
+    en paralelo mientras write() aún corre, o dejar self._stream = None
+    mientras otro task está en `run_in_executor(None, self._stream.write, ...)`.
+    En PyAudio real esto se manifiesta como excepciones tipo "Stream closed"
+    / "Invalid sample rate" en write() / write retorna contra un handle
+    inválido.
+
+    Test minimalista: simula el race con un write() bloqueante y verifica
+    que stop() no haya podido cerrar el stream mientras _play() seguía
+    dentro del lock. Sin el fix, stop() cierra el stream a la primera
+    (no respeta lock) y el assert falla; con el fix, stop() espera a que
+    _play() libere el lock antes de cerrar.
+    """
+    be, stream = _backend_with_fake_stream()
+    # Fixture: _stream existe, así el lock de _play() se mantiene mientras
+    # write() (bloqueante) corre en el executor.
+
+    write_entered = threading.Event()
+    release_write = threading.Event()
+
+    original_write = stream.write
+
+    def blocking_write(data: bytes, num_frames: int | None = None) -> None:  # noqa: ARG001
+        write_entered.set()
+        # Bloquea hasta que el test lo libere: simula un write() lento
+        # (por ejemplo, PortAudio con buffer alto bajo carga).
+        assert release_write.wait(timeout=2.0), "timeout esperando liberación de write"
+        return original_write(data, num_frames)
+
+    stream.write = blocking_write  # type: ignore[method-assign]
+
+    async def _run() -> None:
+        # _play() toma self._lock y entra en run_in_executor con write() bloqueado.
+        play_task = asyncio.create_task(be.play_chunk(bytes([1, 2])))
+        await asyncio.get_running_loop().run_in_executor(
+            None, write_entered.wait, 2.0
+        )
+        # _play() ahora está dentro de write() con self._lock retenido.
+        # Lanzar stop() concurrentemente: si no adquiere el lock, cerrará
+        # el stream a la primera.
+        stop_task = asyncio.create_task(be.stop())
+        await asyncio.sleep(0.05)  # tiempo para que stop() intente y avance
+        assert be._stream is not None, (
+            "stop() cerró el stream mientras _play() estaba en write(). "
+            "stop() debe adquirir self._lock para serializar con _play()/drain() "
+            "(issue #29)."
+        )
+        # Liberar write() → _play() suelta lock → stop() puede cerrar.
+        release_write.set()
+        await asyncio.gather(stop_task, play_task)
+        # Después de que stop() termina con lock adquirido, el stream sí está cerrado.
+        assert be._stream is None
+        assert be._pa is None
+
+    asyncio.run(_run())
+
+
+def test_stop_idempotent() -> None:
+    """stop() debe ser idempotente: una segunda llamada no debe romper
+    aunque self._stream y self._pa ya sean None."""
+    be, _ = _backend_with_fake_stream()
+
+    async def _run() -> None:
+        await be.stop()
+        await be.stop()  # segunda vez: no-op seguro
+
+    asyncio.run(_run())
+
+    assert be._stream is None
+    assert be._pa is None
