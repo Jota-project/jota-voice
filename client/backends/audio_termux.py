@@ -49,18 +49,25 @@ class TermuxBackend:
         log.debug("TermuxBackend: PyAudio inicializado")
 
     async def stop(self) -> None:
+        # Importante: este método debe adquirir self._lock igual que _play()
+        # y drain(). Sin el lock, una coroutine de shutdown puede cerrar
+        # self._stream / self._pa mientras _play() está dentro de
+        # `async with self._lock:` en `run_in_executor(None, self._stream.write, audio)`,
+        # provocando en PyAudio errores tipo "Stream closed" / "Invalid sample
+        # rate" contra un handle ya cerrado. Regresión #29.
         self._enqueue_carry = b""
-        await self._capture.stop()
-        if self._stream is not None:
-            try:
-                self._stream.stop_stream()
-                self._stream.close()
-            except Exception:
-                pass
-            self._stream = None
-        if self._pa is not None:
-            self._pa.terminate()
-            self._pa = None
+        async with self._lock:
+            await self._capture.stop()
+            if self._stream is not None:
+                try:
+                    self._stream.stop_stream()
+                    self._stream.close()
+                except Exception:
+                    pass
+                self._stream = None
+            if self._pa is not None:
+                self._pa.terminate()
+                self._pa = None
 
     def get_queue(self) -> asyncio.Queue[bytes]:
         return self._capture.get_queue()
