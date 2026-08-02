@@ -34,6 +34,12 @@ class VoiceEvent:
         # orchestrator/transcriber/tts). Estado informativo, el turno
         # continúa — ver issue #18.
         "gateway_status",
+        # Issue #24: sesión persistente — gateway_ready se publica al
+        # arrancar, los tres siguientes durante IDLE por el listener.
+        "gateway_ready",
+        "interrupted",
+        "turn_start",
+        "tool_call",
         "error",
         "cancelled",
     ]
