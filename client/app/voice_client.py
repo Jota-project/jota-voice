@@ -20,9 +20,9 @@ import signal
 import subprocess
 import sys
 import threading
-import websockets
-from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 from pathlib import Path
+
+from websockets.exceptions import ConnectionClosedError
 
 _HERE = Path(__file__).resolve().parent.parent  # .../client (voice_client.py ahora vive en client/app/)
 if str(_HERE) not in sys.path:
@@ -60,7 +60,7 @@ def _apply_termux_hosts() -> None:
 
     _orig_getaddrinfo = socket.getaddrinfo
 
-    def _getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):  # noqa: A002
+    def _getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
         if isinstance(host, str):
             host = _table.get(host.lower(), host)
         return _orig_getaddrinfo(host, port, family, type, proto, flags)
@@ -83,18 +83,17 @@ def _apply_termux_hosts() -> None:
 
 _apply_termux_hosts()
 
+from backends import registry
+from backends.gateway_client import GatewayClient
 from config import Config, load_config
 from domain.event_bus import EventBus, VoiceEvent
 from domain.state_machine import run as sm_run
-from backends import registry
-from backends.gateway_client import GatewayClient
-
-from app.playback_engine import PlaybackEngine
-from app.display_client import DisplayClient
-from app import control_server
-
 from ui.menubar_base import MenubarCommands
 from ui.menubar_client import MenubarClient
+
+from app import control_server
+from app.display_client import DisplayClient
+from app.playback_engine import PlaybackEngine
 
 
 def _call_soon_threadsafe_safe(loop: asyncio.AbstractEventLoop, stop_event: asyncio.Event) -> None:
@@ -125,7 +124,7 @@ def _setup_logging(level: str) -> None:
 
 async def gateway_idle_listener(
     bus: EventBus,
-    gateway: "GatewayClient",
+    gateway: GatewayClient,
 ) -> None:
     """Issue #24: consume gateway.receive() durante el estado IDLE.
 
@@ -566,9 +565,9 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
     # Mantener el write_fd vivo durante toda la vida del proceso — si se
     # recogiese el int, CPython lo cerraría y las señales volverían al
     # camino lento (NSTimer).
-    _write_fd_holder: list[int] = [_write_fd]  # noqa: F841 — ref intencional
+    _write_fd_holder: list[int] = [_write_fd]
 
-    import AppKit  # noqa: F401 — import lazy para no romper tests no-Cocoa
+    import AppKit
     import Foundation
     _fh = AppKit.NSFileHandle.alloc().initWithFileDescriptor_(_read_fd)
 

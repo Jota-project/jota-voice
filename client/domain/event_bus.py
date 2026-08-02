@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import AsyncGenerator, AsyncIterator, Literal
+from typing import Literal
 
 
 @dataclass(frozen=True)

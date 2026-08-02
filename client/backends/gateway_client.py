@@ -3,8 +3,9 @@ import json
 import logging
 import os
 import warnings
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from domain.event_bus import EventBus

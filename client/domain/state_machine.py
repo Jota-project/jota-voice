@@ -20,16 +20,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
 
-import numpy as np
-
+from app.playback_engine import PlaybackEngine
 from backends.audio_base import AudioBackend
 from backends.gateway_client import GatewayClient
 from config import Config
 
 from .event_bus import EventBus, VoiceEvent
-from app.playback_engine import PlaybackEngine
 
 log = logging.getLogger(__name__)
 
@@ -370,7 +367,7 @@ async def _responding(
         TURN_END_GRACE_S = 2.0
         gen = gateway.receive()
         loop = asyncio.get_running_loop()
-        grace_deadline: Optional[float] = None
+        grace_deadline: float | None = None
 
         while True:
             try:
@@ -564,7 +561,7 @@ async def run(
     audio: AudioBackend,
     gateway: GatewayClient,
     playback: PlaybackEngine,
-    cancel_event: Optional[asyncio.Event] = None,
+    cancel_event: asyncio.Event | None = None,
 ) -> None:
     if cancel_event is None:
         cancel_event = asyncio.Event()
