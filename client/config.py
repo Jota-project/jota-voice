@@ -85,6 +85,14 @@ class AudioConfig:
     input_device: Optional[int] = None
     output_device: Optional[int] = None
     backend: Optional[str] = None
+    # Reintentos al abrir el stream de captura. PortAudio puede fallar
+    # transientemente al abrir un InputStream (device busy, host API no
+    # lista, dispositivo recién desconectado). Cada elemento es el delay
+    # ANTES de ese intento; la longitud de la lista es también el número
+    # MÁXIMO de intentos. Si la lista está vacía, se intenta una sola vez
+    # sin reintento. Patrón equivalente a OWWConfig.reconnect_backoff_s
+    # (issue #25).
+    start_retry_backoff_s: List[float] = field(default_factory=lambda: [0.5, 1.0, 2.0])
 
 
 @dataclass
@@ -191,6 +199,9 @@ def _audio_from_dict(d: dict) -> AudioConfig:
         vad_rms_threshold=float(d.get("vad_rms_threshold", 200.0)),
         input_device=d.get("input_device"),
         output_device=d.get("output_device"),
+        start_retry_backoff_s=[
+            float(x) for x in d.get("start_retry_backoff_s", [0.5, 1.0, 2.0])
+        ],
     )
 
 

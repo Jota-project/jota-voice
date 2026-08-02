@@ -6,9 +6,13 @@ is_silence() y get_preroll() con frames sintéticos.
 from __future__ import annotations
 
 import asyncio
+import sys
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+
+import sounddevice as sd
 
 from config import AudioConfig
 from backends.audio_sounddevice import SounddeviceBackend
@@ -194,3 +198,97 @@ def test_enqueue_and_wait_sleeps_solo_la_duracion_real() -> None:
 
     expected_duration = len(audio) / (24000 * 2)
     assert slept == [pytest.approx(expected_duration)]
+
+
+# --- issue #25: start() debe reintentar ante PortAudioError transitorio ---
+
+
+def _install_fake_sd(monkeypatch, make_input_stream):
+    """Instala un mock de sounddevice en sys.modules que ``start()`` ve al
+    hacer ``import sounddevice as sd``. ``make_input_stream`` es un callable
+    ``(**kwargs)`` que decide en cada intento si lanza PortAudioError o
+    devuelve un stream con ``.start()`` válido."""
+    fake_sd = MagicMock()
+    fake_sd.PortAudioError = sd.PortAudioError  # reusamos la real
+    fake_sd.InputStream = MagicMock(side_effect=make_input_stream)
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
+    return fake_sd
+
+
+def _no_wait_sleep(monkeypatch):
+    """Sustituye asyncio.sleep en el módulo de audio para no esperar
+    realmente entre reintentos (los 0.5+1.0+2.0=3.5s harían el test lento)."""
+    import backends.audio_sounddevice as mod
+
+    async def fake_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(mod.asyncio, "sleep", fake_sleep)
+
+
+def test_start_retries_on_portaudio_error_then_succeeds(monkeypatch) -> None:
+    """Issue #25: si sd.InputStream() lanza PortAudioError en los primeros
+    intentos (p.ej. 'device busy', host API no lista, dispositivo recién
+    desconectado), start() debe reintentar hasta tener éxito y NO dejar al
+    cliente sin captura."""
+    attempts = {"n": 0}
+    successful_stream = MagicMock()
+    successful_stream.start = MagicMock(return_value=None)
+
+    def make_input_stream(**_kwargs):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise sd.PortAudioError(f"transient (attempt {attempts['n']})")
+        return successful_stream
+
+    _install_fake_sd(monkeypatch, make_input_stream)
+    _no_wait_sleep(monkeypatch)
+
+    be = SounddeviceBackend(_cfg())
+    asyncio.run(be.start())  # no debe lanzar
+
+    assert attempts["n"] == 3, f"esperaba 3 intentos, vi {attempts['n']}"
+    assert be._input_stream is successful_stream
+    successful_stream.start.assert_called_once()
+
+
+def test_start_raises_after_all_retries_exhausted(monkeypatch) -> None:
+    """Si TODOS los intentos fallan, la última PortAudioError se propaga al
+    llamador para que el usuario vea el problema en vez de quedarse en
+    idle perpetuo sin señal."""
+    attempts = {"n": 0}
+
+    def make_input_stream(**_kwargs):
+        attempts["n"] += 1
+        raise sd.PortAudioError(f"always fails (attempt {attempts['n']})")
+
+    _install_fake_sd(monkeypatch, make_input_stream)
+    _no_wait_sleep(monkeypatch)
+
+    be = SounddeviceBackend(_cfg())
+    with pytest.raises(sd.PortAudioError, match="always fails"):
+        asyncio.run(be.start())
+
+    # 3 = longitud del start_retry_backoff_s default ([0.5, 1.0, 2.0])
+    assert attempts["n"] == 3, f"esperaba 3 intentos, vi {attempts['n']}"
+
+
+def test_start_succeeds_on_first_try_normal(monkeypatch) -> None:
+    """No regresión: si NO hay error, start() debe abrir el stream en el
+    primer intento sin reintentos espurios."""
+    attempts = {"n": 0}
+    successful_stream = MagicMock()
+    successful_stream.start = MagicMock(return_value=None)
+
+    def make_input_stream(**_kwargs):
+        attempts["n"] += 1
+        return successful_stream
+
+    _install_fake_sd(monkeypatch, make_input_stream)
+    _no_wait_sleep(monkeypatch)
+
+    be = SounddeviceBackend(_cfg())
+    asyncio.run(be.start())
+
+    assert attempts["n"] == 1, f"sin error no debería reintentar (vi {attempts['n']})"
+    assert be._input_stream is successful_stream

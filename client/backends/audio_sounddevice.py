@@ -79,10 +79,43 @@ class SounddeviceBackend:
         if self._cfg.input_device is not None:
             kwargs["device"] = self._cfg.input_device
 
-        self._input_stream = sd.InputStream(**kwargs)
-        self._input_stream.start()
+        self._input_stream = await self._open_input_stream_with_backoff(sd, kwargs)
+        # _open_input_stream_with_backoff ya hace InputStream(...) + .start();
+        # aquí solo queda registrar el stream en self y loguear el éxito.
         log.info("SounddeviceBackend: captura abierta (%d Hz, %d ch, block=%d)",
                  self._cfg.sample_rate, self._cfg.channels, self._cfg.frames_per_buffer)
+
+    async def _open_input_stream_with_backoff(self, sd, kwargs: dict):
+        """Abre ``sd.InputStream(**kwargs)`` y llama a ``.start()`` reintentando
+        ante PortAudioError transitorio (issue #25). Patrón equivalente a
+        ``OWWClient.connect_with_backoff()``: la lista de ``start_retry_backoff_s``
+        actúa como timing del sleep entre intentos Y como número máximo de
+        intentos (su longitud). Si la lista está vacía, un solo intento.
+        Tras agotar los reintentos se relanza la última excepción."""
+        backoff = list(self._cfg.start_retry_backoff_s)
+        if not backoff:
+            stream = sd.InputStream(**kwargs)
+            stream.start()
+            return stream
+
+        last_exc: Exception | None = None
+        for idx, delay in enumerate(backoff):
+            try:
+                stream = sd.InputStream(**kwargs)
+                stream.start()
+                return stream
+            except sd.PortAudioError as exc:
+                last_exc = exc
+                if idx == len(backoff) - 1:
+                    break
+                log.warning(
+                    "SounddeviceBackend.start: PortAudioError transitorio (%s), "
+                    "reintentando en %.2fs (intento %d/%d)",
+                    exc, delay, idx + 1, len(backoff),
+                )
+                await asyncio.sleep(delay)
+        assert last_exc is not None  # siempre hay excepción si llegamos aquí
+        raise last_exc
 
     async def stop(self) -> None:
         self._capture_stop.set()
