@@ -91,3 +91,10 @@ async def _run_test() -> None:
 
 def test_event_bus() -> None:
     asyncio.run(_run_test())
+
+
+def test_voice_event_acepta_tipos_nuevos_issue_24():
+    """Issue #24: VoiceEvent admite los tipos nuevos sin mypy complaint."""
+    for event_type in ("gateway_ready", "interrupted", "turn_start", "tool_call"):
+        ev = VoiceEvent(type=event_type, data={"x": 1})  # type: ignore[arg-type]
+        assert ev.type == event_type
