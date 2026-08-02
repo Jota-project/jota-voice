@@ -505,3 +505,109 @@ async def test_connect_passes_open_timeout_to_websockets() -> None:
             f"open_timeout esperaba 30.0 (de connect_timeout_s), "
             f"obtuve {call_kwargs['open_timeout']}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #24: connect() parsea ready completo y publica gateway_ready al bus.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_connect_parsea_session_id_y_agent_de_ready(monkeypatch):
+    """Issue #24: connect() extrae session_id, agent y capabilities de ready."""
+    from config import GatewayConfig
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
+    ws_mock = MagicMock()
+    ws_mock.send = AsyncMock()
+    ws_mock.recv = AsyncMock(return_value=json.dumps({
+        "type": "ready",
+        "session_id": "hab_sito:1751289600000",
+        "agent": "main",
+        "input_mode": "audio",
+        "output_mode": ["audio", "text", "status"],
+        "requested_capabilities": {"barge_in": True, "tts": True, "transcriber": True},
+        "live_capabilities": {"barge_in": True, "tts": False, "transcriber": True},
+    }))
+    sys.modules["websockets"].connect = AsyncMock(return_value=ws_mock)
+
+    client = GatewayClient(cfg)
+    await client.connect()
+
+    assert client._session_id == "hab_sito:1751289600000"
+    assert client._agent == "main"
+    assert client._capabilities["requested"]["barge_in"] is True
+    assert client._capabilities["live"]["tts"] is False
+
+
+@pytest.mark.asyncio
+async def test_connect_publica_gateway_ready_al_bus(monkeypatch):
+    """Issue #24: connect() publica gateway_ready al bus con session_id."""
+    from config import GatewayConfig
+    from domain.event_bus import EventBus
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
+    ws_mock = MagicMock()
+    ws_mock.send = AsyncMock()
+    ws_mock.recv = AsyncMock(return_value=json.dumps({
+        "type": "ready", "session_id": "s-1", "agent": "main",
+        "requested_capabilities": {}, "live_capabilities": {},
+    }))
+    sys.modules["websockets"].connect = AsyncMock(return_value=ws_mock)
+
+    bus = EventBus()
+    captured = []
+
+    async def _capture_one():
+        async for ev in bus.subscribe():
+            captured.append(ev)
+            break
+
+    t = asyncio.create_task(_capture_one())
+    await asyncio.sleep(0)  # deja que el suscriptor se registre
+    client = GatewayClient(cfg, bus=bus)
+    await client.connect()
+    await asyncio.wait_for(t, timeout=1.0)
+
+    gateway_ready_evts = [e for e in captured if e.type == "gateway_ready"]
+    assert len(gateway_ready_evts) == 1
+    assert gateway_ready_evts[0].data["session_id"] == "s-1"
+
+
+@pytest.mark.asyncio
+async def test_connect_no_publica_sin_bus(monkeypatch):
+    """Issue #24: sin bus inyectado, connect() no intenta publicar."""
+    from config import GatewayConfig
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
+    ws_mock = MagicMock()
+    ws_mock.send = AsyncMock()
+    ws_mock.recv = AsyncMock(return_value=json.dumps({
+        "type": "ready", "session_id": "s-1", "agent": "main",
+        "requested_capabilities": {}, "live_capabilities": {},
+    }))
+    sys.modules["websockets"].connect = AsyncMock(return_value=ws_mock)
+
+    client = GatewayClient(cfg)  # bus=None
+    await client.connect()  # no debe intentar publicar (no fallaría sin bus porque la rama está guardada)
+
+
+def test_connect_handshake_sin_device_id(monkeypatch):
+    """Issue #24: handshake NO incluye device_id (el gateway lo ignora)."""
+    from config import GatewayConfig
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
+    ws_mock = MagicMock()
+    ws_mock.send = AsyncMock()
+    ws_mock.recv = AsyncMock(return_value=json.dumps({
+        "type": "ready", "session_id": "s-1", "agent": "main",
+        "requested_capabilities": {}, "live_capabilities": {},
+    }))
+    captured_send = []
+    ws_mock.send.side_effect = lambda x: captured_send.append(json.loads(x))
+    sys.modules["websockets"].connect = AsyncMock(return_value=ws_mock)
+
+    asyncio.run(GatewayClient(cfg).connect())
+
+    assert len(captured_send) == 1
+    handshake = captured_send[0]
+    assert "device_id" not in handshake, "device_id no debe viajar en el handshake"
+    assert handshake["client_key"] == "test"
+    assert handshake["input_mode"] == "audio"
+    assert "audio" in handshake["output_mode"]

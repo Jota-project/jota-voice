@@ -98,7 +98,6 @@ class GatewayClient:
             raise
         handshake = {
             "client_key": self._cfg.client_key,
-            "device_id": self._legacy_device_id or "unknown",
             "input_mode": "audio",
             "output_mode": ["audio", "text", "status"],
         }
@@ -126,7 +125,29 @@ class GatewayClient:
         msg = json.loads(raw)
         msg_type = msg.get("type", "")
         if msg_type == "ready":
-            log.debug("Gateway listo (device=%s)", self._legacy_device_id)
+            # Issue #24: parseo completo de ready. session_id, agent,
+            # requested_capabilities y live_capabilities se guardan para
+            # correlación y para barge-in (issue #110 de paso).
+            self._session_id = msg.get("session_id")
+            self._agent = msg.get("agent")
+            self._capabilities = {
+                "requested": msg.get("requested_capabilities", {}),
+                "live": msg.get("live_capabilities", {}),
+            }
+            log.debug(
+                "Gateway listo (device=? session=%s agent=%s live=%s)",
+                self._session_id, self._agent, self._capabilities.get("live"),
+            )
+            if self._bus is not None:
+                from domain.event_bus import VoiceEvent
+                self._bus.publish(VoiceEvent(
+                    type="gateway_ready",
+                    data={
+                        "session_id": self._session_id,
+                        "agent": self._agent,
+                        "capabilities": self._capabilities,
+                    },
+                ))
             return
         if msg_type == "error":
             raise RuntimeError(
