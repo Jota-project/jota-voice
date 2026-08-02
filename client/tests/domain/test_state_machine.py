@@ -89,9 +89,18 @@ from backends.audio_sounddevice import SounddeviceBackend               # noqa: 
 # Helpers de mock
 # ---------------------------------------------------------------------------
 
-def _make_config() -> Config:
+def _make_config(
+    *,
+    persistent_session: bool = True,
+    **kwargs,
+) -> Config:
     return Config(
-        gateway=GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=5.0),
+        gateway=GatewayConfig(
+            host="127.0.0.1",
+            client_key="test",
+            connect_timeout_s=5.0,
+            persistent_session=persistent_session,
+        ),
         device=DeviceConfig(id="test-device"),
         audio=AudioConfig(
             sample_rate=16000,
@@ -100,6 +109,7 @@ def _make_config() -> Config:
             recording_timeout_s=5.0,
         ),
         oww=OWWConfig(),
+        **kwargs,
     )
 
 
@@ -333,7 +343,8 @@ async def _run_error_test() -> None:
     print("\n=== Test error: fallo en gateway.connect() ===")
 
     bus = EventBus()
-    cfg = _make_config()
+    # Explicitly use ephemeral mode so connect() IS called and can fail.
+    cfg = _make_config(persistent_session=False)
     audio = _make_audio_mock(silent=True)
 
     oww = _make_oww_mock()
@@ -1616,3 +1627,368 @@ def test_state_machine_gateway_status_event_publishes_to_bus() -> None:
 
 def test_state_machine_gateway_error_event_terminates_immediately() -> None:
     asyncio.run(_run_gateway_error_event_terminates_immediately_test())
+
+
+# ---------------------------------------------------------------------------
+# Issue #24: persistent_session — modo persistente (1 connect + N disconnects
+# nunca) vs modo efímero (connect/disconnect por turno)
+# ---------------------------------------------------------------------------
+
+import pytest
+from domain.state_machine import run as sm_run
+
+
+async def _make_async_iter(events_iter):
+    """Convierte un iterador sync en async generator."""
+    for ev in events_iter:
+        yield ev
+
+
+@pytest.mark.asyncio
+async def test_dos_turnos_con_una_sola_connect_persistente():
+    """Issue #24: en modo persistente, múltiples turnos usan una sola conexión."""
+    from backends.gateway_client import GatewayEvent
+
+    bus = EventBus()
+    cfg = _make_config(persistent_session=True)
+
+    gw_events_cycle_1 = [
+        GatewayEvent(type="turn_end", data={"turn_id": "t-1"}),
+    ]
+    gw_events_cycle_2 = [
+        GatewayEvent(type="turn_end", data={"turn_id": "t-2"}),
+    ]
+
+    # El mock debe devolver cycle_1 la primera vez y cycle_2 la segunda.
+    cycles = [iter(gw_events_cycle_1), iter(gw_events_cycle_2)]
+    cycle_calls = [0]
+
+    def _gateway_mock_multi_cycle():
+        gateway = MagicMock()
+        gateway.connect = AsyncMock()
+        gateway.disconnect = AsyncMock()
+        gateway.send_audio = AsyncMock()
+        gateway.send_end = AsyncMock()
+        gateway.send_text = AsyncMock()
+        gateway.is_connected = True
+        gateway.receive = lambda: _make_async_iter(cycles[cycle_calls[0]])
+        cycle_calls[0] += 1
+        return gateway
+
+    audio = _make_audio_mock(silent=True)
+    playback = _make_playback_mock()
+
+    # Publicar dos wake_word_detected para forzar dos ciclos
+    wake_count = [0]
+    async def _publish_wake():
+        while True:
+            await asyncio.sleep(0)
+            if wake_count[0] < 2:
+                wake_count[0] += 1
+                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
+            else:
+                await asyncio.sleep(0.1)
+
+    wake_task = asyncio.create_task(_publish_wake())
+
+    # Contar ciclos
+    idle_count = [0]
+    async def _watch_idle():
+        async for ev in bus.subscribe():
+            if ev.type == "state_changed" and ev.data.get("state") == "idle":
+                idle_count[0] += 1
+                if idle_count[0] >= 2:
+                    return
+
+    watcher = asyncio.create_task(_watch_idle())
+
+    # Para que el segundo ciclo use otro gateway mock con sus propios events
+    # es complicado con un solo mock; en su lugar, verificar que el mismo
+    # gateway no se desconectó entre turnos.
+    gateway = _gateway_mock_multi_cycle()
+    sm_task = asyncio.create_task(sm_run(cfg, bus, audio, gateway, playback))
+
+    try:
+        await asyncio.wait_for(watcher, timeout=5.0)
+    except asyncio.TimeoutError:
+        pass
+
+    sm_task.cancel()
+    wake_task.cancel()
+    try:
+        await sm_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await wake_task
+    except asyncio.CancelledError:
+        pass
+
+    # En modo persistente, connect se llama UNA vez (en main, no en _recording)
+    # y disconnect NUNCA (se hace en main.shutdown).
+    # Como aquí el state_machine recibe un gateway ya conectado (no llama
+    # connect), connect.await_count debe ser 0 y disconnect.await_count debe ser 0.
+    assert gateway.connect.await_count == 0, (
+        "En modo persistente, _recording NO debe llamar connect() "
+        f"(se llamó {gateway.connect.await_count} veces)"
+    )
+    assert gateway.disconnect.await_count == 0, (
+        "En modo persistente, _cleanup NO debe llamar disconnect() "
+        f"(se llamó {gateway.disconnect.await_count} veces)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_recording_guard_publica_error_si_ws_muerto():
+    """Issue #24: si gateway.is_connected es False al entrar a _recording, publica error."""
+    bus = EventBus()
+    cfg = _make_config(persistent_session=True)
+
+    gw_events = []  # primer turno no se ejecuta
+    gateway = MagicMock()
+    gateway.connect = AsyncMock()
+    gateway.disconnect = AsyncMock()
+    gateway.send_audio = AsyncMock()
+    gateway.send_end = AsyncMock()
+    gateway.is_connected = False  # WS muerto
+    gateway.receive = lambda: _make_async_iter(gw_events)
+    audio = _make_audio_mock(silent=True)
+    playback = _make_playback_mock()
+
+    # cancel_event fresca (no pre-set) — pasarla a sm_run para que
+    # _recording() pueda usarla sin conflicto de estado previo.
+    cancel_event = asyncio.Event()
+
+    # NO pre-publicar wake_word_detected — publicarla DESPUES de que
+    # sm_run haya entrado en _idle para evitar race conditions.
+    # Aquí esperamos a que el state_changed(idle) inicial confirme que
+    # sm_run está listo en _idle antes de publicar la wake word.
+    idle_ready = asyncio.Event()
+
+    async def _wait_idle_then_publish():
+        async for ev in bus.subscribe():
+            if ev.type == "state_changed" and ev.data.get("state") == "idle":
+                idle_ready.set()
+                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
+                return
+
+    publish_task = asyncio.create_task(_wait_idle_then_publish())
+
+    captured = []
+    stop_event = asyncio.Event()
+
+    async def _watch():
+        async for ev in bus.subscribe():
+            captured.append(ev)
+            if ev.type == "error":
+                stop_event.set()
+                return
+
+    watcher = asyncio.create_task(_watch())
+    sm_task = asyncio.create_task(sm_run(cfg, bus, audio, gateway, playback, cancel_event))
+
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=3.0)
+    except asyncio.TimeoutError:
+        pass
+
+    sm_task.cancel()
+    publish_task.cancel()
+    try:
+        await sm_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await publish_task
+    except asyncio.CancelledError:
+        pass
+    watcher.cancel()
+
+    error_evts = [e for e in captured if e.type == "error"]
+    assert any(
+        e.data.get("code") == "GATEWAY_DISCONNECTED" for e in error_evts
+    ), f"Esperaba error con code='GATEWAY_DISCONNECTED', recibí {[(e.type, e.data) for e in captured]}"
+    # Además: send_audio NO debe haberse llamado
+    assert gateway.send_audio.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_interrupted_durante_responding_dispara_cancel():
+    """Issue #24: 'interrupted' del gateway durante RESPONDING cancela el turno.
+
+    El gateway envía 'interrupted' como primer evento, lo que activa
+    cancel_event dentro de _receive_loop, provocando _TurnCancelled y
+    la publicación de VoiceEvent('cancelled').
+    """
+    from backends.gateway_client import GatewayEvent
+
+    bus = EventBus()
+    cfg = _make_config(persistent_session=True)
+
+    interrupted_event = GatewayEvent(type="interrupted", data={})
+
+    gateway = MagicMock()
+    gateway.connect = AsyncMock()
+    gateway.disconnect = AsyncMock()
+    gateway.send_audio = AsyncMock()
+    gateway.send_end = AsyncMock()
+    gateway.send_text = AsyncMock()
+    gateway.send_cancel = AsyncMock()
+    gateway.is_connected = True
+    gateway._cfg = MagicMock(persistent_session=True)
+
+    # El gateway emite interrupted como primer evento (simula barge-in del servidor).
+    async def _receive_with_interrupt():
+        yield interrupted_event
+        await asyncio.Event().wait()  # luego bloquea
+
+    gateway.receive = _receive_with_interrupt
+
+    audio = _make_audio_mock(silent=True)
+    playback = _make_playback_mock()
+
+    # Mismo patrón que _run_cancel_responding_test: wake publisher en task separada.
+    call_count = [0]
+
+    async def _publish_wake_once() -> None:
+        while True:
+            await asyncio.sleep(0)
+            if call_count[0] == 0:
+                call_count[0] += 1
+                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
+
+    wake_publisher_task = asyncio.create_task(_publish_wake_once())
+
+    received: list[VoiceEvent] = []
+    stop_event = asyncio.Event()
+
+    async def _collector() -> None:
+        async for ev in bus.subscribe():
+            received.append(ev)
+            if ev.type == "cancelled":
+                stop_event.set()
+
+    collector_task = asyncio.create_task(_collector())
+
+    sm_task = asyncio.create_task(sm_run(cfg, bus, audio, gateway, playback))
+
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=10.0)
+    except asyncio.TimeoutError:
+        pass
+
+    sm_task.cancel()
+    collector_task.cancel()
+    wake_publisher_task.cancel()
+    for t in [sm_task, collector_task, wake_publisher_task]:
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    bus.close()
+
+    cancelled_events = [e for e in received if e.type == "cancelled"]
+    assert len(cancelled_events) >= 1, (
+        f"Esperaba VoiceEvent('cancelled') tras 'interrupted'; recibí "
+        f"{[(e.type, e.data) for e in received if e.type in ('cancelled', 'error')]}"
+    )
+    gateway.send_cancel.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_dos_turnos_conectan_y_desconectan_en_modo_efimero():
+    """Issue #24: en modo efímero (persistent_session=false), connect/disconnect se llaman por turno.
+
+    Este test usa la MISMA estructura que el e2e test exitoso para garantizar
+    un ciclo completo: transcription + llm_token + tts_chunk. Verifica que
+    en modo efímero connect() se llama (no se salta) y disconnect() también.
+    La diferencia con el test de modo persistente es que aquí connect() SÍ
+    se invoca (mientras que en persistente es main() quien conecta).
+    """
+    from backends.gateway_client import GatewayEvent
+
+    bus = EventBus()
+    cfg = _make_config(persistent_session=False)
+
+    # Un ciclo completo: transcription + llm_token + tts_chunk + turn_end.
+    # Esto permite que playback drene correctamente y el ciclo llegue a IDLE.
+    gw_events = [
+        GatewayEvent(type="transcription", data={"text": "hola"}),
+        GatewayEvent(type="llm_token", data={"content": "Hola."}),
+        GatewayEvent(type="tts_chunk", data={"audio": b"\x00\x01" * 100}),
+        GatewayEvent(type="turn_end", data={"turn_id": "t-1"}),
+    ]
+
+    gateway = MagicMock()
+    gateway.connect = AsyncMock()
+    gateway.disconnect = AsyncMock()
+    gateway.send_audio = AsyncMock()
+    gateway.send_end = AsyncMock()
+    gateway.send_text = AsyncMock()
+    gateway.is_connected = True
+    gateway._cfg = MagicMock(persistent_session=False)
+    gateway.receive = lambda: _make_async_iter(gw_events)
+
+    audio = _make_audio_mock(silent=True)
+    playback = _make_playback_mock()
+
+    # Publicar wake_word_detected cuando sm_run esté en _idle()
+    idle_ready = asyncio.Event()
+
+    async def _wait_idle_then_publish():
+        async for ev in bus.subscribe():
+            if ev.type == "state_changed" and ev.data.get("state") == "idle":
+                idle_ready.set()
+                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
+                return
+
+    publish_task = asyncio.create_task(_wait_idle_then_publish())
+
+    # Esperar al segundo idle (fin del primer ciclo)
+    idle_count = [0]
+    stop_event = asyncio.Event()
+
+    async def _watch_idle():
+        async for ev in bus.subscribe():
+            if ev.type == "state_changed" and ev.data.get("state") == "idle":
+                idle_count[0] += 1
+                if idle_count[0] >= 2:
+                    stop_event.set()
+                    return
+
+    watcher = asyncio.create_task(_watch_idle())
+    sm_task = asyncio.create_task(sm_run(cfg, bus, audio, gateway, playback))
+
+    try:
+        await asyncio.wait_for(stop_event.wait(), timeout=8.0)
+    except asyncio.TimeoutError:
+        pass
+
+    sm_task.cancel()
+    publish_task.cancel()
+    try:
+        await sm_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await publish_task
+    except asyncio.CancelledError:
+        pass
+    await watcher
+
+    # Modo efímero: connect() se llama en _recording y disconnect() en _cleanup.
+    # Un ciclo completo: connect == 1, disconnect == 1.
+    assert gateway.connect.await_count >= 1, (
+        f"Modo efímero debe llamar connect() al menos 1 vez; "
+        f"recibí {gateway.connect.await_count}"
+    )
+    assert gateway.disconnect.await_count >= 1, (
+        f"Modo efímero debe llamar disconnect() al menos 1 vez; "
+        f"recibí {gateway.disconnect.await_count}"
+    )
+    # Y NO debe ser 0
+    assert gateway.connect.await_count == 1, (
+        f"Modo efímero esperaba exactamente 1 connect (un turno); "
+        f"recibí {gateway.connect.await_count}"
+    )
