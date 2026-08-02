@@ -27,6 +27,10 @@ class GatewayConfig:
     scheme: str = "ws"              # "ws" o "wss"; solo se usa cuando NO hay url completa
     connect_timeout_s: float = 10.0
     url: Optional[str] = None
+    # Issue #24: arquitectura de sesión. Default True → handshake eager
+    # al startup del proceso. Si False, conserva el comportamiento reconnect-
+    # per-turn (código actual). Sin override per-launch — solo YAML.
+    persistent_session: bool = True
 
     @property
     def ws_url(self) -> str:
@@ -163,6 +167,7 @@ def _gateway_from_dict(d: dict) -> GatewayConfig:
         scheme=d.get("scheme", "ws"),
         connect_timeout_s=float(d.get("connect_timeout_s", 10.0)),
         url=d.get("url"),
+        persistent_session=bool(d.get("persistent_session", True)),
     )
 
 
