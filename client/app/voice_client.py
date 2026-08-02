@@ -201,7 +201,8 @@ async def main(
     gateway = GatewayClient(cfg.gateway, device_id=cfg.device.id)
 
     # --- Issue #24: eager connect en modo persistente ---
-    idle_task = None
+    idle_task_holder: list[asyncio.Task | None] = []
+    coordinator_task: asyncio.Task | None = None
     if cfg.gateway.persistent_session:
         try:
             await gateway.connect()
@@ -216,9 +217,40 @@ async def main(
                 log.exception("No se pudo reflejar el error en el menubar")
             bus.close()
             return
-        idle_task = asyncio.create_task(
-            gateway_idle_listener(bus, gateway),
-            name="gateway_idle",
+        idle_task_holder.append(
+            asyncio.create_task(
+                gateway_idle_listener(bus, gateway),
+                name="gateway_idle",
+            )
+        )
+
+        # --- Task 9: coordinador que pausa/re-arranca idle_task según estado ---
+        async def _idle_coordinator() -> None:
+            """Sincroniza idle_task con el estado vía bus.state_changed."""
+            nonlocal coordinator_task
+            async for ev in bus.subscribe():
+                if ev.type != "state_changed":
+                    continue
+                state = ev.data.get("state", "")
+                if state in ("recording", "responding"):
+                    # Pausar idle_task: cancellarlo (no consume WS durante un turno)
+                    if idle_task_holder[0] is not None and not idle_task_holder[0].done():
+                        idle_task_holder[0].cancel()
+                        try:
+                            await idle_task_holder[0]
+                        except asyncio.CancelledError:
+                            pass
+                        idle_task_holder[0] = None
+                elif state == "idle":
+                    # Re-arrancar idle_task si está cancelado o terminado
+                    if idle_task_holder[0] is None or idle_task_holder[0].done():
+                        idle_task_holder[0] = asyncio.create_task(
+                            gateway_idle_listener(bus, gateway),
+                            name="gateway_idle",
+                        )
+
+        coordinator_task = asyncio.create_task(
+            _idle_coordinator(), name="idle_coordinator"
         )
 
     playback = PlaybackEngine(bus, audio)
@@ -392,6 +424,14 @@ async def main(
     finally:
         log.info("Apagando jota-voice…")
 
+        # Task 9: coordinator_task drain ANTES del gather (como idle_task).
+        if coordinator_task is not None:
+            coordinator_task.cancel()
+            try:
+                await coordinator_task
+            except asyncio.CancelledError:
+                pass
+
         menubar_task.cancel()
         try:
             await menubar_task
@@ -404,17 +444,22 @@ async def main(
         control_task.cancel()
         stop_task.cancel()
 
-        await asyncio.gather(
-            sm_task, oww_task, display_task, control_task, stop_task,
-            return_exceptions=True,
-        )
+        # return_exceptions no suppresses CancelledError (not a subclass of
+        # Exception in py38+), así que envolvemos en try/except.
+        try:
+            await asyncio.gather(
+                sm_task, oww_task, display_task, control_task, stop_task,
+                return_exceptions=True,
+            )
+        except asyncio.CancelledError:
+            pass
 
         # idle_task must be drained AFTER gather so gather's CancelledError
         # doesn't propagate out of the finally before we get to drain it.
-        if idle_task is not None:
-            idle_task.cancel()
+        if idle_task_holder[0] is not None:
+            idle_task_holder[0].cancel()
             try:
-                await idle_task
+                await idle_task_holder[0]
             except asyncio.CancelledError:
                 pass
 
