@@ -20,6 +20,8 @@ import signal
 import subprocess
 import sys
 import threading
+import websockets
+from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent.parent  # .../client (voice_client.py ahora vive en client/app/)
@@ -119,6 +121,63 @@ def _setup_logging(level: str) -> None:
     # del logger raíz (incluido DEBUG en config.yaml) haga que herede
     # DEBUG — fix sugerido por la propia issue, mínimo y robusto.
     logging.getLogger("websockets").setLevel(logging.INFO)
+
+
+async def gateway_idle_listener(
+    bus: EventBus,
+    gateway: "GatewayClient",
+) -> None:
+    """Issue #24: consume gateway.receive() durante el estado IDLE.
+
+    Publica al bus los eventos que llegan del gateway mientras el usuario no
+    está hablando. Dispatch:
+      - 'status' → bus.publish(VoiceEvent('gateway_status', data=...))
+      - 'interrupted' / 'turn_start' / 'tool_call' → log + descartar
+        (issue #24 no acciona barge-in sobre push turns — issue separada)
+      - 'ConnectionClosedError' → publica 'gateway_status' extendido con
+        state:'disconnected', marca gateway._ws = None, termina (la
+        reconexión perezosa se hace en el próximo _recording).
+      - otras excepciones no-CancelledError → log.exception + bus.publish
+        'error', termina (patrón #63 para este task específicamente).
+
+    Termina en silencio al recibir 'turn_end' (turno terminó antes de que
+    empezara RESPONDING) o 'ConnectionClosedOK'.
+    """
+    log = logging.getLogger(__name__)
+    log.info("Gateway: idle_listener arrancado (session=%s)", gateway._session_id)
+    try:
+        gen = gateway.receive()
+        while True:
+            try:
+                ev = await gen.__anext__()
+            except StopAsyncIteration:
+                return
+            except ConnectionClosedError as exc:
+                log.warning("Gateway: idle_listener ve WS cerrado: %s", exc)
+                gateway._ws = None  # marca desconectado para reconexión perezosa
+                bus.publish(VoiceEvent(type="gateway_status", data={"state": "disconnected"}))
+                return
+            if ev.type == "status":
+                # #18 preexistente; el listener solo lo retransmite al bus.
+                bus.publish(VoiceEvent(type="gateway_status", data=ev.data))
+                log.info("IDLE: gateway status → %r", ev.data)
+            elif ev.type in ("interrupted", "turn_start", "tool_call"):
+                # issue #24 scope recortado — log + descartar.
+                log.warning(
+                    "IDLE: gateway evento %r recibido y descartado "
+                    "(fuera de scope #24 — issue separada)", ev.type,
+                )
+            elif ev.type == "turn_end":
+                log.debug("IDLE: turn_end antes de empezar RESPONDING; idle_listener termina")
+                return
+            else:
+                log.debug("IDLE: gateway evento ignorado %r", ev.type)
+    except asyncio.CancelledError:
+        log.debug("Gateway: idle_listener cancelado")
+        raise
+    except Exception as exc:
+        log.exception("Gateway: idle_listener terminó con excepción")
+        bus.publish(VoiceEvent(type="error", data={"message": str(exc)}))
 
 
 async def main(

@@ -10,6 +10,7 @@ import asyncio
 import sys
 
 import pytest
+from unittest.mock import AsyncMock, MagicMock
 
 from app import voice_client
 from backends import registry
@@ -287,3 +288,134 @@ async def _test_menubar_stops_after_async_cleanup(monkeypatch) -> None:
 
 def test_menubar_stops_after_async_cleanup(monkeypatch) -> None:
     asyncio.run(_test_menubar_stops_after_async_cleanup(monkeypatch))
+
+
+# ---------------------------------------------------------------------------
+# Issue #24: gateway_idle_listener — consume receive() durante IDLE
+# ---------------------------------------------------------------------------
+
+from backends.gateway_client import GatewayEvent
+
+
+def _make_gateway_mock(events_to_yield=None):
+    """Mock de GatewayClient que emite una lista de eventos cuando se le pide receive()."""
+    g = MagicMock()
+    g.is_connected = True
+    g._ws = MagicMock()  # simula WS vivo
+    if events_to_yield is None:
+        events_to_yield = []
+
+    async def _receive():
+        for ev in events_to_yield:
+            yield ev
+
+    g.receive = _receive
+    return g
+
+
+def _make_bus():
+    from domain.event_bus import EventBus
+    return EventBus()
+
+
+async def _collect(bus, timeout=1.0):
+    """Suscribe al bus y recolecta eventos hasta el timeout."""
+    captured = []
+    async def _loop():
+        async for ev in bus.subscribe():
+            captured.append(ev)
+            if ev.type in ("__stop__",):
+                break
+    try:
+        await asyncio.wait_for(_loop(), timeout=timeout)
+    except asyncio.TimeoutError:
+        pass
+    return captured
+
+
+async def _test_idle_listener_publish_status_a_bus():
+    """Issue #24: status proactivo durante IDLE aparece como gateway_status."""
+    from app.voice_client import gateway_idle_listener
+    bus = _make_bus()
+    gateway = _make_gateway_mock([
+        GatewayEvent(type="status", data={"service": "tts", "state": "unavailable"}),
+        # terminamos con un type desconocido para forzar salida
+    ])
+
+    listener_task = asyncio.create_task(gateway_idle_listener(bus, gateway))
+
+    # Esperar un momento para que reciba el evento
+    captured = await _collect(bus, timeout=0.5)
+    listener_task.cancel()
+    try:
+        await listener_task
+    except asyncio.CancelledError:
+        pass
+
+    status_evts = [e for e in captured if e.type == "gateway_status"]
+    assert len(status_evts) >= 1
+    assert status_evts[0].data["service"] == "tts"
+
+
+def test_idle_listener_publish_status_a_bus():
+    asyncio.run(_test_idle_listener_publish_status_a_bus())
+
+
+async def _test_idle_listener_descarta_push_turn_solo_logea():
+    """Issue #24: turn_start durante IDLE se loguea y descarta, no publica state_changed."""
+    from app.voice_client import gateway_idle_listener
+    bus = _make_bus()
+    gateway = MagicMock()
+    gateway.is_connected = True
+    gateway._ws = MagicMock()
+
+    async def _receive_turns():
+        """Generator que emite varios turn_start y luego se agota."""
+        for i in range(5):
+            yield GatewayEvent(type="turn_start", data={"turn_id": f"p-{i}", "turn_seq": i})
+
+    gateway.receive = _receive_turns
+
+    listener_task = asyncio.create_task(gateway_idle_listener(bus, gateway))
+    captured = await _collect(bus, timeout=0.5)
+
+    state_changed = [e for e in captured if e.type == "state_changed"]
+    # El assertion clave: turn_start NO se traduce en state_changed
+    assert not state_changed, "no debe publicar state_changed ante un push turn"
+
+
+def test_idle_listener_descarta_push_turn_solo_logea():
+    asyncio.run(_test_idle_listener_descarta_push_turn_solo_logea())
+
+
+async def _test_idle_listener_exception_no_controlada_publica_error():
+    """Issue #24: excepción inesperada en el listener se reporta y termina limpiamente."""
+    from app.voice_client import gateway_idle_listener
+    bus = _make_bus()
+    gateway = MagicMock()
+    gateway.is_connected = True
+    gateway._ws = MagicMock()
+
+    async def _boom():
+        raise RuntimeError("test explosion")
+        yield  # noqa: nunca llega, pero el generador debe ser async
+
+    gateway.receive = _boom
+
+    listener_task = asyncio.create_task(gateway_idle_listener(bus, gateway))
+    # Recolectar DURING execution (antes de que el task termine)
+    captured = await _collect(bus, timeout=0.5)
+    # Esperar a que termine (el boom explota en el primer __anext__)
+    try:
+        await asyncio.wait_for(listener_task, timeout=0.5)
+    except (asyncio.TimeoutError, RuntimeError):
+        pass
+    listener_task.cancel()
+
+    error_evts = [e for e in captured if e.type == "error"]
+    assert len(error_evts) >= 1, "debe publicar VoiceEvent(error) ante excepción"
+    assert "test explosion" in str(error_evts[0].data.get("message", ""))
+
+
+def test_idle_listener_exception_no_controlada_publica_error():
+    asyncio.run(_test_idle_listener_exception_no_controlada_publica_error())
