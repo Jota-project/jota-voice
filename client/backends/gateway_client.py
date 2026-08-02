@@ -2,11 +2,14 @@ import asyncio
 import json
 import logging
 import os
+import warnings
 from dataclasses import dataclass
-from typing import AsyncGenerator, Optional, Any
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Optional
+
+if TYPE_CHECKING:
+    from domain.event_bus import EventBus
 
 import websockets
-
 from config import GatewayConfig
 
 log = logging.getLogger(__name__)
@@ -35,10 +38,43 @@ class GatewayEvent:
 
 
 class GatewayClient:
-    def __init__(self, cfg: GatewayConfig, device_id: str = "unknown") -> None:
+    def __init__(
+        self,
+        cfg: GatewayConfig,
+        *,
+        bus: Optional["EventBus"] = None,
+        device_id: str | None = None,
+    ) -> None:
         self._cfg = cfg
-        self._device_id = device_id
-        self._ws: Optional[Any] = None
+        self._bus = bus
+        # Atributos poblados tras handshake exitoso (issue #24).
+        self._session_id: str | None = None
+        self._agent: str | None = None
+        self._capabilities: dict[str, Any] = {}
+        self._current_turn_seq: int = 0
+        self._ws: Any | None = None
+        # device_id se mantiene por compat con voice_client.main; se ignora
+        # porque el handshake del gateway no lo contempla (ver
+        # jota-gateway/docs/client-protocol.md §1). Remoción total en una
+        # versión futura cuando todos los call sites estén actualizados.
+        if device_id is not None:
+            warnings.warn(
+                "GatewayClient: device_id se ignora y se eliminará en una "
+                "versión futura (issue #24). El handshake del gateway no "
+                "lo contempla.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self._legacy_device_id: str | None = device_id
+        else:
+            self._legacy_device_id = None
+
+    @property
+    def is_connected(self) -> bool:
+        """True si el WS está abierto. False si no se ha conectado o
+        si se cerró tras un error. Consumido por state_machine._recording()
+        para detectar reconexión perezosa (issue #24)."""
+        return self._ws is not None
 
     async def connect(self) -> None:
         headers = _cloudflare_access_headers()
@@ -62,7 +98,7 @@ class GatewayClient:
             raise
         handshake = {
             "client_key": self._cfg.client_key,
-            "device_id": self._device_id,
+            "device_id": self._legacy_device_id or "unknown",
             "input_mode": "audio",
             "output_mode": ["audio", "text", "status"],
         }
@@ -90,7 +126,7 @@ class GatewayClient:
         msg = json.loads(raw)
         msg_type = msg.get("type", "")
         if msg_type == "ready":
-            log.debug("Gateway listo (device=%s)", self._device_id)
+            log.debug("Gateway listo (device=%s)", self._legacy_device_id)
             return
         if msg_type == "error":
             raise RuntimeError(

@@ -5,6 +5,7 @@ import asyncio
 import json
 import sys
 import types
+import warnings
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -322,6 +323,56 @@ def test_connect_levanta_timeout_si_server_no_responde_ready() -> None:
 
 def test_connect_propagar_json_invalido_en_respuesta_handshake() -> None:
     asyncio.run(_test_connect_propagar_json_invalido_en_respuesta_handshake())
+
+
+# ---------------------------------------------------------------------------
+# Issue #24: GatewayClient.__init__ acepta bus opcional y atributos de sesión.
+# ---------------------------------------------------------------------------
+
+
+def test_gateway_client_init_sin_bus_no_falla() -> None:
+    """Issue #24: bus sigue siendo opcional (legacy preservado)."""
+    from config import GatewayConfig
+    cfg = GatewayConfig(host="127.0.0.1", client_key="x")
+    client = GatewayClient(cfg)
+    assert client.is_connected is False
+    assert client._session_id is None
+    assert client._agent is None
+    assert client._capabilities == {}
+    assert client._current_turn_seq == 0
+
+
+def test_gateway_client_init_con_bus() -> None:
+    """Issue #24: bus inyectado se guarda para publicar gateway_ready."""
+    from config import GatewayConfig
+    from domain.event_bus import EventBus
+    cfg = GatewayConfig(host="127.0.0.1", client_key="x")
+    bus = EventBus()
+    client = GatewayClient(cfg, bus=bus)
+    assert client._bus is bus
+
+
+def test_gateway_client_init_device_id_deprecation_warning() -> None:
+    """Issue #24: device_id se mantiene por compat pero emite DeprecationWarning."""
+    from config import GatewayConfig
+    cfg = GatewayConfig(host="127.0.0.1", client_key="x")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        GatewayClient(cfg, device_id="legacy-1")
+    deprecation = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+    assert deprecation, "device_id debería emitir DeprecationWarning"
+    assert "device_id" in str(deprecation[0].message)
+
+
+def test_gateway_client_sin_device_id_sin_warning() -> None:
+    """Issue #24: instanciar sin device_id no debe emitir DeprecationWarning."""
+    from config import GatewayConfig
+    cfg = GatewayConfig(host="127.0.0.1", client_key="x")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        GatewayClient(cfg)
+    deprecation = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+    assert not deprecation
 
 
 # ---------------------------------------------------------------------------
