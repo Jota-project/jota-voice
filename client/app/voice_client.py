@@ -199,6 +199,28 @@ async def main(
     oww = registry.make_oww(cfg, on_wake_word=_oww_on_wake)
     display_backend = registry.make_display(cfg)
     gateway = GatewayClient(cfg.gateway, device_id=cfg.device.id)
+
+    # --- Issue #24: eager connect en modo persistente ---
+    idle_task = None
+    if cfg.gateway.persistent_session:
+        try:
+            await gateway.connect()
+        except Exception:
+            log.exception("Eager connect falló al arrancar; abortando")
+            try:
+                menubar_backend.set_state("error")
+                menubar_backend.set_status_text(
+                    "Error: no se pudo conectar al gateway al arrancar"
+                )
+            except Exception:
+                log.exception("No se pudo reflejar el error en el menubar")
+            bus.close()
+            return
+        idle_task = asyncio.create_task(
+            gateway_idle_listener(bus, gateway),
+            name="gateway_idle",
+        )
+
     playback = PlaybackEngine(bus, audio)
     display = DisplayClient(display_backend)
 
@@ -387,12 +409,22 @@ async def main(
             return_exceptions=True,
         )
 
+        # idle_task must be drained AFTER gather so gather's CancelledError
+        # doesn't propagate out of the finally before we get to drain it.
+        if idle_task is not None:
+            idle_task.cancel()
+            try:
+                await idle_task
+            except asyncio.CancelledError:
+                pass
+
         await audio.stop()
 
-        try:
-            await gateway.disconnect()
-        except Exception:
-            pass
+        if gateway._ws is not None:
+            try:
+                await gateway.disconnect()
+            except Exception:
+                pass
 
         try:
             await oww.disconnect()
