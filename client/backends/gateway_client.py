@@ -193,20 +193,28 @@ class GatewayClient:
         try:
             async for message in self._ws:
                 if isinstance(message, bytes):
-                    # Framing documentado en jota-gateway/docs/client-protocol.md:
-                    # [0xA1][turn_seq uint16 BE][PCM16 24kHz]. Sin separar la
-                    # cabecera, el PCM llega desalineado y con tamaño potencialmente
-                    # impar — np.frombuffer(..., dtype=int16) revienta.
+                    # Framing documentado en jota-gateway/docs/client-protocol.md
+                    # §6: [0xA1][turn_seq uint16 BE][PCM16 24kHz].
                     if len(message) < 3 or message[0] != 0xA1:
                         log.warning(
                             "Gateway: frame binario inesperado (%d bytes, primer byte=%r)",
                             len(message), message[0] if message else None,
                         )
                         continue
-                    turn_seq = (message[1] << 8) | message[2]
+                    frame_seq = (message[1] << 8) | message[2]
+                    # Issue #24: descarte de audio de turnos anteriores. Si el
+                    # gateway ya anunció un turn_start con seq mayor, este
+                    # frame es del turno cancelado y no debe reproducirse.
+                    if frame_seq < self._current_turn_seq:
+                        log.debug(
+                            "Gateway: descartando tts_chunk con turn_seq=%d "
+                            "(current=%d, turno cancelado)",
+                            frame_seq, self._current_turn_seq,
+                        )
+                        continue
                     pcm16 = message[3:]
                     yield GatewayEvent(
-                        type="tts_chunk", data={"audio": pcm16, "turn_seq": turn_seq}
+                        type="tts_chunk", data={"audio": pcm16, "turn_seq": frame_seq}
                     )
                     continue
                 try:
@@ -215,13 +223,21 @@ class GatewayClient:
                     log.warning("Gateway: frame JSON inválido: %r", message[:80])
                     continue
                 event_type = data.get("type", "")
+                # Issue #24: turn_start actualiza _current_turn_seq SOLO si seq > current.
+                # Es la única fuente de incremento de _current_turn_seq (defensa contra
+                # gateways desincronizados).
+                if event_type == "turn_start":
+                    new_seq = data.get("turn_seq", 0)
+                    if isinstance(new_seq, int) and new_seq > self._current_turn_seq:
+                        self._current_turn_seq = new_seq
+                    else:
+                        log.warning(
+                            "Gateway: turn_start con seq <= current "
+                            "(current=%d, got=%r)",
+                            self._current_turn_seq, new_seq,
+                        )
                 if event_type in ("done", "turn_end"):
-                    # El gateway real (green-house) señaliza fin de turno
-                    # con "turn_end" en vez de "done" — sin esto, receive()
-                    # se quedaba esperando mensajes que nunca llegaban hasta
-                    # el timeout de 30s de RESPONDING en cada turno.
                     return
-                # El gateway envía "token" para LLM; normalizamos al tipo interno.
                 if event_type == "token":
                     event_type = "llm_token"
                 yield GatewayEvent(type=event_type, data=data)

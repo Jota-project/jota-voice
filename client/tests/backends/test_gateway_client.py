@@ -611,3 +611,127 @@ def test_connect_handshake_sin_device_id(monkeypatch):
     assert handshake["client_key"] == "test"
     assert handshake["input_mode"] == "audio"
     assert "audio" in handshake["output_mode"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #24: receive() debe rendir turn_start, interrupted, tool_call y
+# gestionar _current_turn_seq para descartar tts_chunk de turnos cancelados.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_receive_rinde_turn_start():
+    """Issue #24: receive() rinde turn_start como GatewayEvent."""
+    from config import GatewayConfig
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test")
+    client = GatewayClient(cfg)
+    client._ws = _FakeWS([json.dumps({
+        "type": "turn_start", "turn_id": "t-1", "turn_seq": 42,
+    })])
+
+    events = [ev async for ev in client.receive()]
+
+    assert len(events) == 1
+    assert events[0].type == "turn_start"
+    assert events[0].data["turn_id"] == "t-1"
+    assert events[0].data["turn_seq"] == 42
+
+
+@pytest.mark.asyncio
+async def test_receive_rinde_interrupted():
+    """Issue #24: receive() rinde interrupted (clave para barge-in real)."""
+    from config import GatewayConfig
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test")
+    client = GatewayClient(cfg)
+    client._ws = _FakeWS([json.dumps({"type": "interrupted"})])
+
+    events = [ev async for ev in client.receive()]
+
+    assert len(events) == 1
+    assert events[0].type == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_receive_rinde_tool_call_start_y_result():
+    """Issue #24: receive() rinde tool_call start y result (opt-in)."""
+    from config import GatewayConfig
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test")
+    client = GatewayClient(cfg)
+    client._ws = _FakeWS([
+        json.dumps({
+            "type": "tool_call", "turn_id": "t-1", "phase": "start",
+            "name": "exec", "tool_call_id": "call-1",
+            "args": {"command": "ls"}, "result": None, "is_error": None,
+        }),
+        json.dumps({
+            "type": "tool_call", "turn_id": "t-1", "phase": "result",
+            "name": "exec", "tool_call_id": "call-1",
+            "args": None, "result": "file.txt", "is_error": False,
+        }),
+    ])
+
+    events = [ev async for ev in client.receive()]
+
+    assert len(events) == 2
+    assert events[0].type == "tool_call"
+    assert events[0].data["phase"] == "start"
+    assert events[1].data["phase"] == "result"
+    assert events[1].data["result"] == "file.txt"
+
+
+@pytest.mark.asyncio
+async def test_current_turn_seq_se_actualiza_con_turn_start_mayor():
+    """Issue #24: turn_start con seq mayor incrementa _current_turn_seq."""
+    from config import GatewayConfig
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test")
+    client = GatewayClient(cfg)
+    assert client._current_turn_seq == 0
+    client._ws = _FakeWS([json.dumps({
+        "type": "turn_start", "turn_id": "t-1", "turn_seq": 5,
+    })])
+
+    _ = [ev async for ev in client.receive()]
+
+    assert client._current_turn_seq == 5
+
+
+@pytest.mark.asyncio
+async def test_current_turn_seq_ignora_turn_start_menor_o_igual(caplog):
+    """Issue #24: turn_start con seq <= current se rinde pero NO incrementa (defensa)."""
+    from config import GatewayConfig
+    import logging
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test")
+    client = GatewayClient(cfg)
+    client._current_turn_seq = 10
+    client._ws = _FakeWS([json.dumps({
+        "type": "turn_start", "turn_id": "t-2", "turn_seq": 10,
+    })])
+
+    with caplog.at_level(logging.WARNING, logger="backends.gateway_client"):
+        events = [ev async for ev in client.receive()]
+
+    assert client._current_turn_seq == 10, "No debe decrementar ni quedarse igual"
+    assert len(events) == 1  # se rinde igual para que el caller lo vea
+    assert any("turn_start" in r.message and "current=10" in r.message for r in caplog.records), \
+        "Debe emitir WARNING con old/current"
+
+
+@pytest.mark.asyncio
+async def test_tts_chunk_se_descarta_si_turn_seq_menor():
+    """Issue #24: tts_chunk con turn_seq < _current_turn_seq se descarta (no se rinde)."""
+    from config import GatewayConfig
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test")
+    client = GatewayClient(cfg)
+    client._current_turn_seq = 10
+    pcm = b"\x00\x01" * 50
+    frame_old = bytes([0xA1, 0x00, 0x05]) + pcm  # turn_seq=5 (anterior)
+    frame_new = bytes([0xA1, 0x00, 0x0A]) + pcm  # turn_seq=10 (igual)
+    client._ws = _FakeWS([frame_old, frame_new])
+
+    events = [ev async for ev in client.receive()]
+
+    # Solo el frame con seq=10 llega (>= current, monotónico);
+    # el de seq=5 se descarta.
+    assert len(events) == 1
+    assert events[0].type == "tts_chunk"
+    assert events[0].data["turn_seq"] == 10
