@@ -428,3 +428,34 @@ def test_load_or_create_token_regenera_si_fichero_solo_whitespace() -> None:
 
 def test_control_server_con_token_vacio_rechaza_peticiones() -> None:
     asyncio.run(_test_control_server_con_token_vacio_rechaza_peticiones())
+
+
+async def _test_load_or_create_token_corrige_permisos_laxos(caplog) -> None:
+    """Si el fichero de token existe con permisos laxos (644, p.ej. un
+    backup restaurado con 'cp -p' que no preservó, o un chmod accidental),
+    _load_or_create_token debe corregirlos a 0o600 y loguear un warning
+    (#105). El token existente se devuelve sin cambios."""
+    import logging
+
+    from app import control_server
+
+    with tempfile.TemporaryDirectory() as tmp:
+        token_path = Path(tmp) / "token"
+        token_path.write_text("token-fijo-con-permisos-laxos")
+        os.chmod(token_path, 0o644)  # simulating backup restore with lax umask
+
+        with caplog.at_level(logging.WARNING):
+            token = control_server._load_or_create_token(token_path)
+
+        assert token == "token-fijo-con-permisos-laxos", (
+            "El token existente debe devolverse sin cambios"
+        )
+        mode = stat.S_IMODE(os.stat(token_path).st_mode)
+        assert mode == 0o600, f"Permisos esperados 0o600, obtenidos {oct(mode)}"
+        assert any("lax permissions" in msg for msg in caplog.messages), (
+            "Debe loguear un warning sobre los permisos laxos"
+        )
+
+
+def test_load_or_create_token_corrige_permisos_laxos(caplog) -> None:
+    asyncio.run(_test_load_or_create_token_corrige_permisos_laxos(caplog))
