@@ -91,18 +91,28 @@ class MenubarClient:
                 elif cmd == "open_config":
                     log.info("MenubarClient: open_config requested")
                 elif cmd == "shutdown_service":
-                    # Issue #30: launchctl corre en background (async subprocess
-                    # en executor), sin bloquear el hilo de Cocoa. Luego se
-                    # despierta el asyncio loop para iniciar el shutdown.
+                    # El bug original (#30) era subprocess.run sincrónico en el
+                    # hilo Cocoa. Lo movimos a async subprocess vía
+                    # asyncio.create_subprocess_exec. PERO: launchctl disable/bootout
+                    # en macOS Sonoma con KeepAlive=true no desactiva permanentemente
+                    # el agente — launchd lo relanza en ~1s tras shutdown.
+                    # Bypass: enviar SIGTERM al proceso actual. Nuestro NSFileHandle
+                    # observer (issue #104) lo captura, _cancel_main() corre,
+                    # stop_event se dispara, main() apaga, NSApp.run() retorna.
+                    # launchd puede relanzarlo tras exit (KeepAlive=true); el
+                    # usuario debe hacer 'launchctl unload -w ~/Library/LaunchAgents/com.jota.voice.plist'
+                    # para desactivarlo permanentemente.
                     import os as _os
-                    uid = _os.getuid()
-                    await _run_subprocess(
-                        ["launchctl", "disable", f"gui/{uid}/com.jota.voice"]
+                    import signal as _signal
+                    pid = _os.getpid()
+                    log.info(
+                        "MenubarClient: shutdown_service received, enviando SIGTERM "
+                        "a PID %d (KeepAlive=true puede relanzar el proceso)", pid,
                     )
-                    await _run_subprocess(
-                        ["launchctl", "bootout", f"gui/{uid}/com.jota.voice"]
-                    )
-                    _call_soon_threadsafe_safe(stop_event)
+                    try:
+                        _os.kill(pid, _signal.SIGTERM)
+                    except Exception as exc:
+                        log.warning("MenubarClient: os.kill(SIGTERM) falló: %s", exc)
                 elif cmd == "quit":
                     log.info("MenubarClient: quit requested")
                 else:

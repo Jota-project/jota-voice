@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import queue
+import signal
+from unittest.mock import patch
 
 from domain.event_bus import EventBus, VoiceEvent
 from ui.menubar_base import MenubarCommands
@@ -335,3 +338,50 @@ def test_delayed_idle_race_does_not_clobber_later_task():
         assert not task_b.done(), "task B should still be alive"
 
     _run(scenario())
+
+
+def test_shutdown_service_sends_sigterm_to_self():
+    """Issue #30: shutdown_service debe enviar SIGTERM al proceso actual
+    vía os.kill(getpid(), SIGTERM), no usar launchctl disable/bootout
+    (que con KeepAlive=true en macOS Sonoma no previene el respawn).
+    No podemos matar realmente el proceso de test, así que mockeamos
+    os.kill y verificamos que se llama con el PID real + SIGTERM."""
+    bus = EventBus()
+    backend = FakeBackend()
+    client = MenubarClient(backend)
+    ui_queue: queue.Queue = queue.Queue()
+    pause = asyncio.Event()
+    stop = asyncio.Event()
+
+    killed = {}
+
+    def fake_kill(pid, sig):
+        killed["pid"] = pid
+        killed["sig"] = sig
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
+        await asyncio.sleep(0.05)
+        ui_queue.put_nowait("shutdown_service")
+        await asyncio.sleep(0.2)
+        # No cerramos el bus — el proceso de test recibiría SIGTERM de verdad;
+        # en su lugar，期待 fake_kill haya sido llamado antes de que el
+        # shutdown completo ocurra (el test finalizaría antes si no).
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    with patch.object(os, "kill", fake_kill):
+        with patch.object(signal, "SIGTERM", signal.SIGTERM):
+            _run(scenario())
+
+    assert "pid" in killed, f"os.kill never called; killed={killed}"
+    assert killed["pid"] == os.getpid(), (
+        f"Expected kill(getpid()={os.getpid()}), got pid={killed['pid']}"
+    )
+    assert killed["sig"] == signal.SIGTERM, (
+        f"Expected SIGTERM={signal.SIGTERM}, got sig={killed['sig']}"
+    )
