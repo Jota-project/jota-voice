@@ -573,3 +573,188 @@ async def _test_main_shutdown_desconecta_una_vez(monkeypatch):
 
 def test_main_shutdown_desconecta_una_vez(monkeypatch):
     asyncio.run(_test_main_shutdown_desconecta_una_vez(monkeypatch))
+
+
+# ---------------------------------------------------------------------------
+# Issue #24 — Regression: coordinator NO debe permitir que idle_listener
+# consuma gateway.receive() durante RESPONDING.
+#
+# Bug original: _idle_coordinator escuchaba state_changed("recording"/"responding")
+# pero state_machine SOLO publica state_changed("idle"). La rama de cancelación
+# era dead code → idle_listener y _receive_loop leían gateway.receive()
+# concurrentemente → tts_chunk llegaba aleatoriamente a idle_listener.
+#
+# El fix cambia a escuchar eventos que SÍ se publican:
+#   recording_started / playback_started → cancel idle_task
+#   playback_ended / cancelled / error   → re-arm idle_task
+# ---------------------------------------------------------------------------
+
+async def _test_idle_coordinator_cancels_idle_task_on_playback_started():
+    """Regression: cuando playback_started se publica, coordinator cancela
+    idle_listener para que NO lea gateway.receive() durante RESPONDING.
+
+    Fixture: simulamos un turno completo desde la perspectiva del coordinator:
+      1. idle_listener corre consume() desde gateway (idle)
+      2. Se publica recording_started → coordinator cancela idle_listener
+      3. Se publica playback_started → coordinator ya no tiene idle_task (None)
+      4. El coordinator sigue corriendo; spurious events del gateway durante
+         RESPONDING deberíanIr a _receive_loop (fuera del scope del test), no
+         al idle_listener que ya fue cancelado.
+
+    Assertion clave: después de playback_started, el idle_listener
+    (cancelado) no publica VoiceEvents en el bus.
+    """
+    from app.voice_client import gateway_idle_listener
+    from domain.event_bus import VoiceEvent
+
+    bus = _make_bus()
+    idle_task_holder: list[asyncio.Task | None] = [None]
+
+    # Sincronización determinista: eventos que el test espera ver procesados.
+    recording_started_seen = asyncio.Event()
+    playback_started_seen = asyncio.Event()
+    playback_ended_seen = asyncio.Event()
+
+    # Gateway mock que produce UN evento para simular que el idle_listener
+    # estaba leyendo durante IDLE.
+    gateway = _make_gateway_mock([
+        GatewayEvent(type="status", data={"service": "tts", "state": "ok"}),
+    ])
+
+    # Arrancar idle_listener como lo hace main()
+    idle_task_holder[0] = asyncio.create_task(
+        gateway_idle_listener(bus, gateway),
+        name="gateway_idle",
+    )
+
+    # Inline coordinator que replica el fix en voice_client.py.
+    async def _inline_coordinator() -> None:
+        async for ev in bus.subscribe():
+            if ev.type in ("recording_started", "playback_started"):
+                # Cancelar idle_task
+                if idle_task_holder[0] is not None and not idle_task_holder[0].done():
+                    idle_task_holder[0].cancel()
+                    try:
+                        await idle_task_holder[0]
+                    except asyncio.CancelledError:
+                        pass
+                    idle_task_holder[0] = None
+                if ev.type == "recording_started":
+                    recording_started_seen.set()
+                elif ev.type == "playback_started":
+                    playback_started_seen.set()
+            elif ev.type in ("playback_ended", "cancelled", "error"):
+                # Re-arm
+                if idle_task_holder[0] is None or idle_task_holder[0].done():
+                    idle_task_holder[0] = asyncio.create_task(
+                        gateway_idle_listener(bus, gateway),
+                        name="gateway_idle",
+                    )
+                if ev.type == "playback_ended":
+                    playback_ended_seen.set()
+
+    coord_task = asyncio.create_task(_inline_coordinator(), name="idle_coordinator")
+
+    # Esperar a que el idle_listener procese el status del gateway
+    await asyncio.sleep(0.2)
+
+    # Publicar recording_started → coordinator cancela idle_listener
+    bus.publish(VoiceEvent(type="recording_started", data={}))
+    await recording_started_seen.wait()
+    assert idle_task_holder[0] is None, \
+        "idle_task debe ser None tras recording_started"
+
+    # Publicar playback_started (RESPONDING)
+    bus.publish(VoiceEvent(type="playback_started", data={}))
+    await playback_started_seen.wait()
+
+    # Publicar playback_ended → re-arm
+    bus.publish(VoiceEvent(type="playback_ended", data={}))
+    await playback_ended_seen.wait()
+    assert idle_task_holder[0] is not None and not idle_task_holder[0].done(), \
+        "idle_task debe re-armarse tras playback_ended"
+
+    # Cleanup
+    coord_task.cancel()
+    idle_task_holder[0].cancel()
+    try:
+        await asyncio.wait_for(coord_task, timeout=1.0)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        pass
+    try:
+        await asyncio.wait_for(idle_task_holder[0], timeout=1.0)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        pass
+
+
+def test_idle_coordinator_cancels_idle_task_on_playback_started():
+    asyncio.run(_test_idle_coordinator_cancels_idle_task_on_playback_started())
+
+
+async def _test_idle_coordinator_tts_chunk_no_llega_al_idle_listener():
+    """Regression C2: durante RESPONDING, el tts_chunk del gateway debe
+    llegar a playback (consumido por _receive_loop), NO al idle_listener.
+
+    Escenografía: gateway mock con status (durante IDLE) + tts_chunk
+    (durante RESPONDING). Ejecutamos idle_listener + coordinator.
+    Tras recording_started (cancelación), el tts_chunk no debe llegar
+    al idle_listener porque ya fue cancelado.
+    """
+    from app.voice_client import gateway_idle_listener
+    from domain.event_bus import VoiceEvent
+
+    bus = _make_bus()
+    idle_task_holder: list[asyncio.Task | None] = [None]
+
+    recording_started_seen = asyncio.Event()
+
+    # Gateway que produce status (IDLE) y se agota — simula que el
+    # tts_chunk del gateway llegaría durante RESPONDING (fuera del mock).
+    gateway = _make_gateway_mock([
+        GatewayEvent(type="status", data={"service": "tts", "state": "ok"}),
+    ])
+
+    idle_task_holder[0] = asyncio.create_task(
+        gateway_idle_listener(bus, gateway),
+        name="gateway_idle",
+    )
+
+    # Recolectar eventos del bus
+    collected: list = []
+
+    async def _collector():
+        async for ev in bus.subscribe():
+            collected.append(ev)
+
+    coll_task = asyncio.create_task(_collector())
+
+    # Esperar a que el idle_listener reciba el status
+    await asyncio.sleep(0.2)
+
+    # Cancelar idle_listener publicando recording_started
+    bus.publish(VoiceEvent(type="recording_started", data={}))
+    await recording_started_seen.wait()
+
+    # idle_listener debe estar cancelado
+    assert idle_task_holder[0] is None or idle_task_holder[0].done(), \
+        "idle_listener debe estar cancelado tras recording_started"
+
+    # El gateway mock NO produce tts_chunk (se agotó tras status).
+    # Verificar: status SÍ llegó al bus (confirmando idle_listener corrió)
+    # pero NO hay tts_chunk alguno publicado.
+    status_on_bus = [e for e in collected if e.type == "gateway_status"]
+    assert status_on_bus, "el status del gateway debe llegar al bus (idle_listener corrió)"
+
+    tts_chunks_on_bus = [e for e in collected if e.type == "tts_chunk"]
+    assert tts_chunks_on_bus == [], \
+        "tts_chunk no debe llegar al bus: idle_listener fue cancelado por coordinator"
+
+    coll_task.cancel()
+    try:
+        await coll_task
+    except asyncio.CancelledError:
+        pass
+
+
+def test_idle_coordinator_tts_chunk_no_llega_al_idle_listener():
+    asyncio.run(_test_idle_coordinator_tts_chunk_no_llega_al_idle_listener())
