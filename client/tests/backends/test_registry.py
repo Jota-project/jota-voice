@@ -190,3 +190,23 @@ def test_make_menubar_darwin_with_pyobjc_returns_cocoa(monkeypatch: pytest.Monke
     monkeypatch.setitem(_sys.modules, "ui.menubar_cocoa", fake_cocoa)
     inst = registry.make_menubar(_cfg_with_menubar())
     assert isinstance(inst, FakeCocoaBackend)
+
+
+def test_make_menubar_darwin_cocoa_init_fails_returns_null(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #32: si CocoaMenubarBackend.__init__ lanza una excepción distinta
+    de ImportError (p.ej. sin sesión Aqua/WindowServer), make_menubar debe
+    caer a NullMenubarBackend en lugar de propagar la excepción."""
+    monkeypatch.setattr(platform_key_sys, "platform", "darwin")
+    import types
+    import sys as _sys
+
+    fake_cocoa = types.ModuleType("ui.menubar_cocoa")
+
+    class FailingCocoaBackend:
+        def __init__(self, cfg):
+            raise RuntimeError("NSApp not running (no Aqua session)")
+
+    fake_cocoa.CocoaMenubarBackend = FailingCocoaBackend
+    monkeypatch.setitem(_sys.modules, "ui.menubar_cocoa", fake_cocoa)
+    inst = registry.make_menubar(_cfg_with_menubar())
+    assert inst.__class__.__name__ == "NullMenubarBackend"
