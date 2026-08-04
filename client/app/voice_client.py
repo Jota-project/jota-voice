@@ -329,23 +329,11 @@ async def main(
             log.warning("Menubar: no se pudo abrir config (%s): %s", path, exc)
 
     def _shutdown_service() -> None:
-        uid = os.getuid()
-        try:
-            subprocess.run(
-                ["launchctl", "disable", f"gui/{uid}/com.jota.voice"],
-                check=False, timeout=5,
-            )
-            subprocess.run(
-                ["launchctl", "bootout", f"gui/{uid}/com.jota.voice"],
-                check=False, timeout=5,
-            )
-        except Exception as exc:
-            log.warning("Menubar: launchctl falló: %s", exc)
-        # Estas closures se invocan desde el hilo que ejecute la acción de
-        # menú (con CocoaMenubarBackend, el hilo principal) — nunca desde
-        # el hilo de asyncio. asyncio.Event.set() no es thread-safe, así
-        # que hay que cruzar al loop vía call_soon_threadsafe.
-        _call_soon_threadsafe_safe(loop, stop_event)
+        # Issue #30: antes se ejecutaban subprocess.run() SINCRONOS en el
+        # hilo de Cocoa (hasta 10s de freeze). Ahora delegamos al consumer
+        # del ui_queue (que corre en un executor) para no bloquear el run
+        # loop ni marcar la app como "no responde".
+        ui_queue.put_nowait("shutdown_service")
 
     def _quit() -> None:
         _call_soon_threadsafe_safe(loop, stop_event)
@@ -360,7 +348,7 @@ async def main(
     menubar_backend.set_commands(cmds)
 
     menubar_task = asyncio.create_task(
-        menubar_client.run(bus, ui_queue, pause_event), name="menubar"
+        menubar_client.run(bus, ui_queue, pause_event, loop, stop_event), name="menubar"
     )
 
     # --- Task background permanente: OWW (pausable) ---
@@ -544,13 +532,21 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
     if not loop_ready.wait(timeout=5.0):
         log.error("El hilo de asyncio no arrancó a tiempo")
 
-    def _handle_os_signal(signum, _frame) -> None:
-        log.info("Señal de parada recibida (%s)", signum)
-        loop = loop_holder.get("loop")
-        stop_event = stop_holder.get("stop_event")
-        if loop is None or stop_event is None:
-            return
-        _call_soon_threadsafe_safe(loop, stop_event)
+    # DEAD CODE (issue #104): _handle_os_signal ya no se invoca en Cocoa
+    # mode — el fix #20 de hecho instalaba signal.set_wakeup_fd() y NSFileHandle
+    # como único canal de señales (el hilo principal no ejecuta bytecode Python,
+    # así que el handler clásico nunca se dispara). El NSFileHandle observer
+    # (_on_wakeup_fd_data) es el único handler activo. Se mantiene la función
+    # comentada para no romper la pista de auditoría de signal.signal() líneas
+    # abajo, pero nunca se invoca en Cocoa mode.
+    #
+    # def _handle_os_signal(signum, _frame) -> None:
+    #     log.info("Señal de parada recibida (%s)", signum)
+    #     loop = loop_holder.get("loop")
+    #     stop_event = stop_holder.get("stop_event")
+    #     if loop is None or stop_event is None:
+    #         return
+    #     _call_soon_threadsafe_safe(loop, stop_event)
 
     # --- Issue #20: wakeup_fd para que las señales despierten el run loop
     # de Cocoa sin esperar al NSTimer. set_wakeup_fd hace que CPython
@@ -581,6 +577,10 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
         except BlockingIOError:
             pass
         _fh.readInBackgroundAndNotify()
+        # Issue #104: en Cocoa mode este es el único handler activo de
+        # señales — si no logueamos aquí, no hay manera de saber si
+        # SIGTERM llegó cuando el proceso se cuelga tras recibirlo.
+        log.info("voice_client: señal recibida, cancelando run loop")
         loop = loop_holder.get("loop")
         stop_event = stop_holder.get("stop_event")
         if loop is not None and stop_event is not None:
@@ -594,8 +594,10 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
     )
     _fh.readInBackgroundAndNotify()
 
-    signal.signal(signal.SIGINT, _handle_os_signal)
-    signal.signal(signal.SIGTERM, _handle_os_signal)
+    # En Cocoa mode las señales las gestiona exclusivamente el NSFileHandle
+    # observer — el hilo principal no ejecuta bytecode Python, así que un
+    # signal handler clásico nunca se invocaría. Las llamadas a signal.signal()
+    # fueron eliminadas al convertir _handle_os_signal en dead code (issue #104).
 
     menubar_backend.run_forever()  # bloquea el hilo principal (NSApp.run)
     t.join(timeout=10.0)

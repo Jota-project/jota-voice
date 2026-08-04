@@ -31,6 +31,8 @@ class MenubarClient:
         bus: EventBus,
         ui_queue: queue.Queue,
         pause_event: asyncio.Event,
+        loop: asyncio.AbstractEventLoop,
+        stop_event: asyncio.Event,
     ) -> None:
         """Loop suscrito al bus. Se cancela externamente (asyncio.CancelledError).
 
@@ -38,7 +40,7 @@ class MenubarClient:
         (queue.Queue) y la drenamos desde un executor para no bloquear el
         loop mientras la UI está inactiva.
         """
-        loop = asyncio.get_running_loop()
+        self._loop = loop
 
         def _get_nowait_or_none():
             # Timeout corto para que el hilo del executor vuelva
@@ -51,6 +53,24 @@ class MenubarClient:
                 return ui_queue.get(timeout=0.2)
             except queue.Empty:
                 return None
+
+        async def _run_subprocess(cmd: list[str], timeout: float = 5.0) -> None:
+            """Ejecuta un subprocess en un executor y loguea errores."""
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(proc.wait(), timeout=timeout)
+            except Exception as exc:
+                log.warning("MenubarClient: %s falló: %s", cmd[0], exc)
+
+        def _call_soon_threadsafe_safe(ev: asyncio.Event) -> None:
+            try:
+                loop.call_soon_threadsafe(ev.set)
+            except RuntimeError:
+                log.debug("Loop de asyncio ya cerrado; stop_event ignorado")
 
         async def _drain_queue() -> None:
             while True:
@@ -71,7 +91,18 @@ class MenubarClient:
                 elif cmd == "open_config":
                     log.info("MenubarClient: open_config requested")
                 elif cmd == "shutdown_service":
-                    log.info("MenubarClient: shutdown_service requested")
+                    # Issue #30: launchctl corre en background (async subprocess
+                    # en executor), sin bloquear el hilo de Cocoa. Luego se
+                    # despierta el asyncio loop para iniciar el shutdown.
+                    import os as _os
+                    uid = _os.getuid()
+                    await _run_subprocess(
+                        ["launchctl", "disable", f"gui/{uid}/com.jota.voice"]
+                    )
+                    await _run_subprocess(
+                        ["launchctl", "bootout", f"gui/{uid}/com.jota.voice"]
+                    )
+                    _call_soon_threadsafe_safe(stop_event)
                 elif cmd == "quit":
                     log.info("MenubarClient: quit requested")
                 else:
