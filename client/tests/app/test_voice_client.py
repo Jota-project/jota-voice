@@ -146,6 +146,11 @@ def test_run_with_cocoa_menubar_survives_early_main_failure(monkeypatch) -> None
 
 @pytestmark_cocoa
 def test_run_with_cocoa_menubar_signal_handler_survives_closed_loop(monkeypatch) -> None:
+    """Issue #104 fix: en Cocoa mode NO se registran signal handlers clásicos
+    (signal.signal()). El hilo principal de Cocoa nunca ejecuta bytecode Python,
+    así que CPython nunca invoca los handlers — el NSFileHandle observer es
+    el único mecanismo de entrega de señales. Verificamos que signal.signal()
+    no se llama."""
     async def _fake_main(cfg, menubar_backend, *, external_stop_event=None):
         raise RuntimeError("fallo antes de construir nada")
 
@@ -162,9 +167,8 @@ def test_run_with_cocoa_menubar_signal_handler_survives_closed_loop(monkeypatch)
 
     voice_client._run_with_cocoa_menubar(cfg, menubar)
 
-    assert len(signal_calls) == 2
-    _sig, handler = signal_calls[0]
-    handler(_sig, None)  # no debe lanzar RuntimeError: Event loop is closed
+    # Cocoa mode usa NSFileHandle observer, no signal.signal()
+    assert len(signal_calls) == 0
 
 
 # ---------------------------------------------------------------------------
