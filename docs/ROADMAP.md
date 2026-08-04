@@ -93,7 +93,7 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 - [ ] **#30** 🟠 `[022]` — `_shutdown_service()` bloquea el hilo principal de Cocoa hasta 10s con `subprocess.run` síncrono — **XS**
 - [ ] **#31** 🟠 `[023]` — Race condition confirmada en `_pending_idle_task` del menubar — el icono revierte a "idle" espontáneamente — **XS**
 - [ ] **#32** 🟠 `[024]` — Construcción de `CocoaMenubarBackend` sin try/except más allá de `ImportError` — un fallo en runtime tumba TODO el cliente — **XS**
-- [ ] **#33** 🟠 `[025]` — `voice_client.py` (composition root real del cliente) tiene CERO tests — **M**
+- [x] **#33** 🟠 `[025]` — `voice_client.py` (composition root real del cliente) tiene CERO tests — **M** — resuelto por el trabajo de #24 (Tasks 6/7/hotfix añadieron 7 tests de integración en `client/tests/app/test_voice_client.py` cubriendo `gateway_idle_listener`, `main()` startup/shutdown, y el coordinator idle). Acceptance gate de Fase 3 cumplido.
 - [ ] **#104** 🟡 `[026]` — Observabilidad: SIGTERM/SIGINT no produce log en Cocoa mode (regresión del fix #20) — **XS** — *post-Fase 1*
 - [ ] **#105** 🟡 `[027]` — Permisos 0o600 del fichero de token no se re-verifican ni se re-aplican sobre el fichero existente — **XS** — *post-Fase 1*
 
