@@ -225,14 +225,18 @@ async def main(
 
         # --- Task 9: coordinador que pausa/re-arranca idle_task según estado ---
         async def _idle_coordinator() -> None:
-            """Sincroniza idle_task con el estado vía bus.state_changed."""
+            """Sincroniza idle_task con el ciclo de turno usando eventos reales.
+
+            state_machine.py SOLO publica state_changed("idle") — nunca
+            state_changed("recording") ni state_changed("responding").
+            Por eso este coordinator escucha los eventos que SÍ se publican:
+              - recording_started / playback_started → cancel idle_task
+              - playback_ended / cancelled / error       → re-arm idle_task
+            """
             nonlocal coordinator_task
             async for ev in bus.subscribe():
-                if ev.type != "state_changed":
-                    continue
-                state = ev.data.get("state", "")
-                if state in ("recording", "responding"):
-                    # Pausar idle_task: cancellarlo (no consume WS durante un turno)
+                if ev.type in ("recording_started", "playback_started"):
+                    # Pausar idle_task: cancellarlo (no consume WS durante un turno).
                     if idle_task_holder[0] is not None and not idle_task_holder[0].done():
                         idle_task_holder[0].cancel()
                         try:
@@ -240,8 +244,8 @@ async def main(
                         except asyncio.CancelledError:
                             pass
                         idle_task_holder[0] = None
-                elif state == "idle":
-                    # Re-arrancar idle_task si está cancelado o terminado
+                elif ev.type in ("playback_ended", "cancelled", "error"):
+                    # Re-arrancar idle_task si está cancelado o terminado.
                     if idle_task_holder[0] is None or idle_task_holder[0].done():
                         idle_task_holder[0] = asyncio.create_task(
                             gateway_idle_listener(bus, gateway),
