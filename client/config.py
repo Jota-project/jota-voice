@@ -1,8 +1,9 @@
 from __future__ import annotations
+
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
-import os
+
 import yaml
 
 
@@ -22,11 +23,15 @@ def _load_env_file(path: Path) -> None:
 class GatewayConfig:
     client_key: str
     host: str = ""
-    port: Optional[int] = None      # si es None, no se añade puerto a la URL
+    port: int | None = None      # si es None, no se añade puerto a la URL
     path: str = ""                  # si es "", no se añade path a la URL
     scheme: str = "ws"              # "ws" o "wss"; solo se usa cuando NO hay url completa
     connect_timeout_s: float = 10.0
-    url: Optional[str] = None
+    url: str | None = None
+    # Issue #24: arquitectura de sesión. Default True → handshake eager
+    # al startup del proceso. Si False, conserva el comportamiento reconnect-
+    # per-turn (código actual). Sin override per-launch — solo YAML.
+    persistent_session: bool = True
 
     @property
     def ws_url(self) -> str:
@@ -62,8 +67,8 @@ class DeviceConfig:
 class OWWConfig:
     host: str = "127.0.0.1"
     port: int = 10401
-    wake_words: List[str] = field(default_factory=lambda: ["ok_nabu"])
-    reconnect_backoff_s: List[float] = field(default_factory=lambda: [5.0, 10.0, 20.0, 60.0])
+    wake_words: list[str] = field(default_factory=lambda: ["ok_nabu"])
+    reconnect_backoff_s: list[float] = field(default_factory=lambda: [5.0, 10.0, 20.0, 60.0])
     idle_detection_timeout_s: float = 0.0  # 0.0 = sin timeout
     debounce_s: float = 2.0
     backend: str = "wyoming"
@@ -82,9 +87,9 @@ class AudioConfig:
     silence_timeout_s: float = 1.5
     recording_timeout_s: float = 15.0
     vad_rms_threshold: float = 200.0
-    input_device: Optional[int] = None
-    output_device: Optional[int] = None
-    backend: Optional[str] = None
+    input_device: int | None = None
+    output_device: int | None = None
+    backend: str | None = None
     # Reintentos al abrir el stream de captura. PortAudio puede fallar
     # transientemente al abrir un InputStream (device busy, host API no
     # lista, dispositivo recién desconectado). Cada elemento es el delay
@@ -92,22 +97,22 @@ class AudioConfig:
     # MÁXIMO de intentos. Si la lista está vacía, se intenta una sola vez
     # sin reintento. Patrón equivalente a OWWConfig.reconnect_backoff_s
     # (issue #25).
-    start_retry_backoff_s: List[float] = field(default_factory=lambda: [0.5, 1.0, 2.0])
+    start_retry_backoff_s: list[float] = field(default_factory=lambda: [0.5, 1.0, 2.0])
 
 
 @dataclass
 class DisplayConfig:
     url: str = "http://127.0.0.1:8766"
     timeout_s: float = 2.0
-    backend: Optional[str] = None
+    backend: str | None = None
 
 
 @dataclass
 class MenubarConfig:
     enabled: bool = True
     refresh_hz: float = 5.0
-    log_path: Optional[str] = None
-    config_path: Optional[str] = None
+    log_path: str | None = None
+    config_path: str | None = None
 
     def __post_init__(self) -> None:
         if self.refresh_hz < 1.0:
@@ -119,7 +124,7 @@ class MenubarConfig:
 @dataclass
 class ControlConfig:
     port: int = 8765
-    token_path: Optional[str] = None
+    token_path: str | None = None
     rate_limit_max_requests: int = 10
     rate_limit_window_s: float = 10.0
 
@@ -163,6 +168,7 @@ def _gateway_from_dict(d: dict) -> GatewayConfig:
         scheme=d.get("scheme", "ws"),
         connect_timeout_s=float(d.get("connect_timeout_s", 10.0)),
         url=d.get("url"),
+        persistent_session=bool(d.get("persistent_session", True)),
     )
 
 

@@ -20,16 +20,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
 
-import numpy as np
-
+from app.playback_engine import PlaybackEngine
 from backends.audio_base import AudioBackend
 from backends.gateway_client import GatewayClient
 from config import Config
 
 from .event_bus import EventBus, VoiceEvent
-from app.playback_engine import PlaybackEngine
 
 log = logging.getLogger(__name__)
 
@@ -221,11 +218,30 @@ async def _recording(
     if drained:
         log.debug("RECORDING: descartados %d frames stale de la cola", drained)
 
-    await asyncio.wait_for(
-        gateway.connect(),
-        timeout=cfg.gateway.connect_timeout_s,
-    )
-    log.debug("RECORDING: gateway conectado")
+    if cfg.gateway.persistent_session:
+        # Modo persistente: el connect() se hizo en main(); aquí solo
+        # verificamos que el WS sigue vivo (issue #24).
+        if not gateway.is_connected:
+            log.error("RECORDING: gateway no conectado al inicio del turno")
+            bus.publish(VoiceEvent(
+                type="error",
+                data={
+                    "code": "GATEWAY_DISCONNECTED",
+                    "message": "gateway session is not connected",
+                },
+            ))
+            raise _TurnCancelled()
+    else:
+        # Modo efímero: conectamos en cada turno (comportamiento previo).
+        try:
+            await asyncio.wait_for(
+                gateway.connect(),
+                timeout=cfg.gateway.connect_timeout_s,
+            )
+            log.debug("RECORDING: gateway conectado")
+        except Exception:
+            log.exception("RECORDING: gateway.connect() falló")
+            raise
 
     preroll = audio.get_preroll()
     if preroll:
@@ -351,7 +367,7 @@ async def _responding(
         TURN_END_GRACE_S = 2.0
         gen = gateway.receive()
         loop = asyncio.get_running_loop()
-        grace_deadline: Optional[float] = None
+        grace_deadline: float | None = None
 
         while True:
             try:
@@ -391,6 +407,25 @@ async def _responding(
                 if grace_deadline is not None:
                     # Sigue llegando audio en tránsito tras turn_end — no cortar aún.
                     grace_deadline = loop.time() + TURN_END_GRACE_S
+
+            elif gw_event.type == "turn_start":
+                # Issue #24: turn_start del gateway resetea el estado de
+                # turno. _current_turn_seq ya está actualizado en GatewayClient.
+                # Aquí solo reseteamos la grabación_local (cursor/buffer/playback).
+                log.info("RESPONDING: turn_start → turno %s seq=%s",
+                         gw_event.data.get("turn_id"), gw_event.data.get("turn_seq"))
+                # Si había audio en tránsito de un turno anterior con seq menor,
+                # el descarte ya está hecho en receive(). Aquí limpiamos
+                # el buffer de playback por si acaso.
+                playback.reset()
+
+            elif gw_event.type == "interrupted":
+                # Issue #24: barge-in real del gateway (no basado en wake
+                # word). El gateway detectó transcripción parcial del
+                # usuario y canceló el turno actual.
+                log.info("RESPONDING: interrupted por gateway, cancelando turno")
+                await _safe_send_cancel(gateway)
+                raise _TurnCancelled()
 
             elif gw_event.type == "turn_end":
                 grace_deadline = loop.time() + TURN_END_GRACE_S
@@ -505,8 +540,12 @@ def _log_cancelled(state: str, bus: EventBus) -> None:
 
 
 async def _cleanup(gateway: GatewayClient, playback: PlaybackEngine) -> None:
+    """Limpia recursos al final de un turno. En modo persistente
+    (issue #24) NO desconecta el gateway — eso lo hace voice_client.main
+    en el shutdown final."""
     try:
-        await gateway.disconnect()
+        if not gateway._cfg.persistent_session:
+            await gateway.disconnect()
     except Exception:
         pass
     playback.reset()
@@ -522,7 +561,7 @@ async def run(
     audio: AudioBackend,
     gateway: GatewayClient,
     playback: PlaybackEngine,
-    cancel_event: Optional[asyncio.Event] = None,
+    cancel_event: asyncio.Event | None = None,
 ) -> None:
     if cancel_event is None:
         cancel_event = asyncio.Event()

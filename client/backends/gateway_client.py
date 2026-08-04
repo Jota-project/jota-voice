@@ -2,11 +2,15 @@ import asyncio
 import json
 import logging
 import os
+import warnings
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import AsyncGenerator, Optional, Any
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from domain.event_bus import EventBus
 
 import websockets
-
 from config import GatewayConfig
 
 log = logging.getLogger(__name__)
@@ -35,10 +39,43 @@ class GatewayEvent:
 
 
 class GatewayClient:
-    def __init__(self, cfg: GatewayConfig, device_id: str = "unknown") -> None:
+    def __init__(
+        self,
+        cfg: GatewayConfig,
+        *,
+        bus: Optional["EventBus"] = None,
+        device_id: str | None = None,
+    ) -> None:
         self._cfg = cfg
-        self._device_id = device_id
-        self._ws: Optional[Any] = None
+        self._bus = bus
+        # Atributos poblados tras handshake exitoso (issue #24).
+        self._session_id: str | None = None
+        self._agent: str | None = None
+        self._capabilities: dict[str, Any] = {}
+        self._current_turn_seq: int = 0
+        self._ws: Any | None = None
+        # device_id se mantiene por compat con voice_client.main; se ignora
+        # porque el handshake del gateway no lo contempla (ver
+        # jota-gateway/docs/client-protocol.md §1). Remoción total en una
+        # versión futura cuando todos los call sites estén actualizados.
+        if device_id is not None:
+            warnings.warn(
+                "GatewayClient: device_id se ignora y se eliminará en una "
+                "versión futura (issue #24). El handshake del gateway no "
+                "lo contempla.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self._legacy_device_id: str | None = device_id
+        else:
+            self._legacy_device_id = None
+
+    @property
+    def is_connected(self) -> bool:
+        """True si el WS está abierto. False si no se ha conectado o
+        si se cerró tras un error. Consumido por state_machine._recording()
+        para detectar reconexión perezosa (issue #24)."""
+        return self._ws is not None
 
     async def connect(self) -> None:
         headers = _cloudflare_access_headers()
@@ -62,7 +99,6 @@ class GatewayClient:
             raise
         handshake = {
             "client_key": self._cfg.client_key,
-            "device_id": self._device_id,
             "input_mode": "audio",
             "output_mode": ["audio", "text", "status"],
         }
@@ -90,7 +126,29 @@ class GatewayClient:
         msg = json.loads(raw)
         msg_type = msg.get("type", "")
         if msg_type == "ready":
-            log.debug("Gateway listo (device=%s)", self._device_id)
+            # Issue #24: parseo completo de ready. session_id, agent,
+            # requested_capabilities y live_capabilities se guardan para
+            # correlación y para barge-in (issue #110 de paso).
+            self._session_id = msg.get("session_id")
+            self._agent = msg.get("agent")
+            self._capabilities = {
+                "requested": msg.get("requested_capabilities", {}),
+                "live": msg.get("live_capabilities", {}),
+            }
+            log.debug(
+                "Gateway listo (device=? session=%s agent=%s live=%s)",
+                self._session_id, self._agent, self._capabilities.get("live"),
+            )
+            if self._bus is not None:
+                from domain.event_bus import VoiceEvent
+                self._bus.publish(VoiceEvent(
+                    type="gateway_ready",
+                    data={
+                        "session_id": self._session_id,
+                        "agent": self._agent,
+                        "capabilities": self._capabilities,
+                    },
+                ))
             return
         if msg_type == "error":
             raise RuntimeError(
@@ -136,20 +194,28 @@ class GatewayClient:
         try:
             async for message in self._ws:
                 if isinstance(message, bytes):
-                    # Framing documentado en jota-gateway/docs/client-protocol.md:
-                    # [0xA1][turn_seq uint16 BE][PCM16 24kHz]. Sin separar la
-                    # cabecera, el PCM llega desalineado y con tamaño potencialmente
-                    # impar — np.frombuffer(..., dtype=int16) revienta.
+                    # Framing documentado en jota-gateway/docs/client-protocol.md
+                    # §6: [0xA1][turn_seq uint16 BE][PCM16 24kHz].
                     if len(message) < 3 or message[0] != 0xA1:
                         log.warning(
                             "Gateway: frame binario inesperado (%d bytes, primer byte=%r)",
                             len(message), message[0] if message else None,
                         )
                         continue
-                    turn_seq = (message[1] << 8) | message[2]
+                    frame_seq = (message[1] << 8) | message[2]
+                    # Issue #24: descarte de audio de turnos anteriores. Si el
+                    # gateway ya anunció un turn_start con seq mayor, este
+                    # frame es del turno cancelado y no debe reproducirse.
+                    if frame_seq < self._current_turn_seq:
+                        log.debug(
+                            "Gateway: descartando tts_chunk con turn_seq=%d "
+                            "(current=%d, turno cancelado)",
+                            frame_seq, self._current_turn_seq,
+                        )
+                        continue
                     pcm16 = message[3:]
                     yield GatewayEvent(
-                        type="tts_chunk", data={"audio": pcm16, "turn_seq": turn_seq}
+                        type="tts_chunk", data={"audio": pcm16, "turn_seq": frame_seq}
                     )
                     continue
                 try:
@@ -158,13 +224,21 @@ class GatewayClient:
                     log.warning("Gateway: frame JSON inválido: %r", message[:80])
                     continue
                 event_type = data.get("type", "")
+                # Issue #24: turn_start actualiza _current_turn_seq SOLO si seq > current.
+                # Es la única fuente de incremento de _current_turn_seq (defensa contra
+                # gateways desincronizados).
+                if event_type == "turn_start":
+                    new_seq = data.get("turn_seq", 0)
+                    if isinstance(new_seq, int) and new_seq > self._current_turn_seq:
+                        self._current_turn_seq = new_seq
+                    else:
+                        log.warning(
+                            "Gateway: turn_start con seq <= current "
+                            "(current=%d, got=%r)",
+                            self._current_turn_seq, new_seq,
+                        )
                 if event_type in ("done", "turn_end"):
-                    # El gateway real (green-house) señaliza fin de turno
-                    # con "turn_end" en vez de "done" — sin esto, receive()
-                    # se quedaba esperando mensajes que nunca llegaban hasta
-                    # el timeout de 30s de RESPONDING en cada turno.
                     return
-                # El gateway envía "token" para LLM; normalizamos al tipo interno.
                 if event_type == "token":
                     event_type = "llm_token"
                 yield GatewayEvent(type=event_type, data=data)

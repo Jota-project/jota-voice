@@ -282,3 +282,30 @@ def test_menubar_refresh_clamped_high() -> None:
     from config import MenubarConfig
     cfg = MenubarConfig(refresh_hz=999.0)
     assert cfg.refresh_hz == 30.0
+
+
+def test_gateway_config_persistent_session_default_true() -> None:
+    """Issue #24: gateway.persistent_session default True → handshake eager."""
+    from config import _gateway_from_dict
+    cfg = _gateway_from_dict({"client_key": "x", "host": "127.0.0.1"})
+    assert cfg.persistent_session is True
+
+
+def test_gateway_config_persistent_session_override_false() -> None:
+    """Issue #24: gateway.persistent_session: false en YAML → handshake por turno."""
+    from config import _gateway_from_dict
+    cfg = _gateway_from_dict({
+        "client_key": "x", "host": "127.0.0.1",
+        "persistent_session": False,
+    })
+    assert cfg.persistent_session is False
+
+
+def test_gateway_config_persistent_session_explicit_true() -> None:
+    """Issue #24: gateway.persistent_session: true explícito se respeta."""
+    from config import _gateway_from_dict
+    cfg = _gateway_from_dict({
+        "client_key": "x", "host": "127.0.0.1",
+        "persistent_session": True,
+    })
+    assert cfg.persistent_session is True

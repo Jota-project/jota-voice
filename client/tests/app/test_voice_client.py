@@ -10,6 +10,7 @@ import asyncio
 import sys
 
 import pytest
+from unittest.mock import AsyncMock, MagicMock
 
 from app import voice_client
 from backends import registry
@@ -244,6 +245,15 @@ async def _test_menubar_stops_after_async_cleanup(monkeypatch) -> None:
         def __init__(self, cfg, device_id) -> None:
             pass
 
+        async def connect(self) -> None:
+            pass
+
+        _ws = MagicMock()
+        _session_id = "test-session"
+
+        async def receive(self):
+            yield GatewayEvent(type="status", data={})
+
         async def disconnect(self) -> None:
             cleanup_order.append("gateway.disconnect")
 
@@ -287,3 +297,279 @@ async def _test_menubar_stops_after_async_cleanup(monkeypatch) -> None:
 
 def test_menubar_stops_after_async_cleanup(monkeypatch) -> None:
     asyncio.run(_test_menubar_stops_after_async_cleanup(monkeypatch))
+
+
+# ---------------------------------------------------------------------------
+# Issue #24: gateway_idle_listener — consume receive() durante IDLE
+# ---------------------------------------------------------------------------
+
+from backends.gateway_client import GatewayEvent
+
+
+def _make_gateway_mock(events_to_yield=None):
+    """Mock de GatewayClient que emite una lista de eventos cuando se le pide receive()."""
+    g = MagicMock()
+    g.is_connected = True
+    g._ws = MagicMock()  # simula WS vivo
+    if events_to_yield is None:
+        events_to_yield = []
+
+    async def _receive():
+        for ev in events_to_yield:
+            yield ev
+
+    g.receive = _receive
+    return g
+
+
+def _make_bus():
+    from domain.event_bus import EventBus
+    return EventBus()
+
+
+async def _collect(bus, timeout=1.0):
+    """Suscribe al bus y recolecta eventos hasta el timeout."""
+    captured = []
+    async def _loop():
+        async for ev in bus.subscribe():
+            captured.append(ev)
+            if ev.type in ("__stop__",):
+                break
+    try:
+        await asyncio.wait_for(_loop(), timeout=timeout)
+    except asyncio.TimeoutError:
+        pass
+    return captured
+
+
+async def _test_idle_listener_publish_status_a_bus():
+    """Issue #24: status proactivo durante IDLE aparece como gateway_status."""
+    from app.voice_client import gateway_idle_listener
+    bus = _make_bus()
+    gateway = _make_gateway_mock([
+        GatewayEvent(type="status", data={"service": "tts", "state": "unavailable"}),
+        # terminamos con un type desconocido para forzar salida
+    ])
+
+    listener_task = asyncio.create_task(gateway_idle_listener(bus, gateway))
+
+    # Esperar un momento para que reciba el evento
+    captured = await _collect(bus, timeout=0.5)
+    listener_task.cancel()
+    try:
+        await listener_task
+    except asyncio.CancelledError:
+        pass
+
+    status_evts = [e for e in captured if e.type == "gateway_status"]
+    assert len(status_evts) >= 1
+    assert status_evts[0].data["service"] == "tts"
+
+
+def test_idle_listener_publish_status_a_bus():
+    asyncio.run(_test_idle_listener_publish_status_a_bus())
+
+
+async def _test_idle_listener_descarta_push_turn_solo_logea():
+    """Issue #24: turn_start durante IDLE se loguea y descarta, no publica state_changed."""
+    from app.voice_client import gateway_idle_listener
+    bus = _make_bus()
+    gateway = MagicMock()
+    gateway.is_connected = True
+    gateway._ws = MagicMock()
+
+    async def _receive_turns():
+        """Generator que emite varios turn_start y luego se agota."""
+        for i in range(5):
+            yield GatewayEvent(type="turn_start", data={"turn_id": f"p-{i}", "turn_seq": i})
+
+    gateway.receive = _receive_turns
+
+    listener_task = asyncio.create_task(gateway_idle_listener(bus, gateway))
+    captured = await _collect(bus, timeout=0.5)
+
+    state_changed = [e for e in captured if e.type == "state_changed"]
+    # El assertion clave: turn_start NO se traduce en state_changed
+    assert not state_changed, "no debe publicar state_changed ante un push turn"
+
+
+def test_idle_listener_descarta_push_turn_solo_logea():
+    asyncio.run(_test_idle_listener_descarta_push_turn_solo_logea())
+
+
+async def _test_idle_listener_exception_no_controlada_publica_error():
+    """Issue #24: excepción inesperada en el listener se reporta y termina limpiamente."""
+    from app.voice_client import gateway_idle_listener
+    bus = _make_bus()
+    gateway = MagicMock()
+    gateway.is_connected = True
+    gateway._ws = MagicMock()
+
+    async def _boom():
+        raise RuntimeError("test explosion")
+        yield  # noqa: nunca llega, pero el generador debe ser async
+
+    gateway.receive = _boom
+
+    listener_task = asyncio.create_task(gateway_idle_listener(bus, gateway))
+    # Recolectar DURING execution (antes de que el task termine)
+    captured = await _collect(bus, timeout=0.5)
+    # Esperar a que termine (el boom explota en el primer __anext__)
+    try:
+        await asyncio.wait_for(listener_task, timeout=0.5)
+    except (asyncio.TimeoutError, RuntimeError):
+        pass
+    listener_task.cancel()
+
+    error_evts = [e for e in captured if e.type == "error"]
+    assert len(error_evts) >= 1, "debe publicar VoiceEvent(error) ante excepción"
+    assert "test explosion" in str(error_evts[0].data.get("message", ""))
+
+
+def test_idle_listener_exception_no_controlada_publica_error():
+    asyncio.run(_test_idle_listener_exception_no_controlada_publica_error())
+
+
+# ---------------------------------------------------------------------------
+# Issue #24: voice_client.main() — eager connect, idle_task lifecycle, shutdown
+# ---------------------------------------------------------------------------
+
+
+async def _test_main_llama_connect_una_sola_vez_y_arranca_idle_listener(monkeypatch):
+    """Issue #24: main() conecta eager al gateway si persistent_session=True,
+    e instancia gateway_idle_listener como task de fondo."""
+    from config import Config, GatewayConfig, AudioConfig, DeviceConfig
+
+    cfg = Config(
+        gateway=GatewayConfig(
+            host="127.0.0.1",
+            client_key="x",
+            persistent_session=True,
+            connect_timeout_s=1.0,
+        ),
+        device=DeviceConfig(id="test"),
+        audio=AudioConfig(),
+    )
+
+    gateway_mock = MagicMock()
+    gateway_mock.connect = AsyncMock()
+    gateway_mock.disconnect = AsyncMock()
+    gateway_mock.is_connected = True
+    gateway_mock._ws = MagicMock()
+
+    async def _receive_forever():
+        # Necesary for idle_listener: it calls gen.__anext__() and checks ev.type
+        yield GatewayEvent(type="status", data={})
+
+    gateway_mock.receive = _receive_forever
+
+    audio_mock = MagicMock()
+    audio_mock.start = AsyncMock()
+    audio_mock.stop = AsyncMock()
+
+    sm_started = asyncio.Event()
+
+    async def _fake_sm_run(cfg, bus, audio, gateway, playback, cancel_event=None):
+        sm_started.set()
+        await asyncio.Event().wait()
+
+    class _IdleClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def run(self, *args, **kwargs) -> None:
+            await asyncio.Future()
+
+    monkeypatch.setattr(registry, "make_audio", lambda cfg: audio_mock)
+    monkeypatch.setattr(registry, "make_oww", lambda cfg, **kw: MagicMock(run_forever=AsyncMock()))
+    monkeypatch.setattr(registry, "make_display", lambda cfg: MagicMock())
+    monkeypatch.setattr(registry, "make_menubar", lambda cfg: MagicMock())
+    monkeypatch.setattr(voice_client.control_server, "run", AsyncMock())
+    monkeypatch.setattr(voice_client, "sm_run", _fake_sm_run)
+    monkeypatch.setattr(voice_client, "GatewayClient", lambda *a, **kw: gateway_mock)
+    monkeypatch.setattr(voice_client, "DisplayClient", _IdleClient)
+    monkeypatch.setattr(voice_client, "MenubarClient", _IdleClient)
+
+    stop_ext = asyncio.Event()
+
+    main_task = asyncio.create_task(
+        voice_client.main(cfg, MagicMock(), external_stop_event=stop_ext)
+    )
+    await sm_started.wait()
+    stop_ext.set()
+
+    await asyncio.wait_for(main_task, timeout=3.0)
+
+    gateway_mock.connect.assert_awaited_once()
+
+
+def test_main_llama_connect_una_sola_vez_y_arranca_idle_listener(monkeypatch):
+    asyncio.run(_test_main_llama_connect_una_sola_vez_y_arranca_idle_listener(monkeypatch))
+
+
+async def _test_main_shutdown_desconecta_una_vez(monkeypatch):
+    """Issue #24: main() llama gateway.disconnect() una sola vez en shutdown."""
+    from config import Config, GatewayConfig, AudioConfig, DeviceConfig
+
+    cfg = Config(
+        gateway=GatewayConfig(
+            host="127.0.0.1",
+            client_key="x",
+            persistent_session=True,
+            connect_timeout_s=1.0,
+        ),
+        device=DeviceConfig(id="test"),
+        audio=AudioConfig(),
+    )
+
+    gateway_mock = MagicMock()
+    gateway_mock.connect = AsyncMock()
+    gateway_mock.disconnect = AsyncMock()
+    gateway_mock.is_connected = True
+    gateway_mock._ws = MagicMock()
+
+    async def _receive_forever():
+        # Necesary for idle_listener: it calls gen.__anext__() and checks ev.type
+        yield GatewayEvent(type="status", data={})
+
+    gateway_mock.receive = _receive_forever
+
+    audio_mock = MagicMock()
+    audio_mock.start = AsyncMock()
+    audio_mock.stop = AsyncMock()
+
+    async def _fake_sm_run(cfg, bus, audio, gateway, playback, cancel_event=None):
+        await asyncio.Event().wait()
+
+    class _IdleClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def run(self, *args, **kwargs) -> None:
+            await asyncio.Future()
+
+    monkeypatch.setattr(registry, "make_audio", lambda cfg: audio_mock)
+    monkeypatch.setattr(registry, "make_oww", lambda cfg, **kw: MagicMock(run_forever=AsyncMock()))
+    monkeypatch.setattr(registry, "make_display", lambda cfg: MagicMock())
+    monkeypatch.setattr(registry, "make_menubar", lambda cfg: MagicMock())
+    monkeypatch.setattr(voice_client.control_server, "run", AsyncMock())
+    monkeypatch.setattr(voice_client, "sm_run", _fake_sm_run)
+    monkeypatch.setattr(voice_client, "GatewayClient", lambda *a, **kw: gateway_mock)
+    monkeypatch.setattr(voice_client, "DisplayClient", _IdleClient)
+    monkeypatch.setattr(voice_client, "MenubarClient", _IdleClient)
+
+    stop_ext = asyncio.Event()
+
+    main_task = asyncio.create_task(
+        voice_client.main(cfg, MagicMock(), external_stop_event=stop_ext)
+    )
+    await asyncio.sleep(0.1)
+    stop_ext.set()
+
+    await asyncio.wait_for(main_task, timeout=3.0)
+
+    gateway_mock.disconnect.assert_awaited_once()
+
+
+def test_main_shutdown_desconecta_una_vez(monkeypatch):
+    asyncio.run(_test_main_shutdown_desconecta_una_vez(monkeypatch))

@@ -14,6 +14,10 @@ gateway:
   # scheme: "ws"
   client_key: "RELLENAR"
   connect_timeout_s: 10
+  # Issue #24: arquitectura de sesión. true (default) → una sola conexión
+  # WebSocket persistente por proceso, handshake al arranque. false →
+  # reconexión por turno (código previo, red de seguridad).
+  persistent_session: true
 
 device:
   id: "mi-dispositivo"
