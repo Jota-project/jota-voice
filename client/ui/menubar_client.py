@@ -186,4 +186,5 @@ class MenubarClient:
             await asyncio.sleep(delay)
             self._backend.set_state("idle")
         finally:
-            self._pending_idle_task = None
+            if self._pending_idle_task is asyncio.current_task():
+                self._pending_idle_task = None
