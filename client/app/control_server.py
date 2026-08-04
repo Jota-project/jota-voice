@@ -53,6 +53,17 @@ def _load_or_create_token(path: Path) -> str:
     if path.is_file():
         existing = path.read_text().strip()
         if existing:
+            # Re-verify permissions even when token is valid (#105)
+            try:
+                mode = stat.S_IMODE(path.stat().st_mode)
+            except OSError:
+                mode = 0o600
+            if mode != 0o600:
+                log.warning(
+                    "control_token has lax permissions %s, fixing to 0o600",
+                    oct(mode),
+                )
+                os.chmod(path, 0o600)
             return existing
         # Fichero existe pero está vacío (o solo whitespace). Devolver '' tal
         # cual provocaría que compare_digest(b'', b'') sea True y un atacante
