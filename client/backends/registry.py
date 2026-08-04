@@ -85,11 +85,16 @@ def make_menubar(cfg: Config):
 
     try:
         from ui.menubar_cocoa import CocoaMenubarBackend
+        return CocoaMenubarBackend(cfg.menubar)
     except ImportError:
         logging.getLogger(__name__).warning(
             "pyobjc-framework-Cocoa no disponible; menubar UI desactivada. "
             "Instala con: pip install pyobjc-framework-Cocoa"
         )
         return NullMenubarBackend()
-
-    return CocoaMenubarBackend(cfg.menubar)
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "CocoaMenubarBackend no pudo inicializarse (sin sesion Aqua?); "
+            "menubar UI desactivada."
+        )
+        return NullMenubarBackend()

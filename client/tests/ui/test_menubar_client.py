@@ -285,3 +285,53 @@ def test_run_returns_on_bus_close():
         return task.result()
 
     _run(scenario())
+
+
+def test_delayed_idle_race_does_not_clobber_later_task():
+    """Issue #31: si la tarea A (_delayed_idle) ya está dormida en
+    asyncio.sleep y en el mismo tick síncrono se crea/asigna tarea B a
+    _pending_idle_task, cuando la cancelación de A se entrega su finally
+    NO debe borrar la referencia a B.
+
+    Escenario real: dos errores dentro de la ventana hold_transient_s,
+    seguidos de una wake word. El icono no debe mostrar "IDLE" espurio.
+    """
+    backend = FakeBackend()
+    client = MenubarClient(backend, hold_transient_s=0.05)
+
+    async def scenario():
+        # Crear task A y asignarla manualmente a _pending_idle_task
+        # (asi es como _set_idle_holding_transients lo hace internamente)
+        task_a = asyncio.create_task(client._delayed_idle(0.05))
+        client._pending_idle_task = task_a
+
+        # Ceder el control para que A alcance await asyncio.sleep
+        await asyncio.sleep(0.01)
+
+        # Confirmar que A está viva y dentro del sleep
+        assert not task_a.done(), "task A should be in sleep"
+
+        # En el mismo tick síncrono: crear task B y asignarla a _pending_idle_task.
+        # Esto reproduce el caso en que otra código (ej. otro error) reemplazó la
+        # referencia antes de que la cancelación de A se entregue.
+        task_b = asyncio.create_task(client._delayed_idle(0.1))
+        client._pending_idle_task = task_b
+
+        # Cancelar task A directamente (no a través de _cancel_pending_idle,
+        # para evitar que también haga _pending_idle_task = None)
+        task_a.cancel()
+
+        # Esperar a que la cancelación se entregue y el finally de A corra
+        try:
+            await task_a
+        except asyncio.CancelledError:
+            pass
+
+        # El finally de A debe haber respetado a B: _pending_idle_task sigue siendo B
+        assert client._pending_idle_task is task_b, (
+            f"Expected _pending_idle_task to be task_b, got {client._pending_idle_task}"
+        )
+        # Y B sigue viva (no fue cancelada)
+        assert not task_b.done(), "task B should still be alive"
+
+    _run(scenario())
