@@ -44,7 +44,9 @@ def test_state_changed_propagates():
     pause = asyncio.Event()
 
     async def scenario():
-        task = asyncio.create_task(client.run(bus, ui_queue, pause))
+        loop = asyncio.get_running_loop()
+        stop = asyncio.Event()
+        task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
         await asyncio.sleep(0.05)  # let subscription register
         bus.publish(VoiceEvent(type="state_changed", data={"state": "listening"}))
         bus.publish(VoiceEvent(type="transcription", data={"text": "hola"}))
@@ -74,7 +76,9 @@ def test_wake_word_detected_sets_listening_instantly():
     pause = asyncio.Event()
 
     async def scenario():
-        task = asyncio.create_task(client.run(bus, ui_queue, pause))
+        loop = asyncio.get_running_loop()
+        stop = asyncio.Event()
+        task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
         await asyncio.sleep(0.05)
         bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "hey_jarvis"}))
         await asyncio.sleep(0.05)
@@ -95,7 +99,9 @@ def test_recording_ended_sets_thinking():
     pause = asyncio.Event()
 
     async def scenario():
-        task = asyncio.create_task(client.run(bus, ui_queue, pause))
+        loop = asyncio.get_running_loop()
+        stop = asyncio.Event()
+        task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
         await asyncio.sleep(0.05)
         bus.publish(VoiceEvent(type="recording_ended", data={}))
         await asyncio.sleep(0.05)
@@ -116,7 +122,9 @@ def test_playback_started_sets_speaking():
     pause = asyncio.Event()
 
     async def scenario():
-        task = asyncio.create_task(client.run(bus, ui_queue, pause))
+        loop = asyncio.get_running_loop()
+        stop = asyncio.Event()
+        task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
         await asyncio.sleep(0.05)
         bus.publish(VoiceEvent(type="playback_started", data={}))
         await asyncio.sleep(0.05)
@@ -137,7 +145,9 @@ def test_error_also_sets_error_state():
     pause = asyncio.Event()
 
     async def scenario():
-        task = asyncio.create_task(client.run(bus, ui_queue, pause))
+        loop = asyncio.get_running_loop()
+        stop = asyncio.Event()
+        task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
         await asyncio.sleep(0.05)
         bus.publish(VoiceEvent(type="error", data={"message": "boom"}))
         await asyncio.sleep(0.05)
@@ -158,7 +168,9 @@ def test_error_increments_count():
     pause = asyncio.Event()
 
     async def scenario():
-        task = asyncio.create_task(client.run(bus, ui_queue, pause))
+        loop = asyncio.get_running_loop()
+        stop = asyncio.Event()
+        task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
         await asyncio.sleep(0.05)
         bus.publish(VoiceEvent(type="error", data={"message": "boom"}))
         bus.publish(VoiceEvent(type="error", data={"message": "boom2"}))
@@ -182,7 +194,9 @@ def test_toggle_pause_flips_event():
     ui_queue.put_nowait("toggle_pause")
 
     async def scenario():
-        task = asyncio.create_task(client.run(bus, ui_queue, pause))
+        loop = asyncio.get_running_loop()
+        stop = asyncio.Event()
+        task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
         # give it time to drain two toggle_pause and a third to confirm state
         ui_queue.put_nowait("toggle_pause")
         await asyncio.sleep(0.1)
@@ -205,7 +219,9 @@ def test_cancelled_event_sets_cancelled_state():
     pause = asyncio.Event()
 
     async def scenario():
-        task = asyncio.create_task(client.run(bus, ui_queue, pause))
+        loop = asyncio.get_running_loop()
+        stop = asyncio.Event()
+        task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
         await asyncio.sleep(0.05)
         bus.publish(VoiceEvent(type="cancelled", data={}))
         await asyncio.sleep(0.05)
@@ -231,7 +247,9 @@ def test_error_state_holds_before_reverting_to_idle():
     pause = asyncio.Event()
 
     async def scenario():
-        task = asyncio.create_task(client.run(bus, ui_queue, pause))
+        loop = asyncio.get_running_loop()
+        stop = asyncio.Event()
+        task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
         await asyncio.sleep(0.02)
         bus.publish(VoiceEvent(type="error", data={"message": "boom"}))
         bus.publish(VoiceEvent(type="state_changed", data={"state": "idle"}))
@@ -259,7 +277,9 @@ def test_new_real_event_during_hold_overrides_pending_idle():
     pause = asyncio.Event()
 
     async def scenario():
-        task = asyncio.create_task(client.run(bus, ui_queue, pause))
+        loop = asyncio.get_running_loop()
+        stop = asyncio.Event()
+        task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
         await asyncio.sleep(0.02)
         bus.publish(VoiceEvent(type="error", data={"message": "boom"}))
         bus.publish(VoiceEvent(type="state_changed", data={"state": "idle"}))
@@ -281,7 +301,9 @@ def test_run_returns_on_bus_close():
     pause = asyncio.Event()
 
     async def scenario():
-        task = asyncio.create_task(client.run(bus, ui_queue, pause))
+        loop = asyncio.get_running_loop()
+        stop = asyncio.Event()
+        task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
         await asyncio.sleep(0.05)
         bus.close()
         await asyncio.wait_for(task, timeout=2.0)
