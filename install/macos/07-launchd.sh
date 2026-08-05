@@ -22,6 +22,14 @@ mkdir -p "$PLIST_DIR" "$LOG_DIR"
 
 USER_SHELL_UID="$(id -u)"
 
+# Issue #24 follow-up: KeepAlive=true hace que launchd relance el proceso
+# tras exit (incluso tras `Apagar servicio` del menú Cocoa). Para que el
+# cierre sea permanente, el usuario puede exportar JOTA_KEEP_ALIVE=false
+# antes de ejecutar este script. Por defecto true (comportamiento actual
+# — útil en producción, donde queremos auto-restart tras crash).
+: "${JOTA_KEEP_ALIVE:=true}"
+export JOTA_KEEP_ALIVE
+
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -38,7 +46,7 @@ cat > "$PLIST" <<EOF
         <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>
     <key>RunAtLoad</key><true/>
-    <key>KeepAlive</key><true/>
+    <key>KeepAlive</key><${JOTA_KEEP_ALIVE}/>
     <key>ProcessType</key><string>Interactive</string>
     <key>StandardOutPath</key><string>${LOG_DIR}/stdout.log</string>
     <key>StandardErrorPath</key><string>${LOG_DIR}/stderr.log</string>
@@ -48,6 +56,7 @@ EOF
 
 chmod 644 "$PLIST"
 _ok "plist generado: $PLIST"
+_info "KeepAlive=${JOTA_KEEP_ALIVE} (configurable vía JOTA_KEEP_ALIVE=true|false)"
 
 # Si ya estaba cargado, lo descargamos antes de recargar
 launchctl bootout "gui/${USER_SHELL_UID}/com.jota.voice" 2>/dev/null || true
