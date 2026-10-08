@@ -1,10 +1,10 @@
 # jota-voice Roadmap
 
-> **Estado:** 🟢 Fase 1 cerrada y mergeada a `main` (PR #114, 2026-07-20); Fase A completada y mergeada a `main` el mismo día; Fase 2 con 5/9 issues cerradas en local (`#21`, `#22`, `#26`, `#28`, `#29`, y las post-Fase 1). Pendiente: push y `gh issue close` de las cerradas en local
-> **Última actualización:** 2026-07-29
-> **Issues abiertas:** 99 (rango GitHub `#9`–`#115`, `#21`/`#22`/`#23`/`#25`/`#26`/`#27`/`#28`/`#29` cerradas por Fase 2/A; pendiente `gh issue close` de `#25`)
+> **Estado:** 🟢 Fases 1, A y 3 ✅ cerradas y mergeadas a `main`; Fase 2: **9/12 cerradas** — quedan `#103`, `#107` y `#110`
+> **Última actualización:** 2026-10-08
+> **Issues abiertas:** 83 (rango GitHub `#1`–`#116`; toda la auditoría `#21`–`#44`/`#104`/`#105`/`#108`/`#109` está cerrada)
 > **Rama de trabajo:** `main`
-> **Próximo release:** abrir `#24` (sesión WebSocket persistente — requiere brainstorming → spec → plan); última issue abierta de Fase 2 — ver `docs/fase-2-briefing.md`
+> **Próximo milestone:** cerrar las 3 issues que quedan de Fase 2 (`#103`, `#107`, `#110`) → arrancar Fase 4 (deps, tests y CI) — ver `docs/fase-2-briefing.md`
 
 Este documento es el **plan vivo de remediación y evolución** de jota-voice. Cada tarea referencia una issue de GitHub; las casillas se tachan al cerrar la issue. Se actualiza en el mismo PR que cierra la issue, o en un PR dedicado.
 
@@ -17,16 +17,16 @@ Este documento es el **plan vivo de remediación y evolución** de jota-voice. C
 
 | Métrica | Valor |
 |---|---|
-| Issues totales | **103** |
+| Issues totales | **114** (83 abiertas) |
 | 🔴 Críticos | 12 (Fase 1 cerrada) |
 | 🟠 Altos | 30 |
 | 🟡 Medios | 23 |
 | ⚪ Tech-debt / polish | 38 |
 | Estimación | ~9-12 semanas |
-| Próximo milestone | Continuar Fase 2 (resiliencia de red) tras cerrar Fase A |
+| Próximo milestone | Cerrar Fase 2 (`#103`, `#107`, `#110`) y arrancar Fase 4 (CI) |
 | Ya arreglado antes de la auditoría | 1 (clipping de audio en `audio_sounddevice.py`, pendiente comitear) |
 
-**Auditoría post-Fase 1 (2026-07-19):** 7 revisores de dominio, 13 de los 40 subagentes fallaron por rate limit (afectó a parte de la verificación adversarial; los *reviewers* principales sí completaron). Resultado: **los 12 fixes de Fase 1 resuelven sus issues y los tests verifican el camino que fallaba**; 1 hallazgo `high` (bypass de auth con token vacío, **#108**, arreglado en este PR) y 4 `medium` abren issues para Fase 2-3 (#103–#106). ~28 hallazgos `low` consolidados en 2 issues de Fase 8 (#112, #113). Tracking del gateway (N1–N4) abierto en #107, #108, #110, #111.
+**Auditoría post-Fase 1 (2026-07-19):** 7 revisores de dominio, 13 de los 40 subagentes fallaron por rate limit (afectó a parte de la verificación adversarial; los *reviewers* principales sí completaron). Resultado: **los 12 fixes de Fase 1 resuelven sus issues y los tests verifican el camino que fallaba**; 1 hallazgo `high` (bypass de auth con token vacío, **sin issue propia** — arreglado directamente en PR #114, que lo citaba como "#108" ⚠️ *esa referencia es errónea: #108 es la issue de tracking `status:degraded` — ver nota en Fase 8*) y 4 `medium` abren issues para Fase 2-3 (#103–#106). ~28 hallazgos `low` consolidados en 2 issues de Fase 8 (#112, #113). Tracking del gateway (N1–N4) abierto en #107, #108, #110, #111.
 
 ---
 
@@ -52,7 +52,7 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 ### 🔴 Fase 1 — Bugs críticos (semanas 1–2) ✅ CERRADA
 
 **Objetivo:** cerrar los 12 bugs que rompen el producto en uso normal o exponen una superficie de ataque real.
-**Acceptance gate:** cero issues 🔴 abiertas, suite de tests verde, una sesión de prueba manual de 10 turnos consecutivos sin degradación de audio perceptible, `ControlServer` rechaza peticiones sin token. **Cumplido el 2026-07-19** (con la salvedad del fix #108, incluido en la auditoría post-Fase 1, comiteado en este PR).
+**Acceptance gate:** cero issues 🔴 abiertas, suite de tests verde, una sesión de prueba manual de 10 turnos consecutivos sin degradación de audio perceptible, `ControlServer` rechaza peticiones sin token. **Cumplido el 2026-07-19** (con la salvedad del fix de bypass de token vacío, citado como "#108" en PR #114 pero sin issue propia — comiteado en ese mismo PR; ver nota en Fase 8).
 
 - [x] **#9** 🔴 `[001]` — Cola de audio compartida entre OWW y captura — consumidores en competencia real — **M** — fan-out a colas independientes (`e124a50`, `746caf0`, `283fd75`)
 - [x] **#10** 🔴 `[002]` — ControlServer (127.0.0.1:8765) sin autenticación — vulnerable desde cualquier pestaña de navegador — **S** — token compartido (600) + header `X-Jota-Control-Token` + rate limiting (`c27ba2a`, `a31fd42`)
@@ -67,15 +67,16 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 - [x] **#19** 🔴 `[011]` — `menubar_cocoa.py::stop()` mata el proceso entero de forma abrupta — **S** — `stop:` sin `exit()` + `NSEvent` para despertar el run loop; cleanup asíncrono completo antes de parar el menubar (`5eec382`, `1d97325`)
 - [x] **#20** 🔴 `[012]` — SIGINT/SIGTERM solo se procesan cuando dispara el NSTimer — latencia de hasta 1s — **M** — `signal.set_wakeup_fd()` + `NSFileHandle` watcher sobre el run loop de Cocoa; verificación real pasa de >1s (esperando timer) a 61ms end-to-end con `refresh_hz=1.0` (`13d18c9`)
 
-### 🟠 Fase 2 — Resiliencia de red y protocolo (semana 3)
+### 🟠 Fase 2 — Resiliencia de red y protocolo (semana 3) — 🟡 9/12 cerradas
 
 **Objetivo:** que el cliente se comporte de forma predecible ante red degradada/caída, y no se apoye en timeouts anidados que no hacen lo que aparentan.
 **Acceptance gate:** simulación de red degradada (`tc netem` o similar) durante 20 turnos sin cuelgues; `is_silence()` unificado ✅ (cerrado por Fase A, ver `#27`); ningún secreto visible en logs con `logging.level: DEBUG`.
+**Estado (2026-10-08):** las 9 issues de la fase (#21–#29) están cerradas y pushadas a `main` (últimas: #22/#23/#29 el 2026-08-01, #25 el 2026-08-02, **#24 — sesión persistente — el 2026-08-04** con merge `b10f39f`; el "pendiente de push y `gh issue close`" del encabezado anterior ya no aplica). Quedan 3 issues de tracking: **#103, #107 y #110**, más **#116** (abierta tras el cierre de Fase 3 del gateway, ver abajo). El gate de simulación de red degradada no consta ejecutado.
 
 - [x] **#21** 🟠 `[013]` — Shutdown no cancela realmente los tasks anidados — proceso reiniciado a mitad de turno deja tareas huérfanas — **M** — try/finally en `_recording`/`_responding`/`_oww_loop` cancela y drena tasks hijos (capture_task, cancel_task, receive_task, wake_task) cuando la tarea externa recibe `cancel()` desde fuera; replicado el patrón de `_wait_wake_or_cancel`. Regresión cubierta por `client/tests/domain/test_state_machine_cancel.py` (parametrizado sobre los tres puntos).
 - [x] **#22** 🟠 `[014]` — Sin health-check ni feedback de que OWW (wake word) está caído — **S** — `OWWClient.run_forever` publica `VoiceEvent("oww_degraded", {consecutive_failures, backoff_s})` al cruzar `OWWConfig.oww_healthcheck_threshold` (default 3) reintentos consecutivos, y `VoiceEvent("oww_recovered", {})` tras una detección exitosa. `bus` opcional en `__init__` (legacy preservado); `consecutive_drops` ya no se resetea tras cada `connect_with_backoff` exitoso (bug que inutilizaba el threshold). Limitación: `WyomingBackend` aún no propaga `bus`, así que la degradación NO se publica desde `make_oww` — el fix aplica a `OWWClient` directo. Tests en `client/tests/backends/test_oww_healthcheck.py`.
 - [x] **#23** 🟠 `[015]` — `recording_timeout_s` no es un límite duro frente a una conexión de red degradada — **S** — `gateway.send_audio(frame)` ahora envuelto con `asyncio.wait_for(..., timeout=remaining)` dentro de `_capture_loop`; `TimeoutError` rompe el bucle con warning. `recording_timeout_s` (default 15s) pasa de promesa soft a límite duro. Tests en `client/tests/domain/test_state_machine_recording_timeout.py`.
-- [x] **#24** 🟠 `[016]` — Arquitectura de reconexión por turno contradice el protocolo (`turn_seq` muerto) — **L** — migrado a sesión persistente (`gateway.persistent_session: true` por defecto), handshake eager al arrancar, idle_listener durante IDLE, `interrupted`/`turn_start`/`tool_call` parseados, `_current_turn_seq` gestionado, `device_id` fuera del handshake. Cierra #110 (capabilities) de paso. Sub-producto de #103 mitigado. (`b10f39f`, `4324a51`)
+- [x] **#24** 🟠 `[016]` — Arquitectura de reconexión por turno contradice el protocolo (`turn_seq` muerto) — **L** — migrado a sesión persistente (`gateway.persistent_session: true` por defecto), handshake eager al arrancar, idle_listener durante IDLE, `interrupted`/`turn_start`/`tool_call` parseados, `_current_turn_seq` gestionado, `device_id` fuera del handshake. ⚠️ *el texto original decía "Cierra #110 (capabilities) de paso", pero **#110 sigue abierta** — verificar si queda trabajo pendiente allí.* Sub-producto de #103 mitigado. (`b10f39f` merge 2026-08-04, `4324a51`; issue cerrada 2026-08-04)
 - [x] **#25** 🟠 `[017]` — `audio_sounddevice.py::start()` sin reintentos si `sd.InputStream()` falla al abrir — **S** — Helper async `_open_input_stream_with_backoff()` envuelve `sd.InputStream(...)` + `.start()` capturando `sd.PortAudioError`, con `asyncio.sleep` entre intentos. Nuevo campo `AudioConfig.start_retry_backoff_s` (default `[0.5, 1.0, 2.0]`, 3 intentos, ~3.5s total) propagado por `_audio_from_dict()`. Tests en `client/tests/backends/test_audio_sounddevice.py` (retry+success, exhaust, first-try).
 - [x] **#26** 🟠 `[018]` — Timeouts de conexión triplemente anidados — el más interno (websockets, 10s) nunca se sobreescribe — **XS** — `open_timeout=self._cfg.connect_timeout_s` en `websockets.connect()`
 - [x] **#27** 🟠 `[019]` — `is_silence()` duplicado y divergente entre `audio_sounddevice.py` y `audio_capture.py` — **M** — unificado en `client/core/audio/vad.py` (RMS sobre float32 normalizado, guard de frame vacío) como parte de la extracción del audio kit a core/ ("Fase A", spec `docs/superpowers/specs/2026-07-18-fase-a-audio-kit-design.md`); de paso arregla `test_make_audio_default_termux` introduciendo `client/core/platform_key.py`
@@ -84,18 +85,21 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 - [ ] **#103** 🟡 `[022]` — Race: cancel simultáneo con ConnectionClosedError descarta el error real en `_responding` — **S** — *post-Fase 1*
 - [ ] **#110** 🟡 `[023]` — Capturar `ready.session_id` y `ready.capabilities` en `GatewayClient.connect()` — prerequisito del barge-in (enh 9.1) — **S** — *tracking gateway*
 - [ ] **#107** 🟡 `[024]` — Distinguir causa de `close 1008` en handshake: `client_key` inválida vs `agent_not_permitted` vs `agent_not_available` — **XS** — *tracking gateway*
+- [ ] **#116** 🟡 — jota-gateway #115: los nuevos timeouts de protocolo del gateway (`HANDSHAKE_TIMEOUT_S`, `TURN_TIMEOUT_S`, `IDLE_TIMEOUT_S`, `SHUTDOWN_DRAIN_S`, PR gateway #169) pueden afectar a sesiones WS de larga duración — *abierta el 2026-08 tras el cierre de Fase 3 del gateway; sin labels de severidad*
 
-### 🟠 Fase 3 — UI/menubar y ciclo de vida del proceso (semana 4)
+### 🟠 Fase 3 — UI/menubar y ciclo de vida del proceso (semana 4) — ✅ CERRADA (2026-08-04)
 
 **Objetivo:** que el menubar no pueda tumbar ni bloquear el resto del cliente, y que el composition root (`voice_client.py`) tenga red de seguridad de tests.
 **Acceptance gate:** apagar el servicio desde el menú no bloquea el run loop más de 200ms; un fallo de construcción del menubar no impide que arranque el resto del cliente; `voice_client.py` tiene al menos un test de integración end-to-end.
 
-- [ ] **#30** 🟠 `[022]` — `_shutdown_service()` bloquea el hilo principal de Cocoa hasta 10s con `subprocess.run` síncrono — **XS**
-- [ ] **#31** 🟠 `[023]` — Race condition confirmada en `_pending_idle_task` del menubar — el icono revierte a "idle" espontáneamente — **XS**
-- [ ] **#32** 🟠 `[024]` — Construcción de `CocoaMenubarBackend` sin try/except más allá de `ImportError` — un fallo en runtime tumba TODO el cliente — **XS**
+- [x] **#30** 🟠 `[022]` — `_shutdown_service()` bloquea el hilo principal de Cocoa hasta 10s con `subprocess.run` síncrono — **XS** — apagar el servicio ahora usa SIGTERM directo (bypass launchctl) — cerrada 2026-08-04 (`4175f54`, merge `5cdda1a`)
+- [x] **#31** 🟠 `[023]` — Race condition confirmada en `_pending_idle_task` del menubar — el icono revierte a "idle" espontáneamente — **XS** — no pisar referencias vivas al encolar — cerrada 2026-08-04 (`3e87f5c`)
+- [x] **#32** 🟠 `[024]` — Construcción de `CocoaMenubarBackend` sin try/except más allá de `ImportError` — un fallo en runtime tumba TODO el cliente — **XS** — `make_menubar` captura cualquier excepción — cerrada 2026-08-04 (`872f064`)
 - [x] **#33** 🟠 `[025]` — `voice_client.py` (composition root real del cliente) tiene CERO tests — **M** — resuelto por el trabajo de #24 (Tasks 6/7/hotfix añadieron 7 tests de integración en `client/tests/app/test_voice_client.py` cubriendo `gateway_idle_listener`, `main()` startup/shutdown, y el coordinator idle). Acceptance gate de Fase 3 cumplido.
-- [ ] **#104** 🟡 `[026]` — Observabilidad: SIGTERM/SIGINT no produce log en Cocoa mode (regresión del fix #20) — **XS** — *post-Fase 1*
-- [ ] **#105** 🟡 `[027]` — Permisos 0o600 del fichero de token no se re-verifican ni se re-aplican sobre el fichero existente — **XS** — *post-Fase 1*
+- [x] **#104** 🟡 `[026]` — Observabilidad: SIGTERM/SIGINT no produce log en Cocoa mode (regresión del fix #20) — **XS** — *post-Fase 1* — cerrada 2026-08-04
+- [x] **#105** 🟡 `[027]` — Permisos 0o600 del fichero de token no se re-verifican ni se re-aplican sobre el fichero existente — **XS** — *post-Fase 1* — cerrada 2026-08-04 (junto con #44, Fase 5)
+
+**Cierre de fase (2026-08-04):** las 6 issues cerradas el mismo día. Trabajo adicional en `main` esa semana: arreglo de 11 tests de menubar con signature antigua (`ffbf00f`) y KeepAlive del LaunchAgent configurable vía `JOTA_KEEP_ALIVE` (`2e191bd`) — *este último es trabajo relacionado con #46, que sigue abierta en Fase 5*. ⚠️ Queda **#115** (race `O_EXCL` en el fichero de token, follow-up) — ver Fase 5.
 
 ### 🟠 Fase 4 — Dependencias, tests y CI (semana 5)
 
@@ -118,13 +122,14 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 
 - [ ] **#42** 🟠 `[034]` — Doble stack de instalación (Termux vs macOS) sin punto de entrada único que detecte plataforma — **M**
 - [ ] **#43** 🟠 `[035]` — `install.sh` raíz (Termux) usa `source` en vez de subproceso — un `exit 1` mata todo el instalador — **S**
-- [ ] **#44** 🟠 `[036]` — Permisos 600 del wizard de config solo se aplican al crear, nunca se re-verifican — evidencia en disco: ya degradados a 644 — **XS**
+- [x] **#44** 🟠 `[036]` — Permisos 600 del wizard de config solo se aplican al crear, nunca se re-verifican — evidencia en disco: ya degradados a 644 — **XS** — cerrada 2026-08-04 (junto con #105, Fase 3)
 - [ ] **#45** 🟠 `[037]` — Discrepancia de versión de Python entre `01-homebrew.sh` y `03-venv.sh`/`04-oww.sh` — **XS**
 - [ ] **#46** 🟠 `[038]` — LaunchAgents con `KeepAlive=true` sin `ThrottleInterval` explícito ni `SuccessfulExit=false` — **S**
 - [ ] **#47** 🟠 `[039]` — README.md desincronizado con los scripts reales de `install/macos/` — se salta el config wizard — **XS**
 - [ ] **#48** 🟠 `[040]` — Hostname personal hardcodeado en `install/macos/02-config-wizard.sh` (HEAD committeado) — **S**
 - [ ] **#101** 🟠 `[093]` — Eliminar TODOS los valores hardcoded de entorno de producción — estructura agnóstica vía config/env — **M** — *amplía #48; incluye reescribir historial de git*
 - [ ] **#102** 🟠 `[094]` — Diseñar arquitectura hexagonal (puertos y adaptadores) para abstracción de plataforma, previo a instaladores Linux/Windows — **L** — *bloquea #42 y el enhancement 9.2*
+- [ ] **#115** 🟡 — Race: `FileExistsError` tras `O_EXCL` puede leer fichero vacío si el ganador aún no ha escrito (follow-up del fix de bypass de token citado como "#108") — **XS** — *abierta tras cerrar #105/#44 (2026-08); labels: `severity:medium`, `type:race`, `domain:backends`*
 
 ### 🟡 Fase 6 — Hardening de config, backends y state-machine (semanas 7–8)
 
@@ -196,7 +201,7 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 - [ ] **#98** ⚪ `[090]` — `_title_for_state()` siempre devuelve `""` — código muerto; `showAbout_` bloquea el run loop — **XS**
 - [ ] **#99** ⚪ `[091]` — Ramas muertas en `MenubarClient._drain_queue()` para 4 de los 5 comandos de UI — **XS**
 - [ ] **#100** ⚪ `[092]` — Polling perpetuo de 200ms sobre el executor por defecto compartido — **S**
-- [ ] **#108** ⚪ `[093]` — Reaccionar a `status:{service:transcriber, state:degraded}` mostrando en menubar que la transcripción está degradada — **XS** — *tracking gateway*
+- [ ] **#108** ⚪ `[093]` — Reaccionar a `status:{service:transcriber, state:degraded}` mostrando en menubar que la transcripción está degradada — **XS** — *tracking gateway* — ⚠️ **la issue está cerrada en GitHub (2026-07-19) pero la funcionalidad no consta implementada**: el PR #114 citaba "#108" para el fix de bypass de token (que no tenía issue propia) y el follow-up #115 también la usa para referirse al fichero de token — posible cierre por confusión de número; **verificar y reabrir si procede**
 - [ ] **#111** ⚪ `[094]` — Exponer `allowed_agents`/`default_agent` configurados para el `client_key` en menubar / config wizard — **S** — *tracking gateway*
 - [ ] **#112** ⚪ `[095]` — Deuda técnica en tests: mocks sin `spec`, fakes duplicados, aserciones débiles, timing ajustado — **S** — *consolidada en auditoría post-Fase 1*
 - [ ] **#113** ⚪ `[096]` — Deuda técnica en código/docs: dead code, docstrings incorrectos, refactors menores, edge cases — **S** — *consolidada en auditoría post-Fase 1*
@@ -209,11 +214,11 @@ Enhancements identificados durante la auditoría, alineados con la visión de "m
 
 ### 9.1 — Arquitectura de sesión persistente (✅ dirección confirmada, ver Decisiones tomadas #1)
 
-Se implementa como parte del trabajo de la issue #24 (Fase 2). Las siguientes tareas se abrirán como issues concretas al empezar ese trabajo:
+La base ya está implementada como parte de la issue **#24** (Fase 2, mergeada a `main` el 2026-08-04, `b10f39f`). Pendientes sobre esa base:
 
-- [ ] **enh** — Migrar de reconexión-por-turno a sesión WebSocket persistente, usando `turn_seq` para descarte de audio antiguo en el barge-in en vez de reconexión completa
-- [ ] **enh** — Barge-in real (hablar por encima del asistente) aprovechando `capabilities.barge_in` del protocolo, no solo "repetir la wake word"
-- [ ] **enh** — Recibir notificaciones `status` proactivas del gateway durante IDLE (requiere conexión persistente)
+- [x] **enh** — Migrar de reconexión-por-turno a sesión WebSocket persistente, usando `turn_seq` para descarte de audio antiguo en el barge-in en vez de reconexión completa — ✅ implementado en #24
+- [ ] **enh** — Barge-in real (hablar por encima del asistente) aprovechando `capabilities.barge_in` del protocolo, no solo "repetir la wake word" — *requiere #110 (`ready.session_id`/`ready.capabilities`)*
+- [ ] **enh** — Recibir notificaciones `status` proactivas del gateway durante IDLE (requiere conexión persistente) — *la conexión persistente y el `idle_listener` ya existen (#24); pendiente de confirmar el manejo de `status` durante IDLE*
 
 ### 9.2 — Multiplataforma completo (bloqueado por #102, ver Decisiones tomadas #4)
 
@@ -245,7 +250,7 @@ Se implementa como parte del trabajo de la issue #24 (Fase 2). Las siguientes ta
 
 Las 4 decisiones de diseño identificadas en la auditoría ya están resueltas:
 
-1. **Arquitectura de sesión (#24 / `[016]`) → migrar.** Se pasa de reconexión-por-turno a sesión WebSocket persistente usando `turn_seq` para descartar audio antiguo en el barge-in, en vez de reconexión completa. Habilita el barge-in real (`capabilities.barge_in`) y las notificaciones `status` proactivas durante IDLE. Alcance detallado en enhancement 9.1; se abrirán issues concretas al empezar el trabajo de Fase 2.
+1. **Arquitectura de sesión (#24 / `[016]`) → migrar.** Se pasa de reconexión-por-turno a sesión WebSocket persistente usando `turn_seq` para descartar audio antiguo en el barge-in, en vez de reconexión completa. Habilita el barge-in real (`capabilities.barge_in`) y las notificaciones `status` proactivas durante IDLE. **Implementado en #24 (merge 2026-08-04, `b10f39f`)**; el barge-in real y las notificaciones `status` quedan pendientes sobre esa base (enh 9.1).
 
 2. **Reescritura de historial de git + estructura agnóstica al entorno (#48 / `[040]`, ampliado en #101) → sí, en ambos frentes.** No solo se elimina el hostname hardcodeado puntual: se audita el repo completo en busca de cualquier URL/IP/hostname de producción real hardcodeado, se migra todo a config/env (ningún fichero versionado debe requerir edición para apuntar a otro despliegue), y se reescribe el historial de git (`filter-repo`/BFG) para limpiar lo ya comiteado — el repo ya es público.
 
@@ -272,9 +277,9 @@ Las 4 decisiones de diseño identificadas en la auditoría ya están resueltas:
 
 | Milestone | Criterio |
 |---|---|
-| **Fase 1 done** ✅ | 12 🔴 cerrados, suite de tests verde (171 pass, 1 fail pre-existente ajeno), 10 turnos manuales consecutivos sin degradación de audio, ControlServer rechaza sin token — **cumplido el 2026-07-19**. Auditoría exhaustiva post-Fase 1 (7 revisores de dominio, 13/40 subagentes con rate limit) verificó que los 12 fixes resuelven sus issues; 1 fix de la propia auditoría (#108, bypass de auth con token vacío) comiteado en este PR. |
-| **Fase 2 done** | Simulación de red degradada sin cuelgues, `is_silence()` unificado ✅ (Fase A), cero secretos visibles en logs DEBUG |
-| **Fase 3 done** | Apagar desde el menú no bloquea >200ms, fallo del menubar no impide arrancar el resto, `voice_client.py` con test de integración |
+| **Fase 1 done** ✅ | 12 🔴 cerrados, suite de tests verde (171 pass, 1 fail pre-existente ajeno), 10 turnos manuales consecutivos sin degradación de audio, ControlServer rechaza sin token — **cumplido el 2026-07-19**. Auditoría exhaustiva post-Fase 1 (7 revisores de dominio, 13/40 subagentes con rate limit) verificó que los 12 fixes resuelven sus issues; 1 fix de la propia auditoría (bypass de auth con token vacío, sin issue propia — citado como "#108" en PR #114) comiteado en ese PR. |
+| **Fase 2 done** | ⚠️ 9/12 — issues #21–#29 cerradas ✅, `is_silence()` unificado ✅ (Fase A), cero secretos visibles en logs DEBUG ✅ (#28) — *pendientes: #103, #107, #110, #116 y la simulación de red degradada* |
+| **Fase 3 done** ✅ | ✅ 6 issues (#30–#33, #104, #105) cerradas el 2026-08-04 — apagar desde el menú no bloquea >200ms (SIGTERM directo, `4175f54`), fallo del menubar no impide arrancar (`872f064`), `voice_client.py` con tests de integración (#33 vía #24) |
 | **Fase 4 done** | Instalación limpia funciona, CI verde en cada PR, cero nombres de test duplicados |
 | **Fase 5 done** | `install.sh` continúa tras fallo no crítico, permisos 600 re-verificados en arranque, historial de git limpio de hostname personal |
 | **Fase 6 done** | Config inválida falla al arrancar con mensaje claro, fallo de un suscriptor del bus no mata la sesión |
