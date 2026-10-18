@@ -1662,7 +1662,6 @@ async def test_interrupted_durante_responding_dispara_cancel():
 
     gateway = MagicMock(spec=GatewayClient)
     gateway.is_connected = True
-    gateway._cfg = MagicMock(persistent_session=True)
 
     # El gateway emite interrupted como primer evento (simula barge-in del servidor).
     async def _receive_with_interrupt():
@@ -1740,7 +1739,6 @@ async def test_dos_turnos_conectan_y_desconectan_en_modo_efimero():
 
     gateway = MagicMock(spec=GatewayClient)
     gateway.is_connected = True
-    gateway._cfg = MagicMock(persistent_session=False)
     gateway.receive = lambda: _make_async_iter(gw_events)
 
     audio = _make_audio_mock(silent=True)

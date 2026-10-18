@@ -88,10 +88,19 @@ class _GatewayError(Exception):
 
 
 async def _safe_send_cancel(gateway: GatewayClient) -> None:
+    """Envía ``cancel`` sin dejar que un fallo tumbe la limpieza del turno.
+
+    Issue #66: antes el fallo se tragaba sin rastro. Una sesión ya cerrada es
+    lo esperable (cancel tras un corte) y va a DEBUG; cualquier otra cosa es
+    un fallo real y va a WARNING.
+    """
     try:
         await gateway.send_cancel()
-    except Exception:
-        pass
+    except GatewayDisconnected as exc:
+        log.debug("cancel no enviado: la sesión con el gateway ya está cerrada (%s)", exc)
+    except Exception as exc:
+        log.warning("cancel no enviado al gateway: %r", exc)
+
 
 async def _idle(
     cfg: Config,
@@ -673,15 +682,18 @@ def _log_cancelled(state: str, bus: EventBus) -> None:
     bus.publish(VoiceEvent(type="cancelled", data={"state": state}))
 
 
-async def _cleanup(gateway: GatewayClient, playback: PlaybackEngine) -> None:
+async def _cleanup(cfg: Config, gateway: GatewayClient, playback: PlaybackEngine) -> None:
     """Limpia recursos al final de un turno. En modo persistente
     (issue #24) NO desconecta el gateway — eso lo hace voice_client.main
-    en el shutdown final."""
-    try:
-        if not gateway._cfg.persistent_session:
+    en el shutdown final.
+
+    Issue #66: decide por ``cfg`` (antes leía ``gateway._cfg``, un atributo
+    privado) y deja rastro si ``disconnect`` falla."""
+    if not cfg.gateway.persistent_session:
+        try:
             await gateway.disconnect()
-    except Exception:
-        pass
+        except Exception as exc:
+            log.warning("Limpieza del turno: gateway.disconnect() falló: %r", exc)
     playback.reset()
 
 
@@ -719,7 +731,7 @@ async def run(
             raise
         except Exception as exc:
             _log_error(state, exc, bus)
-            await _cleanup(gateway, playback)
+            await _cleanup(cfg, gateway, playback)
             continue
 
         state = "RECORDING"
@@ -727,15 +739,15 @@ async def run(
             await _recording(wake_word, bus, audio, gateway, playback, cfg, cancel_event)
         except _TurnCancelled:
             _log_cancelled(state, bus)
-            await _cleanup(gateway, playback)
+            await _cleanup(cfg, gateway, playback)
             continue
         except asyncio.CancelledError:
             log.info("StateMachine: cancelado en RECORDING")
-            await _cleanup(gateway, playback)
+            await _cleanup(cfg, gateway, playback)
             raise
         except Exception as exc:
             _log_error(state, exc, bus)
-            await _cleanup(gateway, playback)
+            await _cleanup(cfg, gateway, playback)
             continue
 
         state = "RESPONDING"
@@ -749,4 +761,4 @@ async def run(
         except Exception as exc:
             _log_error(state, exc, bus)
         finally:
-            await _cleanup(gateway, playback)
+            await _cleanup(cfg, gateway, playback)
