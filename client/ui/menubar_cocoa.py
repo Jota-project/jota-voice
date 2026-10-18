@@ -41,6 +41,7 @@ class CocoaMenubarBackend:
         self._header_item: Optional[AppKit.NSMenuItem] = None
         self._pause_menu_item: Optional[AppKit.NSMenuItem] = None
         self._timer: Optional[Foundation.NSTimer] = None
+        self._status_bar = AppKit.NSStatusBar.systemStatusBar()
 
         self._build_status_item()
 
@@ -49,7 +50,7 @@ class CocoaMenubarBackend:
     # ------------------------------------------------------------------
 
     def _build_status_item(self) -> None:
-        self.status_item = AppKit.NSStatusBar.systemStatusBar().statusItemWithLength_(
+        self.status_item = self._status_bar.statusItemWithLength_(
             AppKit.NSVariableStatusItemLength
         )
         if self.status_item.button() is not None:
@@ -206,9 +207,7 @@ class CocoaMenubarBackend:
         performSelectorOnMainThread_withObject_waitUntilDone_. ``stop:`` hace
         retornar el run loop; ``terminate:`` llamaría a exit() y podría cortar
         el apagado asíncrono a mitad."""
-        if self._timer is not None:
-            self._timer.invalidate()
-            self._timer = None
+        self._teardown()
         if self._app is not None:
             self._app.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "stop:", None, False
@@ -232,6 +231,20 @@ class CocoaMenubarBackend:
                 0,
             )
             self._app.postEvent_atStart_(wake_event, True)
+
+    def _teardown(self) -> None:
+        """Libera los recursos Cocoa: timer, NSStatusItem y NSMenu (issue
+        #68). Idempotente: stop() puede llamarse más de una vez."""
+        if self._timer is not None:
+            self._timer.invalidate()
+            self._timer = None
+        if self.status_item is not None:
+            self.status_item.setMenu_(None)
+            self._status_bar.removeStatusItem_(self.status_item)
+            self.status_item = None
+        self._menu = None
+        self._header_item = None
+        self._pause_menu_item = None
 
     # ------------------------------------------------------------------
     # Tick del NSTimer (corre en hilo Cocoa)

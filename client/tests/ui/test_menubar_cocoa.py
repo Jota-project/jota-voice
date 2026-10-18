@@ -110,3 +110,41 @@ def test_quit_without_commands_stops_app_cleanly(backend):
     assert [(event.type(), at_start) for event, at_start in posted_events] == [
         (AppKit.NSEventTypeApplicationDefined, True)
     ]
+
+
+class _StatusBarSpy:
+    """Envuelve la NSStatusBar real y registra las retiradas (issue #68)."""
+
+    def __init__(self, real):
+        self._real = real
+        self.removed = []
+
+    def removeStatusItem_(self, item):
+        self.removed.append(item)
+        self._real.removeStatusItem_(item)
+
+
+def test_stop_removes_status_item_from_system_bar(backend):
+    """Issue #68: stop() debe retirar el NSStatusItem de la barra del
+    sistema; si no, cada corrida de tests deja iconos huérfanos."""
+    item = backend.status_item
+    spy = _StatusBarSpy(backend._status_bar)
+    backend._status_bar = spy
+
+    backend.stop()
+
+    assert spy.removed == [item]
+    assert backend.status_item is None
+    assert backend._menu is None
+
+
+def test_stop_is_idempotent(backend):
+    """Issue #68: el fixture vuelve a llamar a stop(); no debe fallar ni
+    intentar retirar dos veces el mismo item."""
+    spy = _StatusBarSpy(backend._status_bar)
+    backend._status_bar = spy
+
+    backend.stop()
+    backend.stop()
+
+    assert len(spy.removed) == 1
