@@ -7,10 +7,15 @@ Sin dependencias externas: solo stdlib + asyncio.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import inspect
+import logging
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -136,3 +141,30 @@ class _Subscription:
     async def aclose(self) -> None:
         await self._gen.aclose()
         self._bus._unsubscribe(self._q)
+
+
+async def consume(
+    events: "_Subscription",
+    handler: Callable[[VoiceEvent], Awaitable[None] | None],
+    *,
+    name: str,
+) -> None:
+    """Bucle estándar de un suscriptor del bus (issue #63).
+
+    Llama a ``handler(event)`` (síncrono o async) por cada evento. Si lanza,
+    se registra con el nombre del suscriptor y el bucle sigue: un backend
+    defectuoso no puede matar la task de ese suscriptor para el resto de la
+    sesión. ``publish`` ya aísla a los suscriptores entre sí (una cola por
+    suscriptor, put_nowait). ``CancelledError`` se propaga. Termina al
+    cerrarse el bus y, con ``aclosing``, retira la suscripción en el acto al
+    terminar o cancelarse (si no, una suscripción creada de antemano, como
+    las de voice_client, seguiría registrada acumulando eventos).
+    """
+    async with contextlib.aclosing(events):
+        async for event in events:
+            try:
+                result = handler(event)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                log.exception("EventBus: el suscriptor %s falló procesando %s", name, event.type)

@@ -11,7 +11,7 @@ import queue
 import signal
 import threading
 
-from domain.event_bus import EventBus, VoiceEvent
+from domain.event_bus import EventBus, VoiceEvent, consume
 
 from .menubar_base import (
     HEALTH_FATAL,
@@ -134,8 +134,13 @@ class MenubarClient:
             # events: suscripción creada antes de arrancar la task (ver
             # voice_client: antes del connect inicial, para no perder los
             # status previos a ready). None -> se suscribe aquí.
-            async for event in (events if events is not None else bus.subscribe()):
-                await self._handle(event)
+            # consume(): una excepción de _handle (backend defectuoso) se
+            # registra y el bucle sigue (issue #63).
+            await consume(
+                events if events is not None else bus.subscribe(),
+                self._handle,
+                name="MenubarClient",
+            )
         finally:
             self._cancel_pending_idle()
             ui_queue.put_nowait(stop_sentinel)

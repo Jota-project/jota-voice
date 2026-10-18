@@ -121,3 +121,85 @@ def test_voice_event_acepta_tipos_nuevos_issue_24():
     for event_type in ("gateway_ready", "interrupted", "turn_start", "tool_call"):
         ev = VoiceEvent(type=event_type, data={"x": 1})  # type: ignore[arg-type]
         assert ev.type == event_type
+
+
+# ---------------------------------------------------------------------------
+# Issue #63: un suscriptor que lanza no mata su bucle, ni a los demás, ni la
+# sesión
+# ---------------------------------------------------------------------------
+
+import logging  # noqa: E402
+
+import pytest  # noqa: E402
+
+from domain.event_bus import consume  # noqa: E402
+
+
+def _ev(type_: str) -> VoiceEvent:
+    return VoiceEvent(type=type_, data={})  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_handler", [False, True])
+async def test_consume_registra_la_excepcion_y_sigue(caplog, async_handler) -> None:
+    bus = EventBus()
+    seen: list[str] = []
+    healthy: list[str] = []
+
+    def _sync(ev):
+        seen.append(ev.type)
+        if ev.type == "error":
+            raise RuntimeError("backend roto")
+
+    async def _async(ev):
+        _sync(ev)
+
+    handler = _async if async_handler else _sync
+    bad = asyncio.create_task(consume(bus.subscribe(), handler, name="defectuoso"))
+    good = asyncio.create_task(consume(bus.subscribe(), lambda ev: healthy.append(ev.type), name="sano"))
+    with caplog.at_level(logging.ERROR, logger="domain.event_bus"):
+        for t in ("recording_started", "error", "playback_ended"):
+            bus.publish(_ev(t))
+        bus.close()
+        await asyncio.wait_for(asyncio.gather(bad, good), 1.0)
+    assert seen == ["recording_started", "error", "playback_ended"]
+    assert healthy == seen
+    assert "defectuoso" in caplog.text and "backend roto" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_consume_retira_la_suscripcion_al_terminar_o_cancelarse() -> None:
+    bus = EventBus()
+    t = asyncio.create_task(consume(bus.subscribe(), lambda ev: None, name="x"))
+    await asyncio.sleep(0)
+    assert len(bus._queues) == 1
+    t.cancel()
+    await asyncio.wait([t])
+    assert t.cancelled(), "consume no debe tragarse la cancelación"
+    assert bus._queues == []
+
+
+@pytest.mark.asyncio
+async def test_menubar_client_sobrevive_a_un_backend_que_lanza() -> None:
+    """MenubarClient.run no tenía try/except alrededor de _handle: un backend
+    defectuoso mataba la task del menubar para el resto de la sesión."""
+    import queue
+
+    from ui.menubar_base import MenubarBackend
+    from ui.menubar_client import MenubarClient
+
+    from unittest.mock import MagicMock
+
+    backend = MagicMock(spec=MenubarBackend)
+    backend.set_status_text.side_effect = [RuntimeError("Cocoa roto"), None]
+    client = MenubarClient(backend)
+    bus = EventBus()
+    events = bus.subscribe()
+    loop = asyncio.get_running_loop()
+    t = asyncio.create_task(client.run(bus, queue.Queue(), asyncio.Event(), loop, asyncio.Event(), events))
+    bus.publish(VoiceEvent(type="transcription", data={"text": "uno"}))
+    bus.publish(VoiceEvent(type="transcription", data={"text": "dos"}))
+    bus.close()
+    await asyncio.wait_for(t, 1.0)
+    assert backend.set_status_text.call_count == 2
+    backend.set_status_text.assert_called_with("dos")
