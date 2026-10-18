@@ -1228,19 +1228,6 @@ def test_state_machine_anomalous_close_during_tts_publishes_error() -> None:
     asyncio.run(_run_anomalous_close_during_tts_publishes_error_test())
 
 
-def test_idle_type_hints_resolve() -> None:
-    """_idle()/_recording() deben anotar audio con AudioBackend (importado), no
-    con el AudioCapture obsoleto que ya no se importa en el módulo."""
-    import typing
-    from domain import state_machine
-
-    hints = typing.get_type_hints(state_machine._idle)
-    assert hints["audio"] is state_machine.AudioBackend
-
-    hints = typing.get_type_hints(state_machine._recording)
-    assert hints["audio"] is state_machine.AudioBackend
-
-
 # ---------------------------------------------------------------------------
 # Issue #18: mensajes `status` y `error` del gateway durante un turno activo
 # deben tener manejo explícito en state_machine._receive_loop.

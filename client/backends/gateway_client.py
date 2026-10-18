@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
-    from domain.event_bus import EventBus
+    from domain.event_bus import EventBus, EventType
 
 import websockets
 import websockets.exceptions
@@ -461,7 +461,7 @@ class GatewayClient:
             "capabilities": self._capabilities,
         })
 
-    def _publish(self, type_: str, data: dict) -> None:
+    def _publish(self, type_: "EventType", data: dict) -> None:
         if self._bus is None:
             return
         from domain.event_bus import VoiceEvent

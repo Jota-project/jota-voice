@@ -6,7 +6,6 @@ según PlatformKey (detect_platform) + overrides de Config.
 from __future__ import annotations
 
 import logging
-import sys
 from collections.abc import Callable
 
 from config import Config

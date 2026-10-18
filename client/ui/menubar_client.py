@@ -289,7 +289,7 @@ class MenubarClient:
             # se reintenta solo: se queda visible hasta que una sesión vuelva
             # a abrirse (gateway_ready / connected).
             if code == "GATEWAY_HANDSHAKE_REJECTED":
-                text = _HANDSHAKE_TEXTS.get(data.get("kind"), "Gateway: conexión rechazada")
+                text = _HANDSHAKE_TEXTS.get(data.get("kind") or "", "Gateway: conexión rechazada")
                 # El supervisor deja de reintentar: "reconectando…" ya no
                 # es cierto.
                 self._health.pop("gateway", None)
