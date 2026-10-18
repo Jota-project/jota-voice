@@ -2,6 +2,18 @@
 
 IMPORTANTE: este módulo importa AppKit al cargarse. El registry solo lo
 intenta en darwin Y captura ImportError si pyobjc no está instalado.
+
+Hilos (issue #67; contrato en ``menubar_base.BlockingMenubarBackend``):
+
+- El hilo principal real del proceso construye el backend y luego llama a
+  ``run_forever()``, que corre ``NSApp.run()`` y bloquea hasta ``stop()``.
+  NO hay ``start()`` ni hilo daemon para Cocoa: correr ``NSApp.run()`` en
+  un hilo distinto del que construyó el NSStatusItem cuelga el proceso.
+- asyncio corre en un hilo de trabajo (``voice_client._run_with_cocoa_menubar``)
+  y solo llama a los ``set_*``, que escriben en ``_SharedState`` y piden un
+  repintado al hilo principal; nunca tocan AppKit directamente.
+- Todo lo que toca AppKit (``tick_``, teardown, acciones de menú) corre en
+  el hilo principal.
 """
 from __future__ import annotations
 

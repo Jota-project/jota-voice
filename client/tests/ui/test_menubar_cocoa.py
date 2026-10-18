@@ -22,16 +22,13 @@ if not pyobjc_available:
 
 @pytest.fixture
 def backend():
-    """No llama a start(): NSApp.run() debe correr en el hilo principal del
-    proceso (así lo indica la arquitectura del plan), pero pytest ya ejecuta
-    los tests en ese hilo principal — construir el NSStatusItem ahí y luego
-    lanzar NSApp.run() en un hilo secundario dentro de start() cuelga
-    (comprobado empíricamente: la construcción ocurre en el hilo principal,
-    pero start() mueve NSApplication a un hilo distinto, lo que rompe la
-    conexión con WindowServer). Por eso los tests ejercitan la creación
-    del status item y las mutaciones de estado sin arrancar el run loop real;
-    la verificación de start()/stop() en vivo queda para el checklist manual
-    del Task 11 (fuera del alcance de un agente sin sesión GUI interactiva)."""
+    """No llama a run_forever(): NSApp.run() bloquearía el hilo principal
+    de pytest para siempre. El diseño real (issue #67) es Cocoa en el hilo
+    principal y asyncio en un hilo de trabajo; nunca NSApp.run() en un hilo
+    secundario, que cuelga el proceso. Los tests ejercitan la construcción
+    del status item, las mutaciones de estado y tick_() a mano; stop() en el
+    hilo principal hace el teardown en el acto y retira el NSStatusItem de
+    la barra real (#68). El run loop en vivo se valida a mano en un Mac."""
     from config import MenubarConfig
     from ui.menubar_base import _SharedState
     from ui.menubar_cocoa import CocoaMenubarBackend

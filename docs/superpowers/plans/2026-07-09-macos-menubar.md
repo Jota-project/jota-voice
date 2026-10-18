@@ -1,5 +1,14 @@
 # macOS menubar UI for jota-voice — Implementation Plan
 
+> **Nota posterior (2026-10-18, issue #67): el reparto de hilos de este documento quedó obsoleto.**
+> El código real (y el único que funciona) es:
+> - **Hilo principal real del proceso → Cocoa.** `CocoaMenubarBackend.run_forever()` arranca `NSApp.run()` y bloquea ese hilo hasta `stop()`. No existe `start()` ni ningún hilo daemon para Cocoa: construir el `NSStatusItem` en un hilo y correr `NSApp.run()` en otro **cuelga el proceso** (comprobado).
+> - **Hilo de trabajo → asyncio.** `voice_client._run_with_cocoa_menubar()` lanza `asyncio.run(main(...))` en un hilo y deja el principal para `run_forever()`. Las señales llegan por un observer `NSFileHandle` (issue #104).
+> - El contrato está formalizado en `client/ui/menubar_base.py` (`BlockingMenubarBackend` + `needs_main_thread()`); cualquier backend futuro (GTK, Win32) debe seguirlo.
+> - `stop()` es seguro desde cualquier hilo: el teardown (`NSTimer.invalidate()`, `removeStatusItem_`) va al hilo principal (#68, #70); el repintado inmediato usa `AppHelper.callAfter`.
+> - Por `ui_queue` solo pasan `toggle_pause` y `shutdown_service`, reenviados por un hilo propio sin sondeo (#99, #100); logs, configuración y Salir son callbacks directos.
+> - "Acerca de" usa el panel estándar no modal, no `NSAlert.runModal()` (#98).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a native macOS menubar item to `jota-voice` that lives in the same process as the voice client, exposes state from the existing `EventBus`, and offers pause/resume, open logs/config, shutdown service, and quit.
@@ -947,7 +956,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `MenubarConfig`, `_SharedState`.
-- Produces: `class CocoaMenubarBackend(cfg)`. `__init__` constructs the NSStatusItem, builds the NSMenu with the structure from the spec, registers the NSTimer at `1.0 / cfg.refresh_hz` seconds. `set_state/set_status_text/set_listening_paused/set_errors_count/set_commands` all mutate the backend's view; the timer repaints. `start()` launches `NSApp.run()` on a daemon thread.
+- Produces: `class CocoaMenubarBackend(cfg)`. `__init__` constructs the NSStatusItem, builds the NSMenu with the structure from the spec, registers the NSTimer at `1.0 / cfg.refresh_hz` seconds. `set_state/set_status_text/set_listening_paused/set_errors_count/set_commands` all mutate the backend's view; the timer repaints. ~~`start()` launches `NSApp.run()` on a daemon thread.~~ (Obsoleto, #67: no hay `start()`; ver la nota al principio.)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1193,6 +1202,8 @@ class CocoaMenubarBackend:
     # Arranque del runloop Cocoa
     # ------------------------------------------------------------------
 
+    # OBSOLETO (#67): este start() con hilo daemon cuelga el proceso. El
+    # código real usa run_forever() en el hilo principal (nota al principio).
     def start(self) -> None:
         """Arranca NSApp.run() en un hilo daemon. El caller debe haber
         construido self._status_item y configurado los commands."""
