@@ -175,7 +175,7 @@ class OWWClient:
                         None,
                     )
                     if matched:
-                        now = asyncio.get_running_loop().time()
+                        now = self._now()
                         last = self._last_trigger_at.get(matched)
                         if last is not None and (now - last) < self._cfg.debounce_s:
                             log.debug(
@@ -260,7 +260,14 @@ class OWWClient:
                 try:
                     await send_task
                 except asyncio.CancelledError:
-                    pass
+                    # La CancelledError esperada es la de send_task. Pero si
+                    # la propia task de run_forever fue cancelada mientras
+                    # esperaba aquí (shutdown, wait_for), esa cancelación
+                    # llega por el mismo camino y tragarla dejaría el bucle
+                    # reconectando para siempre (issue #76).
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling():
+                        raise
                 except (ConnectionError, OSError, asyncio.IncompleteReadError) as send_exc:
                     log.warning(
                         "OWW send_task terminó con %s, continuando reconexión",
@@ -309,6 +316,11 @@ class OWWClient:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _now(self) -> float:
+        """Reloj del debounce. Separado para que los tests puedan usar un
+        reloj falso sin tocar loop.time(), del que depende el scheduler."""
+        return asyncio.get_running_loop().time()
 
     async def _send_json(self, obj: dict) -> None:
         line = json.dumps(obj, separators=(",", ":")) + "\n"

@@ -12,10 +12,21 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from domain.event_bus import EventBus, VoiceEvent
 from app.playback_engine import PlaybackEngine
+
+from tests.fakes.waiting import wait_until
+
+_real_sleep = asyncio.sleep
+
+
+async def _instant_sleep(delay: float, result=None):
+    """asyncio.sleep sin espera real: cede el loop una vez. Los ticks de
+    animación de PlaybackEngine pasan a ser instantáneos y deterministas
+    (issue #76)."""
+    return await _real_sleep(0, result)
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +90,14 @@ class TestPushToken(unittest.TestCase):
 
 
 class TestPlayChunk(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        # Los tests miran qué se publica tick a tick, no cuánto tarda: sin
+        # esperas reales la clase pasa de ~3s a milisegundos y deja de
+        # depender de la carga de la máquina.
+        patcher = patch.object(asyncio, "sleep", _instant_sleep)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     async def test_play_chunk_emite_eventos_display(self) -> None:
         """play_chunk debe emitir al menos 1 evento display_text_update."""
         engine, bus, captured = _make_engine()
@@ -159,23 +178,39 @@ class TestPlayChunk(unittest.IsolatedAsyncioTestCase):
         engine, bus, captured = _make_engine()
         engine.push_token("Texto de prueba para animar")
 
-        real_duration = 0.2
+        # Issue #76: antes medía el tiempo real (< 1.6x de 0.2s), frágil con
+        # la CPU cargada. Ahora el backend "reproduce" hasta que el test lo
+        # libera: si la animación corre en paralelo, todos sus ticks se
+        # publican mientras el backend sigue bloqueado; con la doble espera
+        # (animar después de reproducir) no saldría ninguno.
+        backend_playing = asyncio.Event()
+        release_backend = asyncio.Event()
 
-        async def _slow_play_chunk(audio: bytes) -> None:
-            await asyncio.sleep(real_duration)
+        async def _blocking_play_chunk(audio: bytes) -> None:
+            backend_playing.set()
+            await release_backend.wait()
 
-        engine._audio.play_chunk = _slow_play_chunk
+        engine._audio.play_chunk = _blocking_play_chunk
 
-        audio = _make_audio(real_duration)
-        loop = asyncio.get_running_loop()
-        start = loop.time()
-        await engine.play_chunk(audio)
-        elapsed = loop.time() - start
+        audio = _make_audio(0.2)  # 4 ticks de 50ms
+        n_ticks = 4
+        task = asyncio.create_task(engine.play_chunk(audio))
+        try:
+            def _ticks() -> int:
+                return sum(1 for e in captured if e.type == "display_text_update")
 
-        self.assertLess(
-            elapsed, real_duration * 1.6,
-            f"play_chunk tardó {elapsed:.3f}s (~doble de {real_duration}s) — bug de doble espera",
-        )
+            await wait_until(lambda: _ticks() >= n_ticks or task.done(),
+                             message="ticks de animación")
+            self.assertTrue(backend_playing.is_set())
+            self.assertFalse(task.done(), "play_chunk no debe terminar antes que el backend")
+            self.assertEqual(
+                _ticks(), n_ticks,
+                "la animación del texto debe correr en paralelo al backend, no después "
+                "(bug de doble espera)",
+            )
+        finally:
+            release_backend.set()
+            await asyncio.wait_for(task, timeout=5.0)
 
     async def test_reset_entre_turnos(self) -> None:
         """Después de reset, play_chunk del siguiente turno empieza desde cero."""

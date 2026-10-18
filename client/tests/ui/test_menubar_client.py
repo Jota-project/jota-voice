@@ -11,6 +11,8 @@ from domain.event_bus import EventBus, VoiceEvent
 from ui.menubar_base import MenubarCommands
 from ui.menubar_client import MenubarClient
 
+from tests.fakes.waiting import wait_until
+
 
 class FakeBackend:
     def __init__(self):
@@ -36,6 +38,30 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+async def _subscribed(bus: EventBus) -> None:
+    """Espera a que MenubarClient.run() tenga su cola registrada en el bus
+    (antes de eso, publish() es un no-op). Sustituye al sleep(0.05) fijo
+    (issue #76)."""
+    await wait_until(lambda: bool(bus._queues), message="suscripción al bus")
+
+
+class _GatedSleep:
+    """Sustituto de asyncio.sleep: registra los delays > 0 y no vuelve hasta
+    que el test abre ``release``. Los sleep(0) (ceder el loop) pasan."""
+
+    def __init__(self) -> None:
+        self._real_sleep = asyncio.sleep
+        self.requested: list[float] = []
+        self.release = asyncio.Event()
+
+    async def __call__(self, delay: float, result=None):
+        if delay <= 0:
+            return await self._real_sleep(0, result)
+        self.requested.append(delay)
+        await self.release.wait()
+        return result
+
+
 def test_state_changed_propagates():
     bus = EventBus()
     backend = FakeBackend()
@@ -47,12 +73,12 @@ def test_state_changed_propagates():
         loop = asyncio.get_running_loop()
         stop = asyncio.Event()
         task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
-        await asyncio.sleep(0.05)  # let subscription register
+        await _subscribed(bus)
         bus.publish(VoiceEvent(type="state_changed", data={"state": "listening"}))
         bus.publish(VoiceEvent(type="transcription", data={"text": "hola"}))
-        await asyncio.sleep(0.05)
+        # Sin espera: bus.close() encola el sentinel detrás de los eventos.
         bus.close()
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.wait_for(task, timeout=5.0)
 
     _run(scenario())
 
@@ -79,11 +105,11 @@ def test_wake_word_detected_sets_listening_instantly():
         loop = asyncio.get_running_loop()
         stop = asyncio.Event()
         task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
-        await asyncio.sleep(0.05)
+        await _subscribed(bus)
         bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "hey_jarvis"}))
-        await asyncio.sleep(0.05)
+        # Sin espera: bus.close() encola el sentinel detrás de los eventos.
         bus.close()
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.wait_for(task, timeout=5.0)
 
     _run(scenario())
 
@@ -102,11 +128,11 @@ def test_recording_ended_sets_thinking():
         loop = asyncio.get_running_loop()
         stop = asyncio.Event()
         task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
-        await asyncio.sleep(0.05)
+        await _subscribed(bus)
         bus.publish(VoiceEvent(type="recording_ended", data={}))
-        await asyncio.sleep(0.05)
+        # Sin espera: bus.close() encola el sentinel detrás de los eventos.
         bus.close()
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.wait_for(task, timeout=5.0)
 
     _run(scenario())
 
@@ -125,11 +151,11 @@ def test_playback_started_sets_speaking():
         loop = asyncio.get_running_loop()
         stop = asyncio.Event()
         task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
-        await asyncio.sleep(0.05)
+        await _subscribed(bus)
         bus.publish(VoiceEvent(type="playback_started", data={}))
-        await asyncio.sleep(0.05)
+        # Sin espera: bus.close() encola el sentinel detrás de los eventos.
         bus.close()
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.wait_for(task, timeout=5.0)
 
     _run(scenario())
 
@@ -148,11 +174,11 @@ def test_error_also_sets_error_state():
         loop = asyncio.get_running_loop()
         stop = asyncio.Event()
         task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
-        await asyncio.sleep(0.05)
+        await _subscribed(bus)
         bus.publish(VoiceEvent(type="error", data={"message": "boom"}))
-        await asyncio.sleep(0.05)
+        # Sin espera: bus.close() encola el sentinel detrás de los eventos.
         bus.close()
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.wait_for(task, timeout=5.0)
 
     _run(scenario())
 
@@ -171,12 +197,12 @@ def test_error_increments_count():
         loop = asyncio.get_running_loop()
         stop = asyncio.Event()
         task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
-        await asyncio.sleep(0.05)
+        await _subscribed(bus)
         bus.publish(VoiceEvent(type="error", data={"message": "boom"}))
         bus.publish(VoiceEvent(type="error", data={"message": "boom2"}))
-        await asyncio.sleep(0.05)
+        # Sin espera: bus.close() encola el sentinel detrás de los eventos.
         bus.close()
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.wait_for(task, timeout=5.0)
 
     _run(scenario())
     err_vals = sorted(c[1][0] for c in backend.calls if c[0] == "set_errors_count")
@@ -197,11 +223,15 @@ def test_toggle_pause_flips_event():
         loop = asyncio.get_running_loop()
         stop = asyncio.Event()
         task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
-        # give it time to drain two toggle_pause and a third to confirm state
         ui_queue.put_nowait("toggle_pause")
-        await asyncio.sleep(0.1)
+        # El hilo del executor drena la cola a su ritmo: esperar a los tres
+        # toggles en vez de dormir un tiempo fijo (issue #76).
+        await wait_until(
+            lambda: sum(1 for c in backend.calls if c[0] == "set_listening_paused") == 3,
+            message="tres toggle_pause procesados",
+        )
         bus.close()
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.wait_for(task, timeout=5.0)
 
     _run(scenario())
 
@@ -222,11 +252,11 @@ def test_cancelled_event_sets_cancelled_state():
         loop = asyncio.get_running_loop()
         stop = asyncio.Event()
         task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
-        await asyncio.sleep(0.05)
+        await _subscribed(bus)
         bus.publish(VoiceEvent(type="cancelled", data={}))
-        await asyncio.sleep(0.05)
+        # Sin espera: bus.close() encola el sentinel detrás de los eventos.
         bus.close()
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.wait_for(task, timeout=5.0)
 
     _run(scenario())
 
@@ -242,27 +272,37 @@ def test_error_state_holds_before_reverting_to_idle():
     cancelled)."""
     bus = EventBus()
     backend = FakeBackend()
-    client = MenubarClient(backend, hold_transient_s=0.15)
+    # Issue #76: antes usaba una ventana real de 0.15s y comprobaba a los
+    # 0.05s y a los 0.25s, frágil con la CPU cargada. Ahora la ventana es
+    # enorme y el sleep del idle diferido lo libera el propio test.
+    client = MenubarClient(backend, hold_transient_s=30.0)
     ui_queue: queue.Queue = queue.Queue()
     pause = asyncio.Event()
+    gated = _GatedSleep()
 
     async def scenario():
         loop = asyncio.get_running_loop()
         stop = asyncio.Event()
         task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
-        await asyncio.sleep(0.02)
+        await _subscribed(bus)
         bus.publish(VoiceEvent(type="error", data={"message": "boom"}))
         bus.publish(VoiceEvent(type="state_changed", data={"state": "idle"}))
-        await asyncio.sleep(0.05)
+        await wait_until(lambda: bool(gated.requested), message="idle diferido programado")
         # Aún dentro de la ventana de hold: debe seguir mostrando "error".
         assert backend.calls[-1] == ("set_state", ("error",)), backend.calls
-        await asyncio.sleep(0.2)
+        # El idle se difiere lo que queda de la ventana (casi 30s).
+        assert 29.0 < gated.requested[0] <= 30.0, gated.requested
+        gated.release.set()
         # Pasada la ventana de hold: debe haber revertido a "idle".
-        assert backend.calls[-1] == ("set_state", ("idle",)), backend.calls
+        await wait_until(
+            lambda: backend.calls[-1] == ("set_state", ("idle",)),
+            message=f"revertir a idle; calls={backend.calls}",
+        )
         bus.close()
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.wait_for(task, timeout=5.0)
 
-    _run(scenario())
+    with patch.object(asyncio, "sleep", gated):
+        _run(scenario())
 
 
 def test_new_real_event_during_hold_overrides_pending_idle():
@@ -272,7 +312,9 @@ def test_new_real_event_during_hold_overrides_pending_idle():
     diferido se aplique por encima."""
     bus = EventBus()
     backend = FakeBackend()
-    client = MenubarClient(backend, hold_transient_s=0.3)
+    # Ventana de hold muy superior a lo que dura el test: si el idle
+    # diferido llegara a aplicarse sería un bug, no lentitud (issue #76).
+    client = MenubarClient(backend, hold_transient_s=30.0)
     ui_queue: queue.Queue = queue.Queue()
     pause = asyncio.Event()
 
@@ -280,15 +322,23 @@ def test_new_real_event_during_hold_overrides_pending_idle():
         loop = asyncio.get_running_loop()
         stop = asyncio.Event()
         task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
-        await asyncio.sleep(0.02)
+        await _subscribed(bus)
         bus.publish(VoiceEvent(type="error", data={"message": "boom"}))
         bus.publish(VoiceEvent(type="state_changed", data={"state": "idle"}))
-        await asyncio.sleep(0.05)
+        await wait_until(
+            lambda: client._pending_idle_task is not None, message="idle diferido programado"
+        )
+        pending = client._pending_idle_task
         bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_jota"}))
-        await asyncio.sleep(0.05)
-        assert backend.calls[-1] == ("set_state", ("listening",)), backend.calls
+        await wait_until(
+            lambda: backend.calls[-1] == ("set_state", ("listening",)),
+            message=f"listening inmediato; calls={backend.calls}",
+        )
+        await wait_until(lambda: pending.done(), message="idle diferido cancelado")
+        assert pending.cancelled()
+        assert ("set_state", ("idle",)) not in backend.calls, backend.calls
         bus.close()
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.wait_for(task, timeout=5.0)
 
     _run(scenario())
 
@@ -304,9 +354,9 @@ def test_run_returns_on_bus_close():
         loop = asyncio.get_running_loop()
         stop = asyncio.Event()
         task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
-        await asyncio.sleep(0.05)
+        await _subscribed(bus)
         bus.close()
-        await asyncio.wait_for(task, timeout=2.0)
+        await asyncio.wait_for(task, timeout=5.0)
         return task.result()
 
     _run(scenario())
@@ -322,16 +372,19 @@ def test_delayed_idle_race_does_not_clobber_later_task():
     seguidos de una wake word. El icono no debe mostrar "IDLE" espurio.
     """
     backend = FakeBackend()
-    client = MenubarClient(backend, hold_transient_s=0.05)
+    # Delays largos: antes A dormía 0.05s y el test cedía 0.01s reales para
+    # que A llegara al sleep; con la CPU cargada A podía terminar antes de
+    # comprobar que seguía viva (issue #76). Un solo tick basta.
+    client = MenubarClient(backend, hold_transient_s=30.0)
 
     async def scenario():
         # Crear task A y asignarla manualmente a _pending_idle_task
         # (asi es como _set_idle_holding_transients lo hace internamente)
-        task_a = asyncio.create_task(client._delayed_idle(0.05))
+        task_a = asyncio.create_task(client._delayed_idle(30.0))
         client._pending_idle_task = task_a
 
-        # Ceder el control para que A alcance await asyncio.sleep
-        await asyncio.sleep(0.01)
+        # Ceder el control una vez para que A alcance await asyncio.sleep
+        await asyncio.sleep(0)
 
         # Confirmar que A está viva y dentro del sleep
         assert not task_a.done(), "task A should be in sleep"
@@ -339,7 +392,7 @@ def test_delayed_idle_race_does_not_clobber_later_task():
         # En el mismo tick síncrono: crear task B y asignarla a _pending_idle_task.
         # Esto reproduce el caso en que otra código (ej. otro error) reemplazó la
         # referencia antes de que la cancelación de A se entregue.
-        task_b = asyncio.create_task(client._delayed_idle(0.1))
+        task_b = asyncio.create_task(client._delayed_idle(30.0))
         client._pending_idle_task = task_b
 
         # Cancelar task A directamente (no a través de _cancel_pending_idle,
@@ -358,6 +411,7 @@ def test_delayed_idle_race_does_not_clobber_later_task():
         )
         # Y B sigue viva (no fue cancelada)
         assert not task_b.done(), "task B should still be alive"
+        task_b.cancel()
 
     _run(scenario())
 
@@ -384,12 +438,11 @@ def test_shutdown_service_sends_sigterm_to_self():
     async def scenario():
         loop = asyncio.get_running_loop()
         task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
-        await asyncio.sleep(0.05)
+        await _subscribed(bus)
         ui_queue.put_nowait("shutdown_service")
-        await asyncio.sleep(0.2)
-        # No cerramos el bus — el proceso de test recibiría SIGTERM de verdad;
-        # en su lugar，期待 fake_kill haya sido llamado antes de que el
-        # shutdown completo ocurra (el test finalizaría antes si no).
+        # El comando lo recoge el hilo del executor: esperar a que fake_kill
+        # se llame en vez de dormir 0.2s fijos (issue #76).
+        await wait_until(lambda: "pid" in killed, message="os.kill llamado")
         task.cancel()
         try:
             await task
