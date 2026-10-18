@@ -565,3 +565,89 @@ def test_ensure_output_stream_no_guarda_un_stream_que_no_arranco(fake_sounddevic
     be._ensure_output_stream()
     assert be._output_stream is good
     good.start.assert_called_once_with()
+
+
+# --- M3: nada de logging en los callbacks realtime ------------------------
+
+
+class _LogSpy:
+    """Sustituto del logger del módulo: registra qué hilo escribe."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, threading.Thread, str]] = []
+
+    def _rec(self, level: str):
+        def _f(msg, *args, **_kw):
+            self.calls.append((level, threading.current_thread(), msg % args if args else msg))
+        return _f
+
+    def __getattr__(self, name: str):
+        if name in ("debug", "info", "warning", "error", "exception"):
+            return self._rec(name)
+        raise AttributeError(name)
+
+
+def test_out_callback_no_escribe_en_el_log(monkeypatch) -> None:
+    """El callback realtime escribía en el log con _play_lock tomado: con
+    underflows frecuentes, reset() quedaba esperando a la E/S del log. Ahora
+    solo apunta contadores y el loop los vuelca después."""
+    import backends.audio_sounddevice as mod
+
+    spy = _LogSpy()
+    monkeypatch.setattr(mod, "log", spy)
+    be = SounddeviceBackend(_cfg())
+    frames = 4
+    outdata = np.zeros((frames, 1), dtype=np.int16)
+
+    be._out_callback(outdata, frames, None, "output underflow")
+    be._play_q.put("no-son-bytes")  # type: ignore[arg-type]  # hace lanzar al callback
+    be._out_callback(outdata, frames, None, None)
+
+    assert spy.calls == [], "el callback realtime escribió en el log"
+    assert np.all(outdata == 0)
+
+    be._flush_callback_diagnostics()
+    msgs = " | ".join(m for _, _, m in spy.calls)
+    assert "underflow" in msgs
+    assert "error en _out_callback" in msgs
+    # Volcado una sola vez: los contadores se reinician.
+    spy.calls.clear()
+    be._flush_callback_diagnostics()
+    assert spy.calls == []
+
+
+def test_play_chunk_vuelca_los_diagnosticos_del_callback(monkeypatch) -> None:
+    import backends.audio_sounddevice as mod
+
+    spy = _LogSpy()
+    monkeypatch.setattr(mod, "log", spy)
+    be = SounddeviceBackend(_cfg())
+    be._ensure_output_stream = lambda: None
+    be._out_callback(np.zeros((4, 1), dtype=np.int16), 4, None, "output underflow")
+
+    async def _no_sleep(_s: float) -> None:
+        return None
+
+    monkeypatch.setattr(mod.asyncio, "sleep", _no_sleep)
+    asyncio.run(be.play_chunk(b"\x00\x00"))
+
+    assert any("underflow" in m for _, _, m in spy.calls)
+
+
+def test_callback_de_captura_no_escribe_en_el_log(monkeypatch, fake_sounddevice) -> None:
+    import backends.audio_sounddevice as mod
+
+    stream = _stream_mock()
+    fake_sounddevice.InputStream.return_value = stream
+    spy = _LogSpy()
+    be = SounddeviceBackend(_cfg())
+    asyncio.run(be.start())
+    callback = fake_sounddevice.InputStream.call_args.kwargs["callback"]
+    be._loop = None  # sin loop vivo: _on_frame solo alimenta el preroll
+
+    monkeypatch.setattr(mod, "log", spy)
+    callback(np.zeros((512, 1), dtype=np.float32), 512, None, "input overflow")
+    assert spy.calls == []
+
+    be._flush_callback_diagnostics()
+    assert any("overflow" in m for _, _, m in spy.calls)

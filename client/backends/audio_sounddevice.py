@@ -133,6 +133,18 @@ class SounddeviceBackend:
         # espera (unos microsegundos: lo que tarda el callback en un bloque).
         # _enqueue_carry no lo necesita: solo se toca desde el hilo del loop.
         self._play_lock = threading.Lock()
+        # Diagnóstico de los callbacks realtime (M3). Los callbacks de
+        # PortAudio no escriben en el log: la E/S del logging puede tardar y,
+        # en el de salida, se haría con _play_lock tomado (reset() esperaría
+        # al log). Solo apuntan aquí; el loop lo vuelca con
+        # _flush_callback_diagnostics(). Sin lock: perder una cuenta entre
+        # hilos es aceptable para un diagnóstico.
+        self._out_status_count = 0
+        self._out_last_status = None
+        self._out_error_count = 0
+        self._out_last_error: BaseException | None = None
+        self._in_status_count = 0
+        self._in_last_status = None
 
     # --- captura ---
 
@@ -150,8 +162,10 @@ class SounddeviceBackend:
         self._capture_stop.clear()
 
         def _callback(indata, frames, time, status):  # noqa: ARG001
+            # Hilo realtime: sin logging (M3), solo se apunta.
             if status:
-                log.warning("SounddeviceBackend capture status: %s", status)
+                self._in_last_status = status
+                self._in_status_count += 1
             self._on_frame(bytes(indata))  # float32 contiguo
 
         kwargs = dict(
@@ -200,6 +214,7 @@ class SounddeviceBackend:
 
     async def stop(self) -> None:
         self._capture_stop.set()
+        self._flush_callback_diagnostics()
         # Se sueltan las referencias ANTES de esperar: así un drain()/stop()
         # concurrente no vuelve a cerrar el mismo stream ni lee un None a
         # mitad de camino. El cierre va fuera del loop (issue #87).
@@ -294,16 +309,36 @@ class SounddeviceBackend:
             outdata[:, 0] = 0
             return
         try:
-            self._out_callback_unsafe(outdata, frames, status)
-        except Exception:
-            log.exception("SounddeviceBackend: error en _out_callback, escribiendo silencio")
+            self._out_callback_unsafe(outdata, frames)
+        except Exception as exc:
+            # Sin logging aquí (M3): se apunta y lo vuelca el loop.
+            self._out_last_error = exc
+            self._out_error_count += 1
             outdata[:, 0] = 0
         finally:
             self._play_lock.release()
-
-    def _out_callback_unsafe(self, outdata, frames, status) -> None:
         if status:
-            log.warning("SounddeviceBackend playback status: %s", status)
+            self._out_last_status = status
+            self._out_status_count += 1
+
+    def _flush_callback_diagnostics(self) -> None:
+        """Vuelca al log, desde el hilo del loop, lo que los callbacks
+        realtime solo apuntaron (status de PortAudio y excepciones)."""
+        if self._out_status_count:
+            n, self._out_status_count = self._out_status_count, 0
+            log.warning("SounddeviceBackend playback status: %s (x%d)", self._out_last_status, n)
+        if self._out_error_count:
+            n, self._out_error_count = self._out_error_count, 0
+            exc, self._out_last_error = self._out_last_error, None
+            log.warning(
+                "SounddeviceBackend: error en _out_callback (x%d), se escribió silencio: %r",
+                n, exc, exc_info=exc,
+            )
+        if self._in_status_count:
+            n, self._in_status_count = self._in_status_count, 0
+            log.warning("SounddeviceBackend capture status: %s (x%d)", self._in_last_status, n)
+
+    def _out_callback_unsafe(self, outdata, frames) -> None:
         written = 0
         while written < frames:
             if self._play_leftover is not None:
@@ -333,6 +368,7 @@ class SounddeviceBackend:
         await self._enqueue_and_wait(audio)
 
     async def _enqueue_and_wait(self, audio: bytes) -> None:
+        self._flush_callback_diagnostics()
         # El chunking de red no garantiza alinear cada mensaje TTS a un
         # número par de bytes (tamaño de una muestra int16) — un chunk de
         # longitud impar rompería np.frombuffer en _out_callback. En vez de
@@ -363,6 +399,7 @@ class SounddeviceBackend:
         await asyncio.sleep(duration)
 
     async def drain(self) -> None:
+        self._flush_callback_diagnostics()
         output_stream, self._output_stream = self._output_stream, None
         if output_stream is not None:
             await _close_stream(output_stream, "drain")
