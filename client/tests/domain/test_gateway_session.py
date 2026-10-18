@@ -540,7 +540,11 @@ async def test_cancel_sin_error_sigue_siendo_cancel():
     gw = FakeGateway(sessions=[["block"]])
     cancel_event = asyncio.Event()
     t = asyncio.create_task(_responding(bus, gw, _playback(), cancel_event))
-    await asyncio.sleep(0.02)
+    for _ in range(100):  # sin esperas reales: hasta que el lector está dentro
+        if gw.readers:
+            break
+        await asyncio.sleep(0)
+    assert gw.readers == 1
     cancel_event.set()
     with pytest.raises(_TurnCancelled):
         await asyncio.wait_for(t, 1.0)
@@ -555,25 +559,36 @@ async def test_cancel_sin_error_sigue_siendo_cancel():
 # ---------------------------------------------------------------------------
 
 
-async def _slow_to_cancel(*_a, **_kw):
-    try:
-        await asyncio.Event().wait()
-    except asyncio.CancelledError:
-        await asyncio.sleep(0.2)  # limpieza lenta: ventana para el cancel exterior
-        raise
-
-
 @pytest.mark.asyncio
-async def test_wait_wake_or_cancel_no_se_traga_la_cancelacion_exterior(monkeypatch):
+async def test_responding_no_se_traga_la_cancelacion_exterior_durante_el_drenaje(monkeypatch):
+    """Antes cubría _wait_wake_or_cancel, que desapareció con #93: el mismo
+    contrato vale ahora para la espera de la wake word dentro de _responding.
+    Sin esperas reales: la limpieza lenta del hijo espera a un evento."""
     from domain import state_machine
 
+    cleanup_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow_to_cancel(*_a, **_kw):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cleanup_started.set()
+            await release.wait()  # limpieza lenta: ventana para el cancel exterior
+            raise
+
     monkeypatch.setattr(state_machine, "_consume_wake", _slow_to_cancel)
+    gw = FakeGateway(sessions=[["block"]])
     cancel_event = asyncio.Event()
-    t = asyncio.create_task(state_machine._wait_wake_or_cancel(EventBus(), cancel_event, "X"))
-    await asyncio.sleep(0.01)
-    cancel_event.set()        # cancel_task gana → se empieza a drenar wake_task (lento)
-    await asyncio.sleep(0.05)
+    t = asyncio.create_task(state_machine._responding(EventBus(), gw, _playback(), cancel_event))
+    for _ in range(100):
+        if gw.readers:
+            break
+        await asyncio.sleep(0)
+    cancel_event.set()        # cancel_task gana → se empieza a drenar la espera de wake (lenta)
+    await asyncio.wait_for(cleanup_started.wait(), 1.0)
     t.cancel()                # llega el cancel exterior durante el drenaje
+    release.set()
     await asyncio.wait([t], timeout=1.0)
     assert t.done() and t.cancelled(), "la cancelación exterior se perdió"
 

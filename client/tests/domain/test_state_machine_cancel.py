@@ -5,8 +5,8 @@ _responding es cancelada desde fuera (SIGTERM durante shutdown), los
 tasks hijos creados con asyncio.create_task() deben quedar cancelados Y
 drenados antes de que la tarea externa retorne.
 
-El patrón correcto ya existe en _wait_wake_or_cancel (try/finally tras
-asyncio.wait). Estos tests verifican el mismo contrato en _recording y
+El patrón correcto es un try/finally tras asyncio.wait que cancela y espera a
+las hijas). Estos tests verifican ese contrato en _recording y
 _responding, replicado al aplicar el fix de la issue.
 
 Nota: _oww_loop vive en client/app/voice_client.py (no en state_machine),

@@ -180,39 +180,6 @@ async def _wait_idle(
     return wake_word
 
 
-async def _wait_wake_or_cancel(
-    bus: EventBus,
-    cancel_event: asyncio.Event,
-    current_state: str,
-) -> None:
-    """
-    Bloquea hasta que llegue wake_word_detected al bus o se setee cancel_event.
-
-    Usado en RECORDING y RESPONDING para implementar wake-word-interrumpe-TTS:
-    si el usuario dice la wake word mientras jota-voice está grabando o
-    reproduciendo respuesta, esta coroutine retorna, el caller lanza
-    _TurnCancelled, y el state_machine vuelve a IDLE que ya tiene el
-    wake_word en el bus listo para consumir.
-    """
-    cancel_task = asyncio.create_task(cancel_event.wait())
-    wake_task = asyncio.create_task(_consume_wake(bus))
-    try:
-        done, pending = await asyncio.wait(
-            [cancel_task, wake_task],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        # cancel_and_wait: el viejo `cancel(); try: await t except
-        # CancelledError: pass` se tragaba el cancel de ESTA tarea si llegaba
-        # durante el drenaje.
-        await cancel_and_wait(*pending)
-
-        if wake_task in done and not wake_task.cancelled():
-            log.info("%s: wake_word detectado durante el estado, interrumpiendo", current_state)
-            cancel_event.set()  # para que el state_machine vea _TurnCancelled
-    finally:
-        await cancel_and_wait(cancel_task, wake_task)
-
-
 async def _consume_wake(bus: EventBus) -> str:
     """Lee el bus hasta encontrar wake_word_detected.
 
@@ -372,8 +339,8 @@ async def _recording(
     finally:
         # Issue #21: si la tarea externa fue cancelada durante el wait
         # (SIGTERM durante shutdown), el código de arriba no se ejecuta
-        # pero los tasks hijos sí. Drenarlos siempre, replicando el patrón
-        # de _wait_wake_or_cancel.
+        # pero los tasks hijos sí. Drenarlos siempre (mismo patrón que
+        # _responding).
         await cancel_and_wait(capture_task, cancel_task)
 
     # play_notification() es un beep puramente cosmético (confirma al
@@ -578,8 +545,11 @@ async def _responding(
     receive_task = asyncio.create_task(
         asyncio.wait_for(_receive_loop(), timeout=30.0)
     )
+    # Dos fuentes de cancelación, cada una esperada en UN solo sitio (issue
+    # #93: antes la espera de la wake word creaba otro cancel_event.wait()
+    # propio y luego hacía cancel_event.set() para que este lo viera).
     cancel_task = asyncio.create_task(cancel_event.wait())
-    wake_task = asyncio.create_task(_wait_wake_or_cancel(bus, cancel_event, "RESPONDING"))
+    wake_task = asyncio.create_task(_consume_wake(bus))
 
     try:
         done, pending = await asyncio.wait(
@@ -600,8 +570,12 @@ async def _responding(
             if exc is not None and not isinstance(exc, (asyncio.TimeoutError, _TurnCancelled)):
                 real_exc = exc
 
+        woke = wake_task in done and wake_task.exception() is None
+        if wake_task in done and not woke:
+            raise wake_task.exception()  # el bus se cerró: no hay turno que seguir
+
         if real_exc is not None:
-            if cancel_task in done:
+            if cancel_task in done or woke:
                 log.warning(
                     "RESPONDING: cancel simultáneo con error del gateway; "
                     "se informa el error: %s", real_exc,
@@ -609,7 +583,10 @@ async def _responding(
             playback.reset()
             raise real_exc
 
-        if cancel_task in done:
+        if cancel_task in done or woke:
+            if woke:
+                # Wake word interrumpe el TTS (estilo Alexa/Google).
+                log.info("RESPONDING: wake_word detectado durante el estado, interrumpiendo")
             await _safe_send_cancel(gateway)
             playback.reset()
             raise _TurnCancelled()

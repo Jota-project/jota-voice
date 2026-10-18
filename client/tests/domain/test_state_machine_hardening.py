@@ -109,3 +109,55 @@ async def test_wait_idle_retira_su_suscripcion_al_volver(idle_timeout) -> None:
     _wake_soon(bus)
     assert await state_machine._wait_idle(cfg, bus, audio, asyncio.Event()) == "ok_nabu"
     assert bus._queues == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #93: RESPONDING espera el cancel en un solo sitio; la wake word es
+# otra fuente de cancelación, sin un segundo cancel_event.wait()
+# ---------------------------------------------------------------------------
+
+
+def _blocking_gateway() -> tuple[MagicMock, asyncio.Event]:
+    """Gateway cuyo receive() bloquea; ``reading`` se activa al entrar."""
+    reading = asyncio.Event()
+
+    async def _receive():
+        reading.set()
+        await asyncio.Event().wait()
+        yield  # pragma: no cover
+
+    gateway = MagicMock(spec=GatewayClient)
+    gateway.receive = _receive
+    return gateway, reading
+
+
+@pytest.mark.asyncio
+async def test_responding_espera_el_cancel_en_un_solo_sitio() -> None:
+    bus = EventBus()
+    gateway, reading = _blocking_gateway()
+    cancel_event = asyncio.Event()
+    t = asyncio.create_task(
+        state_machine._responding(bus, gateway, MagicMock(spec=PlaybackEngine), cancel_event)
+    )
+    await asyncio.wait_for(reading.wait(), 1.0)
+    await asyncio.sleep(0)  # que todas las hijas lleguen a su primer await
+    assert len(cancel_event._waiters) == 1, "cancel_event se espera en más de un sitio"
+    t.cancel()
+    await asyncio.wait([t])
+
+
+@pytest.mark.asyncio
+async def test_wake_word_en_responding_cancela_el_turno() -> None:
+    bus = EventBus()
+    gateway, reading = _blocking_gateway()
+    playback = MagicMock(spec=PlaybackEngine)
+    t = asyncio.create_task(state_machine._responding(bus, gateway, playback, asyncio.Event()))
+    await asyncio.wait_for(reading.wait(), 1.0)
+    await asyncio.sleep(0)
+    bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
+    with pytest.raises(state_machine._TurnCancelled):
+        await asyncio.wait_for(t, 1.0)
+    gateway.send_cancel.assert_awaited_once()
+    playback.reset.assert_called()
+    playback.drain.assert_not_awaited()
+    assert bus._queues == [], "la suscripción de la wake word quedó registrada"
