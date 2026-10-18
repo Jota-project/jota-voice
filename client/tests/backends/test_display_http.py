@@ -255,7 +255,16 @@ async def test_post_real_contra_un_servidor_como_el_kiosk() -> None:
             self.end_headers()
             self.wfile.write(b"ok")
 
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Kiosk)
+    class _NoFqdnServer(ThreadingHTTPServer):
+        # HTTPServer.server_bind() llama a socket.getfqdn(), que hace DNS
+        # inverso y se cuelga en los runners macOS de GitHub Actions.
+        def server_bind(self) -> None:
+            import socketserver
+            socketserver.TCPServer.server_bind(self)
+            self.server_name = "localhost"
+            self.server_port = self.server_address[1]
+
+    srv = _NoFqdnServer(("127.0.0.1", 0), _Kiosk)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     backend = HttpDisplayBackend(DisplayConfig(url=f"http://127.0.0.1:{srv.server_address[1]}"))
