@@ -340,16 +340,13 @@ def test_gateway_client_init_con_bus() -> None:
     assert client._bus is bus
 
 
-def test_gateway_client_init_device_id_deprecation_warning() -> None:
-    """Issue #24: device_id se mantiene por compat pero emite DeprecationWarning."""
+def test_gateway_client_ya_no_acepta_device_id() -> None:
+    """Issue #83: device_id no forma parte del handshake documentado
+    (client-protocol.md §1); tras estar deprecado e ignorado (#24) se retira."""
     from config import GatewayConfig
     cfg = GatewayConfig(host="127.0.0.1", client_key="x")
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        GatewayClient(cfg, device_id="legacy-1")
-    deprecation = [w for w in caught if issubclass(w.category, DeprecationWarning)]
-    assert deprecation, "device_id debería emitir DeprecationWarning"
-    assert "device_id" in str(deprecation[0].message)
+    with pytest.raises(TypeError):
+        GatewayClient(cfg, device_id="legacy-1")  # type: ignore[call-arg]
 
 
 def test_gateway_client_sin_device_id_sin_warning() -> None:

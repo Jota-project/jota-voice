@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import time
-import warnings
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
@@ -211,8 +210,11 @@ class GatewayClient:
         cfg: GatewayConfig,
         *,
         bus: Optional["EventBus"] = None,
-        device_id: str | None = None,
     ) -> None:
+        # Sin device_id (issue #83): el handshake documentado en
+        # jota-gateway/docs/client-protocol.md §1 solo admite client_key,
+        # input_mode, output_mode y agent; la identidad del device la da la
+        # client_key. El parámetro estuvo deprecado e ignorado desde #24.
         self._cfg = cfg
         self._bus = bus
         # Atributos poblados tras handshake exitoso (issue #24).
@@ -237,21 +239,6 @@ class GatewayClient:
         self.reported_fatal: GatewayHandshakeError | None = None
         self._last_send_at: float = time.monotonic()
         self._connect_lock = asyncio.Lock()
-        # device_id se mantiene por compat con voice_client.main; se ignora
-        # porque el handshake del gateway no lo contempla (ver
-        # jota-gateway/docs/client-protocol.md §1). Remoción total en una
-        # versión futura cuando todos los call sites estén actualizados.
-        if device_id is not None:
-            warnings.warn(
-                "GatewayClient: device_id se ignora y se eliminará en una "
-                "versión futura (issue #24). El handshake del gateway no "
-                "lo contempla.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            self._legacy_device_id: str | None = device_id
-        else:
-            self._legacy_device_id = None
 
     # ------------------------------------------------------------------
     # Estado de la sesión
