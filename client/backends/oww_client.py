@@ -17,6 +17,7 @@ import os
 from typing import Awaitable, Callable, Optional
 
 from config import AudioConfig, OWWConfig
+from core.aio import cancel_and_wait
 from domain.event_bus import EventBus, VoiceEvent
 
 log = logging.getLogger(__name__)
@@ -256,15 +257,16 @@ class OWWClient:
                     await on_wake_word(name)
             except (ConnectionError, OSError, asyncio.IncompleteReadError) as exc:
                 log.warning("OWW run_forever: conexión perdida (%s), reconectando", exc)
-                send_task.cancel()
-                try:
-                    await send_task
-                except asyncio.CancelledError:
-                    pass
-                except (ConnectionError, OSError, asyncio.IncompleteReadError) as send_exc:
+                # cancel_and_wait: el antiguo `cancel(); try: await send_task
+                # except CancelledError: pass` se tragaba también la
+                # cancelación de run_forever si llegaba durante ese await, y
+                # el while True seguía girando (cuelgue intermitente de
+                # test_oww_healthcheck y del apagado).
+                await cancel_and_wait(send_task)
+                if not send_task.cancelled() and send_task.exception() is not None:
                     log.warning(
                         "OWW send_task terminó con %s, continuando reconexión",
-                        send_exc,
+                        send_task.exception(),
                     )
                 await self.disconnect()
 

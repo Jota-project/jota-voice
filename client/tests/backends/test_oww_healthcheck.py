@@ -102,7 +102,7 @@ async def test_run_forever_publishes_oww_degraded_after_threshold_failures() -> 
             try:
                 await asyncio.wait_for(
                     client.run_forever(audio=None, on_wake_word=lambda n: asyncio.sleep(0)),
-                    timeout=0.3,
+                    timeout=1.5,  # holgura: el primer run_forever importa numpy
                 )
             except asyncio.TimeoutError:
                 pass  # esperado: el loop solo termina por timeout externo
@@ -147,7 +147,7 @@ async def test_run_forever_publishes_oww_recovered_after_successful_reconnect() 
             try:
                 await asyncio.wait_for(
                     client.run_forever(audio=None, on_wake_word=lambda n: asyncio.sleep(0)),
-                    timeout=0.3,
+                    timeout=1.5,  # holgura: el primer run_forever importa numpy
                 )
             except asyncio.TimeoutError:
                 pass
