@@ -339,11 +339,29 @@ def test_start_arranca_captura_e_inicializa_pyaudio(fake_pyaudio) -> None:
 
 
 def test_start_sin_pyaudio_propaga_runtimeerror(no_pyaudio) -> None:
-    be, _ = _backend_with_mock_capture()
+    """Bug de la Fase 4c: start() arrancaba parec y su hilo lector antes de
+    importar pyaudio; si el import fallaba, la captura quedaba viva y nadie
+    la paraba. pyaudio se comprueba antes de tocar el micrófono."""
+    be, capture = _backend_with_mock_capture()
 
     with pytest.raises(RuntimeError, match="pyaudio"):
         asyncio.run(be.start())
 
+    assert be._pa is None
+    capture.start.assert_not_awaited()
+
+
+def test_start_para_la_captura_si_pyaudio_no_inicializa(fake_pyaudio) -> None:
+    """Si PyAudio() lanza (PortAudio sin dispositivos, p. ej.) con la
+    captura ya arrancada, start() la para antes de propagar el error."""
+    fake_pyaudio.cls.side_effect = OSError("no default output device")
+    be, capture = _backend_with_mock_capture()
+
+    with pytest.raises(OSError, match="no default output device"):
+        asyncio.run(be.start())
+
+    capture.start.assert_awaited_once_with()
+    capture.stop.assert_awaited_once_with()
     assert be._pa is None
 
 

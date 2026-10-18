@@ -43,9 +43,19 @@ class TermuxBackend:
         self._enqueue_carry: bytes = b""
 
     async def start(self) -> None:
-        await self._capture.start()
+        # pyaudio se comprueba ANTES de arrancar la captura: si faltaba, parec
+        # y su hilo lector quedaban vivos sin nadie que los parase.
         pyaudio = _require_pyaudio()
-        self._pa = pyaudio.PyAudio()
+        await self._capture.start()
+        try:
+            self._pa = pyaudio.PyAudio()
+        except BaseException:
+            # Mismo caso con la captura ya en marcha: pararla antes de propagar.
+            try:
+                await self._capture.stop()
+            except Exception as exc:
+                log.warning("TermuxBackend.start: error parando la captura tras fallo: %s", exc)
+            raise
         log.debug("TermuxBackend: PyAudio inicializado")
 
     async def stop(self) -> None:
