@@ -10,41 +10,39 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# --- Stubs ---
-# Sobreescribimos ConnectionClosed/OK/Error con fakes laxos que aceptan
-# cualquier firma (el real exige rcvd, sent). Necesario porque pytest puede
-# cargar el módulo real (websockets 16.0+) vía otros tests antes que este
-# archivo. NO reemplazamos el módulo entero: sería no-paquete y rompería las
-# lazy imports que el módulo real hace para `websockets.connect`, etc.
-def _ensure_exception_subclasses() -> None:
-    try:
-        from websockets import exceptions as _exc
-    except ImportError:
-        # Si websockets no está disponible, tampoco se ejecuta el código de
-        # producción que lo usa — los tests no pueden correr de todas formas.
-        return
-    _base = getattr(_exc, "ConnectionClosed", Exception)
+# Antes este fichero sustituía websockets.exceptions.ConnectionClosed* por
+# clases fake a nivel de módulo (y websockets.connect por un AsyncMock),
+# para TODA la sesión de pytest: cualquier test posterior con un servidor
+# real veía excepciones que el código ya no reconocía. Ahora se usan las
+# excepciones reales (construidas con frames Close) y el fixture autouse
+# restaura websockets.connect tras cada test.
+import websockets as _websockets_mod
+from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
+from websockets.frames import Close
 
-    class _FakeConnectionClosed(Exception):
-        """Base laxa — hereda Exception, no la versión real con init estricto
-        (rcvd, sent). Tests solo necesitan isinstance para distinguir OK vs Error."""
 
-    class _FakeConnectionClosedOK(_FakeConnectionClosed):
-        pass
+def _closed_error(code: int | None = None, reason: str = "") -> ConnectionClosedError:
+    rcvd = Close(code, reason) if code is not None else None
+    return ConnectionClosedError(rcvd, None)
 
-    class _FakeConnectionClosedError(_FakeConnectionClosed):
-        pass
 
-    # Sustituimos ConnectionClosed base también: si no, isinstance contra el
-    # real no encontraría las subclases fake (MRO separado).
-    _exc.ConnectionClosed = _FakeConnectionClosed
-    _exc.ConnectionClosedOK = _FakeConnectionClosedOK
-    _exc.ConnectionClosedError = _FakeConnectionClosedError
+def _closed_ok(code: int = 1000, reason: str = "") -> ConnectionClosedOK:
+    return ConnectionClosedOK(Close(code, reason), Close(code, reason), True)
 
-_ensure_exception_subclasses()
+
+@pytest.fixture(autouse=True)
+def _restore_websockets_connect():
+    original = _websockets_mod.connect
+    yield
+    _websockets_mod.connect = original
 
 from config import GatewayConfig, AudioConfig, DeviceConfig, Config
-from backends.gateway_client import GatewayClient, _cloudflare_access_headers
+from backends.gateway_client import (
+    GatewayClient,
+    GatewayDisconnected,
+    GatewayHandshakeError,
+    _cloudflare_access_headers,
+)
 
 
 class _FakeConnectionClosed(Exception):
@@ -243,16 +241,23 @@ async def _test_connect_propagar_connection_closed_si_server_cierra_antes_de_rea
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
     ws_mock = MagicMock()
     ws_mock.send = AsyncMock()
-    ws_mock.recv = AsyncMock(side_effect=_FakeConnectionClosed(1008))
+    ws_mock.recv = AsyncMock(side_effect=_closed_error(1008, "Clave de cliente invalida o inactiva"))
+    ws_mock.close = AsyncMock()
     sys.modules["websockets"].connect = AsyncMock(return_value=ws_mock)
 
     client = GatewayClient(cfg)
     try:
         await client.connect()
-    except _FakeConnectionClosed:
-        pass
+    except GatewayHandshakeError as exc:
+        # Issue #107: el cierre 1008 del handshake se traduce a un error
+        # tipado con la causa, no se propaga la excepción de la librería.
+        assert exc.code == 1008
+        assert exc.kind == "invalid_client_key"
+        assert exc.fatal is True
     else:
-        raise AssertionError("connect() debería propagar ConnectionClosed del server")
+        raise AssertionError("connect() debería lanzar GatewayHandshakeError si el server cierra")
+    assert client.is_connected is False
+    ws_mock.close.assert_awaited()
 
 
 async def _test_connect_levanta_timeout_si_server_no_responde_ready() -> None:
@@ -413,20 +418,18 @@ async def _test_receive_propagates_connection_closed_error() -> None:
     Antes del fix, el `except ConnectionClosed` genérico de receive() lo
     tragaba (junto con el OK), y el turno terminaba con playback_ended como
     si todo hubiera ido bien."""
-    from websockets.exceptions import ConnectionClosed, ConnectionClosedError
     cfg = GatewayConfig(host="127.0.0.1", client_key="test")
     client = GatewayClient(cfg)
     pcm = b"\x00\x01" * 100
     frame = bytes([0xA1, 0x00, 0x01]) + pcm  # turn_seq=1 + PCM
-    exc = ConnectionClosedError("simulated server drop")
-    assert isinstance(exc, ConnectionClosed)  # sanity: jerarquía correcta
-    client._ws = _FakeWSRaiseAfter([frame], exc)
+    client._ws = _FakeWSRaiseAfter([frame], _closed_error())  # 1006, sin close frame
 
     try:
         events = [ev async for ev in client.receive()]
-    except ConnectionClosedError:
-        # Lo que esperamos: que la excepción se propague, no que se trague.
-        pass
+    except GatewayDisconnected as exc:
+        # Lo que esperamos: que el cierre se propague, no que se trague.
+        assert exc.code == 1006
+        assert client.is_connected is False
     else:
         raise AssertionError(
             "receive() debería propagar ConnectionClosedError (cierre anómalo "
@@ -435,35 +438,36 @@ async def _test_receive_propagates_connection_closed_error() -> None:
         )
 
 
-async def _test_receive_silently_terminates_on_connection_closed_ok() -> None:
-    """Regression: cierre limpio (1000/1001) tras los eventos del turno NO
-    debe propagarse — state_machine ya cerró el turno vía turn_end, así que
-    un OK recibido tras eso es ruido benigno (la sesión puede continuar en
-    otro turno). Antes del fix esto funcionaba por accidente (el except
-    genérico tragaba TODO); el fix debe preservarlo explícitamente."""
-    from websockets.exceptions import ConnectionClosed, ConnectionClosedError, ConnectionClosedOK
+async def _test_receive_propagates_clean_close_as_disconnected() -> None:
+    """Issue #118 (sustituye al antiguo "OK termina en silencio"): el gateway
+    nunca cierra la sesión al acabar un turno (para eso está turn_end), así
+    que un cierre limpio 1000/1001 mientras se lee es inactividad, reinicio
+    o despliegue. Debe propagarse como GatewayDisconnected y dejar
+    is_connected=False; tragarlo dejaba un socket muerto "conectado" y el
+    turno en curso acababa como si hubiera ido bien."""
     cfg = GatewayConfig(host="127.0.0.1", client_key="test")
     client = GatewayClient(cfg)
     pcm = b"\x00\x01" * 100
     frame = bytes([0xA1, 0x00, 0x01]) + pcm
-    ok_exc = ConnectionClosedOK("simulated clean close")
-    assert isinstance(ok_exc, ConnectionClosed) and not isinstance(ok_exc, ConnectionClosedError)  # sanity
-    client._ws = _FakeWSRaiseAfter([frame], ok_exc)
+    client._ws = _FakeWSRaiseAfter([frame], _closed_ok(1001, "going away"))
 
-    # No debe lanzar: el cierre limpio termina el generador en silencio,
-    # como hace con turn_end (issue #15 fix preservó ese comportamiento).
-    events = [ev async for ev in client.receive()]
-    assert len(events) == 1
-    assert events[0].type == "tts_chunk"
-    assert events[0].data["audio"] == pcm
+    events = []
+    with pytest.raises(GatewayDisconnected) as info:
+        async for ev in client.receive():
+            events.append(ev)
+    assert len(events) == 1 and events[0].type == "tts_chunk"
+    assert info.value.code == 1001
+    assert info.value.fatal is False
+    assert client.is_connected is False
+    assert client.last_close is info.value
 
 
 def test_receive_propagates_connection_closed_error() -> None:
     asyncio.run(_test_receive_propagates_connection_closed_error())
 
 
-def test_receive_silently_terminates_on_connection_closed_ok() -> None:
-    asyncio.run(_test_receive_silently_terminates_on_connection_closed_ok())
+def test_receive_propagates_clean_close_as_disconnected() -> None:
+    asyncio.run(_test_receive_propagates_clean_close_as_disconnected())
 
 
 # ---------------------------------------------------------------------------
@@ -735,3 +739,216 @@ async def test_tts_chunk_se_descarta_si_turn_seq_menor():
     assert len(events) == 1
     assert events[0].type == "tts_chunk"
     assert events[0].data["turn_seq"] == 10
+
+
+# ---------------------------------------------------------------------------
+# Fase R (#110, #107, #118): handshake robusto y estado de sesión coherente.
+# ---------------------------------------------------------------------------
+
+
+def _ws_with_recv(messages):
+    ws = MagicMock()
+    ws.send = AsyncMock()
+    ws.close = AsyncMock()
+    ws.recv = AsyncMock(side_effect=list(messages))
+    return ws
+
+
+_READY = json.dumps({
+    "type": "ready", "session_id": "s-2", "agent": "main",
+    "requested_capabilities": {"barge_in": True, "tts": True, "transcriber": True},
+    "live_capabilities": {"barge_in": False, "tts": True, "transcriber": False},
+})
+
+
+@pytest.mark.asyncio
+async def test_connect_acepta_status_antes_de_ready_y_lo_publica():
+    """client-protocol.md §1/§5: pueden llegar `status` antes de `ready`
+    (health check con transcriber caído). Antes connect() lo rechazaba como
+    "tipo inesperado" y con un servicio degradado no se podía reconectar."""
+    from domain.event_bus import EventBus
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
+    status = json.dumps({"type": "status", "service": "transcriber", "state": "unavailable"})
+    ws = _ws_with_recv([status, _READY])
+    sys.modules["websockets"].connect = AsyncMock(return_value=ws)
+    bus = EventBus()
+    seen = []
+
+    async def _sub():
+        async for ev in bus.subscribe():
+            seen.append(ev)
+            if ev.type == "gateway_ready":
+                return
+
+    sub = asyncio.create_task(_sub())
+    await asyncio.sleep(0)
+    client = GatewayClient(cfg, bus=bus)
+    await client.connect()
+    await asyncio.wait_for(sub, 1.0)
+
+    assert [e.type for e in seen] == ["gateway_status", "gateway_ready"]
+    assert seen[0].data["service"] == "transcriber"
+    # #110: requested y live separados, como el protocolo v1.15.0+.
+    assert seen[1].data["capabilities"]["live"]["transcriber"] is False
+    assert seen[1].data["capabilities"]["requested"]["transcriber"] is True
+    assert client.is_connected
+
+
+@pytest.mark.asyncio
+async def test_connect_reinicia_turn_seq_y_sesion():
+    """#118: el gateway reinicia turn_seq en cada sesión; con el valor viejo
+    se descartarían todos los frames de la sesión nueva."""
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
+    client = GatewayClient(cfg)
+    client._current_turn_seq = 7
+    client._session_id = "vieja"
+    sys.modules["websockets"].connect = AsyncMock(return_value=_ws_with_recv([_READY]))
+    await client.connect()
+    assert client._current_turn_seq == 0
+    assert client._session_id == "s-2"
+
+
+@pytest.mark.asyncio
+async def test_connect_pasa_keepalive_y_cola_explicitos():
+    """#118/#116: ping explícito (configurable) y max_queue=None para que la
+    librería vacíe el socket aunque la app lea al ritmo de reproducción."""
+    cfg = GatewayConfig(
+        host="127.0.0.1", client_key="test", connect_timeout_s=1.0,
+        ping_interval_s=15.0, ping_timeout_s=25.0,
+    )
+    connect = AsyncMock(return_value=_ws_with_recv([_READY]))
+    sys.modules["websockets"].connect = connect
+    await GatewayClient(cfg).connect()
+    kw = connect.call_args.kwargs
+    assert kw["ping_interval"] == 15.0
+    assert kw["ping_timeout"] == 25.0
+    assert kw["max_queue"] is None
+    assert kw["max_size"] is None
+
+
+@pytest.mark.asyncio
+async def test_connect_ping_cero_lo_desactiva():
+    cfg = GatewayConfig(host="127.0.0.1", client_key="t", ping_interval_s=0)
+    connect = AsyncMock(return_value=_ws_with_recv([_READY]))
+    sys.modules["websockets"].connect = connect
+    await GatewayClient(cfg).connect()
+    assert connect.call_args.kwargs["ping_interval"] is None
+
+
+@pytest.mark.parametrize("code,reason,kind,fatal", [
+    (1008, "Clave de cliente invalida o inactiva", "invalid_client_key", True),
+    (1008, "Agent 'casa' not permitted for this client.", "agent_not_permitted", True),
+    (1008, "Agent 'casa' not available.", "agent_not_available", False),
+    (1008, "Handshake timeout", "handshake_timeout", False),
+    (1008, "Handshake invalido", "handshake_invalid", True),
+    (1011, "Servicio critico no disponible", "service_unavailable", False),
+    (1011, "Servicio de identidad no disponible", "service_unavailable", False),
+])
+def test_handshake_1008_distingue_causa(code, reason, kind, fatal):
+    """#107: la causa del rechazo solo viaja en el reason del close frame
+    (client-protocol.md §1 y nota del §9: no hay mensaje `error` previo)."""
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
+    ws = _ws_with_recv([_closed_error(code, reason)])
+    sys.modules["websockets"].connect = AsyncMock(return_value=ws)
+    client = GatewayClient(cfg)
+
+    with pytest.raises(GatewayHandshakeError) as info:
+        asyncio.run(client.connect())
+    assert info.value.kind == kind
+    assert info.value.code == code
+    assert info.value.fatal is fatal
+    assert (client.fatal_error is info.value) is fatal
+    assert client.is_connected is False
+
+
+@pytest.mark.asyncio
+async def test_connect_http_403_es_fatal():
+    """Cloudflare Access sin credenciales válidas → HTTP 403 en el upgrade."""
+    from websockets.exceptions import InvalidStatus
+    resp = MagicMock(status_code=403)
+    sys.modules["websockets"].connect = AsyncMock(side_effect=InvalidStatus(resp))
+    with pytest.raises(GatewayHandshakeError) as info:
+        await GatewayClient(GatewayConfig(host="h", client_key="k")).connect()
+    assert info.value.kind == "http_rejected" and info.value.fatal
+
+
+@pytest.mark.asyncio
+async def test_ensure_connected_comparte_un_unico_intento():
+    """Supervisor de IDLE e inicio de turno pueden pedir conexión a la vez."""
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
+    gate = asyncio.Event()
+
+    async def _slow_connect(*a, **kw):
+        await gate.wait()
+        return _ws_with_recv([_READY])
+
+    connect = AsyncMock(side_effect=_slow_connect)
+    sys.modules["websockets"].connect = connect
+    client = GatewayClient(cfg)
+    t1 = asyncio.create_task(client.ensure_connected())
+    t2 = asyncio.create_task(client.ensure_connected())
+    await asyncio.sleep(0.01)
+    gate.set()
+    await asyncio.gather(t1, t2)
+    assert connect.await_count == 1
+    assert client.is_connected
+
+
+@pytest.mark.asyncio
+async def test_connect_cancelado_no_deja_socket_medio_abierto():
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=5.0)
+    ws = MagicMock()
+    ws.send = AsyncMock()
+    ws.close = AsyncMock()
+
+    async def _never():
+        await asyncio.Event().wait()
+
+    ws.recv = _never
+    sys.modules["websockets"].connect = AsyncMock(return_value=ws)
+    client = GatewayClient(cfg)
+    t = asyncio.create_task(client.connect())
+    await asyncio.sleep(0.01)
+    t.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await t
+    assert client.is_connected is False
+    ws.close.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_tras_cierre_lanza_gateway_disconnected():
+    client = GatewayClient(GatewayConfig(host="h", client_key="k"))
+    ws = MagicMock()
+    ws.send = AsyncMock(side_effect=_closed_error(1013, "client too slow"))
+    client._ws = ws
+    with pytest.raises(GatewayDisconnected) as info:
+        await client.send_audio(b"x")
+    assert info.value.code == 1013 and not info.value.fatal
+    assert client.is_connected is False
+    # Los envíos siguientes fallan igual, sin tocar el socket muerto.
+    with pytest.raises(GatewayDisconnected):
+        await client.send_end()
+    assert ws.send.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_send_keepalive_es_json_ignorado_por_el_gateway():
+    client = GatewayClient(GatewayConfig(host="h", client_key="k"))
+    ws = MagicMock()
+    ws.send = AsyncMock()
+    client._ws = ws
+    await client.send_keepalive()
+    assert json.loads(ws.send.call_args[0][0]) == {"type": "keepalive"}
+    assert client.seconds_since_last_send < 1.0
+
+
+def test_receive_sin_conexion_lanza_gateway_disconnected():
+    client = GatewayClient(GatewayConfig(host="h", client_key="k"))
+
+    async def _t():
+        with pytest.raises(GatewayDisconnected):
+            async for _ in client.receive():
+                pass
+
+    asyncio.run(_t())

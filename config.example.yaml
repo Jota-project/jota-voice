@@ -18,6 +18,23 @@ gateway:
   # WebSocket persistente por proceso, handshake al arranque. false →
   # reconexión por turno (código previo, red de seguridad).
   persistent_session: true
+  # Issue #118: reconexión automática de la sesión persistente. Espera antes
+  # de cada reintento; el último valor se repite (backoff con máximo) y se
+  # reinicia al recibir `ready`. Tras un cierre 1000 (inactividad) se
+  # reabre al instante. Un rechazo 1008 (client_key inválida, agente no
+  # permitido) NO se reintenta solo: se muestra el error y se vuelve a
+  # intentar al empezar el siguiente turno.
+  reconnect_backoff_s: [1, 2, 5, 10, 30]
+  # Issues #116/#118: el gateway cierra la sesión tras 300 s sin recibir
+  # NINGÚN mensaje del cliente (IDLE_TIMEOUT_S). En reposo se manda un
+  # keepalive de aplicación ({"type":"keepalive"}, que el gateway ignora)
+  # si el cliente lleva este tiempo sin enviar nada. 0 = desactivado (la
+  # sesión caerá cada 5 min de silencio y se reabrirá sola).
+  keepalive_interval_s: 120
+  # Ping de protocolo de la librería websockets: detecta un gateway o una
+  # red muertos. No cuenta como actividad para IDLE_TIMEOUT_S. 0 = sin ping.
+  ping_interval_s: 20
+  ping_timeout_s: 20
 
 device:
   id: "mi-dispositivo"

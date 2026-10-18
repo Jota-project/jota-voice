@@ -32,6 +32,21 @@ class GatewayConfig:
     # al startup del proceso. Si False, conserva el comportamiento reconnect-
     # per-turn (código actual). Sin override per-launch — solo YAML.
     persistent_session: bool = True
+    # Issue #118: reconexión de la sesión persistente. Cada elemento es la
+    # espera antes de ese reintento; el último se repite indefinidamente
+    # (backoff con máximo). Se reinicia tras un `ready`.
+    reconnect_backoff_s: list[float] = field(
+        default_factory=lambda: [1.0, 2.0, 5.0, 10.0, 30.0]
+    )
+    # Issue #116/#118: keepalive de aplicación para que el gateway no cierre
+    # la sesión por IDLE_TIMEOUT_S (300 s sin mensajes del cliente). Se
+    # envía solo en IDLE y solo si no se ha enviado nada en este intervalo.
+    # 0 lo desactiva (la sesión caerá a los 300 s y se reabrirá sola).
+    keepalive_interval_s: float = 120.0
+    # Keepalive de protocolo de la librería websockets (detecta peer muerto).
+    # 0 desactiva el ping. No cuenta como actividad para el gateway.
+    ping_interval_s: float = 20.0
+    ping_timeout_s: float = 20.0
 
     @property
     def ws_url(self) -> str:
@@ -169,6 +184,12 @@ def _gateway_from_dict(d: dict) -> GatewayConfig:
         connect_timeout_s=float(d.get("connect_timeout_s", 10.0)),
         url=d.get("url"),
         persistent_session=bool(d.get("persistent_session", True)),
+        reconnect_backoff_s=[
+            float(x) for x in d.get("reconnect_backoff_s", [1, 2, 5, 10, 30])
+        ],
+        keepalive_interval_s=float(d.get("keepalive_interval_s", 120.0)),
+        ping_interval_s=float(d.get("ping_interval_s", 20.0)),
+        ping_timeout_s=float(d.get("ping_timeout_s", 20.0)),
     )
 
 
