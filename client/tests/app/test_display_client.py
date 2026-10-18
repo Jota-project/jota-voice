@@ -182,6 +182,30 @@ async def test_backend_que_falla_no_tumba_el_bucle() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [None, "texto", ["lista"], 42])
+async def test_evento_con_data_que_no_es_dict_no_tumba_el_bucle(bad) -> None:
+    """Revisión Fase D: sin la guarda, un `data` que no sea dict mataba
+    display_task en silencio y el display se quedaba congelado."""
+    bus = EventBus()
+    backend = FakeBackend()
+    task = asyncio.create_task(DisplayClient(backend).run(bus))
+    try:
+        await asyncio.sleep(0)
+        bus.publish(VoiceEvent(type="transcription", data=bad))  # type: ignore[arg-type]
+        bus.publish(VoiceEvent(type="gateway_status", data=bad))  # type: ignore[arg-type]
+        bus.publish(VoiceEvent(type="state_changed", data={"state": "idle"}))
+        await wait_until(lambda: backend.calls == [("state", {"value": "idle", "text": ""})],
+                         message="sigue vivo tras el evento malformado")
+        assert not task.done()
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
 async def test_rafaga_de_text_updates_no_deja_backlog_en_el_bus() -> None:
     """Issue #64: send() no bloquea, así que la cola del suscriptor se drena
     al ritmo de publicación aunque el display sea lento."""

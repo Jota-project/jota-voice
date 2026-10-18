@@ -54,7 +54,14 @@ class DisplayClient:
     async def run(self, bus: EventBus) -> None:
         """Loop suscrito al bus. Se cancela externamente (asyncio.CancelledError)."""
         async for event in bus.subscribe():
-            self._handle(event)
+            if not isinstance(event.data, dict):
+                log.warning("DisplayClient: evento %s con data no dict ignorado", event.type)
+                continue
+            try:
+                self._handle(event)
+            except Exception:
+                # Un evento malformado no puede dejar el display congelado.
+                log.exception("DisplayClient: error traduciendo %s", event.type)
 
     def _send(self, type: str, data: dict[str, Any]) -> None:
         try:
