@@ -409,6 +409,7 @@ class WsDisplayBackend:
             "service": entry.get("service"),
             "state": "expired",
             "ttl_s": None,
+            "detail": {},
         })
 
     # --- DisplayBackend -----------------------------------------------------------

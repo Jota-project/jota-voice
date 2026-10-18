@@ -73,7 +73,7 @@ display:
   timeout_s: 2.0               # solo http
   # --- solo backend ws ---
   # port: 8767                  # 8766 es del kiosk; 8765 era el ControlServer (eliminado)
-  # token_path: null            # null = ~/.jota-voice/display_token (se autogenera, chmod 600)
+  # token_path: null            # null = ~/.jota-voice/display_token (nuevo en cada arranque, chmod 600)
   # rate_limit_max_requests: 10 # handshakes con token inválido por ventana antes de 429
   # rate_limit_window_s: 10.0
   # max_clients: 8              # displays conectados a la vez

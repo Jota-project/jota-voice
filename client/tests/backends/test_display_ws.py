@@ -501,6 +501,50 @@ async def test_health_con_ttl_caduca_sola_y_se_anuncia(server) -> None:
     assert backend._snapshot_health() == {}
 
 
+HEALTH_FIELDS = {"key", "level", "service", "state", "ttl_s", "detail"}  # protocolo §5/§13
+
+
+@pytest.mark.asyncio
+async def test_todos_los_health_emitidos_cumplen_el_protocolo(tmp_path: Path) -> None:
+    """Revisión Fase D: el health de caducidad no llevaba `detail`."""
+    from app.display_client import DisplayClient
+    from domain.event_bus import VoiceEvent
+
+    backend = WsDisplayBackend(_cfg(tmp_path))
+    conn = _FastConnection()
+    client = backend._register(conn)
+    dc = DisplayClient(backend)
+    try:
+        for ev in [
+            VoiceEvent(type="gateway_status", data={"service": "transcriber", "state": "degraded"}),
+            VoiceEvent(type="gateway_status", data={"service": "tts", "state": "unavailable"}),
+            VoiceEvent(type="gateway_status", data={"service": "tts", "state": "restored"}),
+            VoiceEvent(type="gateway_status", data={"service": "gateway", "state": "disconnected",
+                                                    "code": 1006, "reason": ""}),
+            VoiceEvent(type="gateway_status", data={"service": "gateway", "state": "connected"}),
+            VoiceEvent(type="oww_degraded", data={"consecutive_failures": 3}),
+            VoiceEvent(type="oww_recovered", data={}),
+        ]:
+            dc._handle(ev)
+        # Caducidad del aviso degraded (ttl corto para el test).
+        backend.send("health", {"key": "k", "level": "info", "service": "transcriber",
+                                "state": "degraded", "ttl_s": 0.02, "detail": {}})
+        await wait_until(
+            lambda: any(m["type"] == "health" and m["data"]["state"] == "expired"
+                        for m in conn.sent),
+            message="health de caducidad",
+        )
+        healths = [m["data"] for m in conn.sent if m["type"] == "health"]
+        assert len(healths) == 9
+        for h in healths:
+            assert set(h) == HEALTH_FIELDS, h
+            assert h["level"] in {"ok", "info", "warning"}
+            assert isinstance(h["detail"], dict)
+            assert h["ttl_s"] is None or h["ttl_s"] > 0
+    finally:
+        await backend._unregister(client)
+
+
 @pytest.mark.asyncio
 async def test_health_renovado_reinicia_el_ttl(server) -> None:
     backend, _, _ = server
