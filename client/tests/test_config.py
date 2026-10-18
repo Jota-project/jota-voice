@@ -625,7 +625,7 @@ def test_config_example_documenta_hosts_como_solo_shell() -> None:
     ("gateway", "url", "wss://CHANGE-ME.example.com/api/gateway/ws/stream"),
     ("gateway", "host", "YOUR_HOST.local"),
     ("device", "id", "RELLENAR"),
-    ("oww", "host", "CHANGE_ME"),
+    ("gateway", "host", "CHANGE_ME"),
 ])
 def test_placeholder_sin_rellenar_falla_al_cargar(tmp_path, section, key, value) -> None:
     from config import ConfigError
@@ -637,6 +637,19 @@ def test_placeholder_sin_rellenar_falla_al_cargar(tmp_path, section, key, value)
     msg = str(info.value)
     assert f"{section}.{key}" in msg
     assert "sin rellenar" in msg
+
+
+@pytest.mark.parametrize("section,key,value", [
+    ("menubar", "log_path", "/Users/x/YOUR_logs/stdout.log"),
+    ("menubar", "config_path", "/Users/x/CHANGE_ME/config.yaml"),
+    ("oww", "host", "your_host.local"),
+    ("display", "token_path", "/tmp/YOUR_token"),
+])
+def test_placeholder_solo_se_busca_en_secretos_y_endpoints(tmp_path, section, key, value) -> None:
+    """Revisión: un path legítimo con YOUR_ o CHANGE_ME impedía arrancar. La
+    comprobación se limita a gateway.client_key/url/host y device.id."""
+    cfg = _load_tmp(tmp_path, _with(section, {key: value}))
+    assert getattr(getattr(cfg, section), key) == value
 
 
 def test_config_example_sin_rellenar_falla_nombrando_las_claves(tmp_path) -> None:

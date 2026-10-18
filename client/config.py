@@ -44,8 +44,9 @@ _PORT = {"min": 1, "max": 65535}
 # Placeholders de config.example.yaml / .env.local.example sin rellenar
 # (issue #50). Los dos primeros son los que comprueba install.sh en Termux;
 # load_config los aplica en todas las plataformas (p. ej. macOS arrancado por
-# launchd, que no pasa por ningún install.sh). No se miran las secciones
-# solo-shell (hosts: lleva "192.168.X.X" a propósito).
+# launchd, que no pasa por ningún install.sh). Solo en los campos de
+# secretos y endpoints (gateway.client_key/url/host, device.id): en un path
+# legítimo (menubar.log_path: /Users/x/YOUR_logs) no deben impedir arrancar.
 PLACEHOLDER_MARKERS = ("RELLENAR", "YOUR_", "CHANGE-ME", "CHANGE_ME")
 # jota-gateway cierra la sesión tras IDLE_TIMEOUT_S sin mensajes del cliente.
 GATEWAY_IDLE_TIMEOUT_S = 300.0
@@ -193,7 +194,8 @@ class _Section:
         return default
 
     def get_str(self, key: str, default: Any, *, optional: bool = False,
-            choices: tuple[str, ...] | None = None, non_empty: bool = False) -> Any:
+            choices: tuple[str, ...] | None = None, non_empty: bool = False,
+            secret_or_endpoint: bool = False) -> Any:
         value = self.data.get(key)
         if value is None:
             return None if optional else default
@@ -204,7 +206,10 @@ class _Section:
         if non_empty and not text.strip():
             self._bad(key, value, "no puede estar vacío")
             return default
-        marker = next((m for m in PLACEHOLDER_MARKERS if m in text), None)
+        marker = (
+            next((m for m in PLACEHOLDER_MARKERS if m in text), None)
+            if secret_or_endpoint else None
+        )
         if marker is not None:
             self._bad(key, value, f"contiene el marcador {marker!r} sin rellenar")
             return default
@@ -475,13 +480,13 @@ def _gateway_from_dict(d: Any, problems: list[str] | None = None) -> GatewayConf
     # con URL completa del tipo "wss://host/ruta" — el puerto no debe
     # aparecer porque el cliente habla por el esquema por defecto del proxy).
     cfg = GatewayConfig(
-        client_key=s.get_str("client_key", "").strip(),
-        host=s.get_str("host", ""),
+        client_key=s.get_str("client_key", "", secret_or_endpoint=True).strip(),
+        host=s.get_str("host", "", secret_or_endpoint=True),
         port=s.get_int("port", None, optional=True, **_PORT),
         path=s.get_str("path", ""),
         scheme=s.get_str("scheme", default.scheme, choices=("ws", "wss")),
         connect_timeout_s=s.get_float("connect_timeout_s", default.connect_timeout_s, gt=0),
-        url=s.get_str("url", None, optional=True),
+        url=s.get_str("url", None, optional=True, secret_or_endpoint=True),
         persistent_session=s.get_bool("persistent_session", default.persistent_session),
         reconnect_backoff_s=s.get_float_list(
             "reconnect_backoff_s", default.reconnect_backoff_s, min=0
@@ -517,7 +522,9 @@ def _device_from_dict(d: Any, problems: list[str] | None = None) -> DeviceConfig
     s = _Section("device", d, problems)
     if "id" not in s.data:
         problems.append("device.id: falta (obligatorio)")
-    cfg = DeviceConfig(id=s.get_str("id", DeviceConfig().id, non_empty=True))
+    cfg = DeviceConfig(
+        id=s.get_str("id", DeviceConfig().id, non_empty=True, secret_or_endpoint=True)
+    )
     s.warn_unknown(_field_names(DeviceConfig))
     _finish(problems, own)
     return cfg
