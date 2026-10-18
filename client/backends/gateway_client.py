@@ -180,6 +180,27 @@ def _closed_info(exc: BaseException) -> tuple[int, str]:
     return CLOSE_ABNORMAL, ""
 
 
+# Tope para el close ordenado de un handshake fallido o cancelado. El
+# close_timeout por defecto de websockets (10 s) retrasaba RECORDING si se
+# cancelaba un handshake en curso; pasado este tope se aborta el transporte.
+_ABORT_CLOSE_S = 0.5
+
+
+async def _close_quickly(ws: Any) -> None:
+    try:
+        await asyncio.wait_for(ws.close(), timeout=_ABORT_CLOSE_S)
+        return
+    except Exception:
+        pass
+    transport = getattr(ws, "transport", None)
+    abort = getattr(transport, "abort", None)
+    if callable(abort):
+        try:
+            abort()
+        except Exception:
+            pass
+
+
 class GatewayClient:
     def __init__(
         self,
@@ -360,10 +381,7 @@ class GatewayClient:
         except BaseException:
             # Cualquier fallo (incluida la cancelación) cierra el socket:
             # sin esto quedaba una conexión medio abierta.
-            try:
-                await ws.close()
-            except Exception:
-                pass
+            await _close_quickly(ws)
             raise
         self._ws = ws
         self._closed = False

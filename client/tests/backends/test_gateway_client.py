@@ -1043,3 +1043,35 @@ async def test_connect_un_unico_deadline_para_abrir_y_handshake():
     with pytest.raises(asyncio.TimeoutError):
         await GatewayClient(cfg).connect()
     assert loop.time() - t0 < 0.45, "abrir + handshake deben caber en connect_timeout_s"
+
+
+
+@pytest.mark.asyncio
+async def test_cancelar_handshake_no_espera_el_close_lento():
+    """Revisión Fase R, punto 5: cancelar un handshake hacía await ws.close()
+    con el close_timeout por defecto (10 s) y retrasaba RECORDING."""
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=5.0)
+    ws = MagicMock()
+    ws.send = AsyncMock()
+    aborted = []
+    ws.transport = MagicMock(abort=lambda: aborted.append(True))
+
+    async def _slow_close():
+        await asyncio.sleep(10)
+
+    async def _never():
+        await asyncio.Event().wait()
+
+    ws.close = _slow_close
+    ws.recv = _never
+    sys.modules["websockets"].connect = AsyncMock(return_value=ws)
+    client = GatewayClient(cfg)
+    t = asyncio.create_task(client.connect())
+    await asyncio.sleep(0.02)
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    t.cancel()
+    await asyncio.wait([t], timeout=5)
+    assert t.cancelled()
+    assert loop.time() - t0 < 1.0
+    assert aborted, "debe abortar el transporte si el close no termina enseguida"
