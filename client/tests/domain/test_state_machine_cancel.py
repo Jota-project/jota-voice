@@ -71,7 +71,7 @@ def _blocking_receive_gen():
     para que receive_task no termine por sí solo."""
     async def _gen():
         await asyncio.Event().wait()  # bloquea para siempre
-        if False:  # noqa: pragma: no cover  — necesario para que sea async gen
+        if False:  # pragma: no cover — necesario para que sea async gen
             yield
     return _gen()
 

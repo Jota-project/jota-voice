@@ -295,6 +295,18 @@ async def test_wake_word_en_responding_cancela_el_turno() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("raw,expected", [
+    (True, True), (False, False),
+    ("true", False), ("false", False), ("True", False), (1, False), (0, False), (None, False),
+])
+def test_gateway_error_fatal_solo_acepta_booleanos_json(raw, expected) -> None:
+    """Issue #113: el protocolo define `fatal` como boolean JSON. Un string
+    "true" (o 1) no es fatal: antes de la guarda isinstance, bool("false")
+    era True y cualquier string no vacío disparaba el camino fatal."""
+    exc = state_machine._GatewayError(code="X", message="m", fatal=raw)
+    assert exc.fatal is expected
+
+
 class _FakeClock:
     def __init__(self) -> None:
         self.now = 1000.0

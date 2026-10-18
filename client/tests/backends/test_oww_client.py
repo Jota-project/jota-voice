@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from unittest.mock import AsyncMock, patch
+from unittest.mock import create_autospec, patch
 
 from config import AudioConfig, OWWConfig
 from backends.oww_client import OWWClient
@@ -335,12 +335,14 @@ async def _test_run_forever_recupera_connection_error_de_send_task(caplog) -> No
         await asyncio.sleep(0)
         raise ConnectionError("fallo de recepción")
 
-    client.connect_with_backoff = AsyncMock(
-        side_effect=[None, asyncio.CancelledError()]
+    client.connect_with_backoff = create_autospec(
+        client.connect_with_backoff, side_effect=[None, asyncio.CancelledError()]
     )
-    client._send_audio_loop = AsyncMock(side_effect=_fail_sending)
-    client.wait_for_detection = AsyncMock(side_effect=_fail_receiving)
-    client.disconnect = AsyncMock()
+    client._send_audio_loop = create_autospec(client._send_audio_loop, side_effect=_fail_sending)
+    client.wait_for_detection = create_autospec(
+        client.wait_for_detection, side_effect=_fail_receiving
+    )
+    client.disconnect = create_autospec(client.disconnect)
 
     async def _on_wake(_name: str) -> None:
         pass
@@ -483,10 +485,12 @@ async def _test_run_forever_propaga_cancelacion_durante_limpieza_de_send_task() 
         await asyncio.Event().wait()  # si el bug sigue, el bucle llega aquí
         return "unreachable"  # pragma: no cover
 
-    client.connect_with_backoff = AsyncMock(return_value=None)
-    client._send_audio_loop = AsyncMock(side_effect=_slow_cancel_send)
-    client.wait_for_detection = AsyncMock(side_effect=_drop_then_block)
-    client.disconnect = AsyncMock()
+    client.connect_with_backoff = create_autospec(client.connect_with_backoff, return_value=None)
+    client._send_audio_loop = create_autospec(client._send_audio_loop, side_effect=_slow_cancel_send)
+    client.wait_for_detection = create_autospec(
+        client.wait_for_detection, side_effect=_drop_then_block
+    )
+    client.disconnect = create_autospec(client.disconnect)
 
     async def _on_wake(_name: str) -> None:
         pass

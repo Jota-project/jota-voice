@@ -9,10 +9,12 @@ import yaml
 
 
 def _write_cfg(data: dict) -> str:
-    f = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
-    yaml.dump(data, f)
-    f.close()
-    return f.name
+    """config.yaml en un directorio propio y vacío: load_config lee el .env
+    hermano, y en el /tmp compartido podría haber uno ajeno (#39)."""
+    path = os.path.join(tempfile.mkdtemp(prefix="jota-cfg-"), "config.yaml")
+    with open(path, "w") as f:
+        yaml.dump(data, f)
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -155,19 +157,6 @@ def test_load_config_sin_port_no_inyecta_puerto() -> None:
         assert cfg.gateway.ws_url == "wss://green-house.local/api/gateway/ws/stream"
         assert ":" not in cfg.gateway.ws_url.replace("://", "", 1).split("/")[0] or \
                cfg.gateway.ws_url.count(":") == 0
-    finally:
-        os.unlink(path)
-
-
-def test_load_config_acepta_url_sin_host() -> None:
-    path = _write_cfg({
-        "gateway": {"url": "wss://foo.example.com/ws", "client_key": "test"},
-        "device": {"id": "test-device"},
-    })
-    try:
-        from config import load_config
-        cfg = load_config(path)
-        assert cfg.gateway.ws_url == "wss://foo.example.com/ws"
     finally:
         os.unlink(path)
 

@@ -14,47 +14,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import sys
-import types
 from typing import AsyncGenerator
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
-# ---------------------------------------------------------------------------
-# Stubs para dependencias de hardware (pyaudio, websockets, numpy)
-# Deben instalarse ANTES de importar los módulos del proyecto.
-# ---------------------------------------------------------------------------
+import pytest
 
-def _install_stubs() -> None:
-    """Instala módulos stub para pyaudio y websockets si no están disponibles."""
-    # pyaudio stub
-    if "pyaudio" not in sys.modules:
-        try:
-            import pyaudio  # noqa: F401
-        except ImportError:
-            stub = types.ModuleType("pyaudio")
-            stub.paInt16 = 8
-            stub.paContinue = 0
-
-            class _FakeStream:
-                def write(self, data: bytes) -> None: pass
-                def stop_stream(self) -> None: pass
-                def close(self) -> None: pass
-
-            class _FakePyAudio:
-                def open(self, **kwargs): return _FakeStream()
-                def terminate(self) -> None: pass
-
-            stub.PyAudio = _FakePyAudio
-            stub.Stream = _FakeStream
-            sys.modules["pyaudio"] = stub
-
-    # Antes aquí se sustituían websockets.exceptions.ConnectionClosed* por
-    # clases fake para toda la sesión de pytest, lo que rompía cualquier test
-    # posterior con un servidor WebSocket real (Fase R, #118). Los tests usan
-    # ahora las excepciones reales.
-
-
-_install_stubs()
+# pyaudio solo existe en Termux: el módulo falso lo pone el fixture
+# ``fake_pyaudio`` de tests/conftest.py (con teardown), en vez del antiguo
+# _install_stubs() que tocaba sys.modules al importar este fichero.
+pytestmark = pytest.mark.usefixtures("fake_pyaudio")
 
 # Importar módulos del proyecto
 from domain.event_bus import EventBus, VoiceEvent                       # noqa: E402
@@ -350,7 +318,7 @@ async def _run_error_test() -> None:
     wake_publisher_task = _publish_wake_on_idle(bus)
 
     gateway = MagicMock(spec=GatewayClient)
-    gateway.connect = AsyncMock(side_effect=ConnectionRefusedError("gateway no disponible"))
+    gateway.connect.side_effect = ConnectionRefusedError("gateway no disponible")
     playback = _make_playback_mock()
 
     received: list[VoiceEvent] = []
@@ -419,8 +387,8 @@ async def _run_notification_failure_test() -> None:
     gateway = _gateway_mock_with_events([])  # RESPONDING termina rápido (sin eventos)
 
     playback = _make_playback_mock()
-    playback.play_notification = AsyncMock(
-        side_effect=RuntimeError("Error opening OutputStream: Internal PortAudio error [PaErrorCode -9986]")
+    playback.play_notification.side_effect = RuntimeError(
+        "Error opening OutputStream: Internal PortAudio error [PaErrorCode -9986]"
     )
 
     received: list[VoiceEvent] = []
@@ -506,9 +474,7 @@ async def _run_capture_exception_test() -> None:
     # cuenta como send_audio → la 1ª va al preroll si existe; aquí no hay,
     # luego 2 sends en _capture_loop y el 3er lanza ConnectionError simulando
     # un corte de red a mitad de grabación).
-    gateway.send_audio = AsyncMock(
-        side_effect=[None, None, ConnectionError("corte de red")]
-    )
+    gateway.send_audio.side_effect = [None, None, ConnectionError("corte de red")]
 
     playback = _make_playback_mock()
 
@@ -1550,7 +1516,6 @@ def test_state_machine_gateway_error_event_terminates_immediately() -> None:
 # nunca) vs modo efímero (connect/disconnect por turno)
 # ---------------------------------------------------------------------------
 
-import pytest
 from domain.state_machine import run as sm_run
 
 
