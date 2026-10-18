@@ -91,10 +91,27 @@ Logs: `tail -f ~/Library/Logs/jota-voice/stdout.log`.
 
 Servicio: `launchctl list | grep com.jota.voice`.
 
+## Displays
+
+jota-voice empuja su estado a displays externos según `display.backend`:
+
+| Backend | Cuándo | Qué hace |
+|---|---|---|
+| `ws` | **por defecto en macOS y Linux** | Servidor WebSocket en `127.0.0.1:8767` con el [protocolo display](docs/display-protocol.md): `sync` al conectar, texto por chunk, tool calls, errores, avisos de salud y comando `cancel`. Para el HUD de macOS y futuros displays. |
+| `http` | **por defecto en Termux**, y siempre que haya `display.url` | Compatibilidad con el kiosk actual de jota-display: `POST /state` a `http://127.0.0.1:8766`. Se mantiene hasta que jota-display migre a `ws`. |
+| `null` | — | Sin display. |
+
+El puerto 8767 evita el 8766 (lo usa el kiosk de jota-display en el mismo
+teléfono) y el 8765 (el antiguo ControlServer, por si quedan configs o
+procesos viejos durante la migración). El ControlServer (`POST /cancel`) ya
+no existe: su `cancel` va por el WebSocket del display, y una sección
+`control:` en `config.yaml` se ignora con un aviso.
+
 ## Documentación
 
 | Fichero | Contenido |
 |---|---|
+| [`docs/display-protocol.md`](docs/display-protocol.md) | Protocolo display por WebSocket: fuente de verdad para cualquier display |
 | [`install/docs/spec.md`](install/docs/spec.md) | Especificación técnica: módulos, protocolos, máquina de estados |
 | [`install/docs/arquitectura.md`](install/docs/arquitectura.md) | Topología del sistema completo (legacy, mantener actualizado) |
 | [`install/docs/pendientes.md`](install/docs/pendientes.md) | Roadmap y tareas pendientes |
@@ -116,8 +133,7 @@ client/
   app/                          # orquestación — wiring de backends + entry point
     voice_client.py             # entry point — wire registry + tasks
     playback_engine.py          # orquesta TTS delegando en AudioBackend
-    display_client.py           # EventBus → DisplayBackend (inyectado)
-    control_server.py           # HTTP /cancel para jota-display
+    display_client.py           # EventBus → mensajes del protocolo display
   backends/                    # interfaces intercambiables por SO
     registry.py                 # factory con auto-detección por sys.platform
     gateway_client.py           # WebSocket jota-gateway (handshake con device_id)
@@ -125,8 +141,9 @@ client/
     audio_sounddevice.py         # Mac/Linux (sounddevice/PortAudio)
     audio_termux.py              # Android (parec + pyaudio)
     audio_capture.py             # parec/PulseAudio (helper de TermuxBackend)
-    display_base.py              # Protocol DisplayBackend
-    display_http.py              # POST a jota-display
+    display_base.py              # Protocol DisplayBackend (send/start/stop)
+    display_ws.py                # servidor WebSocket local de displays (127.0.0.1:8767)
+    display_http.py              # POST /state al kiosk de jota-display (compatibilidad)
     display_null.py              # no-op
     oww_base.py                  # Protocol OwWBackend
     oww_wyoming.py                # wrapper sobre OWWClient

@@ -110,13 +110,12 @@ audio:
   output_device: null
 
 display:
-  backend: "null"
+  # Servidor WebSocket local de displays (HUD de macOS) en 127.0.0.1:8767.
+  # Ver docs/display-protocol.md. "null" lo desactiva.
+  backend: "ws"
 
 logging:
   level: "INFO"
-
-control:
-  port: 8765
 EOF
 chmod 600 "$CFG"
 _ok "Creado $CFG (chmod 600)"
