@@ -310,6 +310,39 @@ def test_stop_termina_parec_y_une_el_hilo() -> None:
     assert cap._read_thread is None
 
 
+def test_stop_mata_y_recoge_parec_si_no_termina_a_tiempo() -> None:
+    """Issue #86: si wait() expira tras terminate() se hace kill(), y hay
+    que volver a hacer wait() para recoger el proceso (evitar zombie)."""
+    proc = _fake_proc()
+    proc.wait.side_effect = [subprocess.TimeoutExpired("parec", 2.0), 0]
+    cap, thread = _capture_running(proc)
+
+    asyncio.run(cap.stop())
+
+    proc.terminate.assert_called_once_with()
+    proc.kill.assert_called_once_with()
+    assert proc.wait.call_count == 2, "falta wait() tras kill(): parec queda zombie"
+    assert proc.wait.call_args_list[1].kwargs.get("timeout") is not None, (
+        "el wait() tras kill() debe tener timeout para no colgar el shutdown"
+    )
+    thread.join.assert_called_once_with(timeout=2.0)
+    assert cap._proc is None
+
+
+def test_stop_no_propaga_si_el_proceso_no_se_deja_recoger() -> None:
+    """Si incluso tras kill() el wait() falla, stop() no debe lanzar: el
+    shutdown tiene que seguir (unir el hilo y soltar la referencia)."""
+    proc = _fake_proc()
+    proc.wait.side_effect = subprocess.TimeoutExpired("parec", 2.0)
+    cap, thread = _capture_running(proc)
+
+    asyncio.run(cap.stop())
+
+    proc.kill.assert_called_once_with()
+    thread.join.assert_called_once_with(timeout=2.0)
+    assert cap._proc is None
+
+
 def test_stop_sin_start_es_noop() -> None:
     cap = AudioCapture(_cfg())
 

@@ -118,7 +118,13 @@ class AudioCapture:
                 self._proc.terminate()
                 self._proc.wait(timeout=2.0)
             except Exception:
-                self._proc.kill()
+                # Tras kill() hay que volver a hacer wait() para recoger
+                # (reap) el proceso; si no, parec queda zombie (issue #86).
+                try:
+                    self._proc.kill()
+                    self._proc.wait(timeout=2.0)
+                except Exception as exc:
+                    logger.warning("AudioCapture: no se pudo recoger parec tras kill(): %s", exc)
             self._proc = None
         if self._read_thread is not None:
             self._read_thread.join(timeout=2.0)
