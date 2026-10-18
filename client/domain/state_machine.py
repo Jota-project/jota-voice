@@ -12,7 +12,21 @@ OWW corre como task background persistente (ver oww_client.run_forever):
 - RECORDING/RESPONDING monitorizan el bus y cancelan el turn actual si llega
   otro wake_word (wake word interrumpe TTS, estilo Alexa/Google)
 
-Publica en EventBus en cada transición y en cada evento relevante.
+Eventos que publica en el EventBus (issue #94: antes decía "en cada
+transición", pero ``state_changed`` solo se publica para IDLE):
+
+- IDLE: ``state_changed`` con ``{"state": "idle"}`` al entrar.
+- RECORDING: ``wake_word_detected`` y ``recording_started`` al entrar,
+  ``recording_ended`` al salir.
+- RESPONDING: se infiere de ``transcription``/``turn_start``/``llm_token``/
+  ``playback_started``; termina con ``playback_ended`` (éxito),
+  ``cancelled`` o ``error``.
+
+No hay ``state_changed`` para RECORDING/RESPONDING a propósito: los
+consumidores (MenubarClient, DisplayClient) derivan el estado visual de los
+eventos de dominio y MenubarClient pasaría cualquier otro valor de
+``state_changed`` tal cual a ``set_state``, que solo entiende sus propios
+estados (listening/thinking/speaking...).
 Toda transición de error publica VoiceEvent(type="error") antes de volver a IDLE.
 """
 
