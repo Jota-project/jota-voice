@@ -4,15 +4,18 @@ Sin red ni esperas reales: mocks con spec y eventos del bus.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from unittest.mock import MagicMock
 
 import pytest
 
 from app.playback_engine import PlaybackEngine
+from backends.audio_base import AudioBackend
 from backends.gateway_client import GatewayClient, GatewayDisconnected
-from config import Config, DeviceConfig, GatewayConfig
+from config import Config, DeviceConfig, GatewayConfig, OWWConfig
 from domain import state_machine
+from domain.event_bus import EventBus, VoiceEvent
 
 
 def _cfg(*, persistent_session: bool = True, **gateway) -> Config:
@@ -71,3 +74,38 @@ async def test_cleanup_decide_por_la_config_no_por_atributos_privados(persistent
     playback = MagicMock(spec=PlaybackEngine)
     await state_machine._cleanup(_cfg(persistent_session=persistent), gateway, playback)
     assert gateway.disconnect.await_count == disconnects
+
+
+# ---------------------------------------------------------------------------
+# Issue #92: la salida temprana de un async-for sobre el bus cierra la
+# suscripción en el acto (aclosing), sin depender del finalizador de asyncio
+# ---------------------------------------------------------------------------
+
+
+def _wake_soon(bus: EventBus) -> None:
+    asyncio.get_running_loop().call_soon(
+        bus.publish, VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"})
+    )
+
+
+@pytest.mark.asyncio
+async def test_consume_wake_retira_su_suscripcion_al_volver() -> None:
+    bus = EventBus()
+    _wake_soon(bus)
+    assert await state_machine._consume_wake(bus) == "ok_nabu"
+    # Sin ceder el loop: sin aclosing la cola seguiría registrada hasta que el
+    # finalizador de async-generators de asyncio se ejecutara más tarde.
+    assert bus._queues == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("idle_timeout", [0.0, 30.0])
+async def test_wait_idle_retira_su_suscripcion_al_volver(idle_timeout) -> None:
+    bus = EventBus()
+    cfg = _cfg()
+    cfg.oww = OWWConfig(idle_detection_timeout_s=idle_timeout)
+    audio = MagicMock(spec=AudioBackend)
+    audio.get_queue.return_value = asyncio.Queue()
+    _wake_soon(bus)
+    assert await state_machine._wait_idle(cfg, bus, audio, asyncio.Event()) == "ok_nabu"
+    assert bus._queues == []

@@ -19,6 +19,7 @@ Toda transición de error publica VoiceEvent(type="error") antes de volver a IDL
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 
 from app.playback_engine import PlaybackEngine
@@ -167,25 +168,16 @@ async def _wait_idle(
     if timeout_s > 0:
         # Aplicar timeout: si no llega wake_word_detected en `timeout_s`,
         # lanzar OSError para que run() publique error y vuelva a IDLE.
-        async def _wait_wake_or_timeout() -> str:
-            try:
-                async for event in bus.subscribe():
-                    if event.type == "wake_word_detected":
-                        return event.data.get("wake_word", "")
-            except asyncio.CancelledError:
-                raise
         try:
-            return await asyncio.wait_for(_wait_wake_or_timeout(), timeout=timeout_s)
+            wake_word = await asyncio.wait_for(_consume_wake(bus), timeout=timeout_s)
         except asyncio.TimeoutError:
             raise OSError(
                 f"IDLE: timeout {timeout_s}s esperando wake_word_detected"
             )
     else:
-        async for event in bus.subscribe():
-            if event.type == "wake_word_detected":
-                wake_word = event.data.get("wake_word", "")
-                log.info("IDLE: wake word recibido → %r", wake_word)
-                return wake_word
+        wake_word = await _consume_wake(bus)
+    log.info("IDLE: wake word recibido → %r", wake_word)
+    return wake_word
 
 
 async def _wait_wake_or_cancel(
@@ -222,10 +214,17 @@ async def _wait_wake_or_cancel(
 
 
 async def _consume_wake(bus: EventBus) -> str:
-    """Lee el bus hasta encontrar wake_word_detected."""
-    async for event in bus.subscribe():
-        if event.type == "wake_word_detected":
-            return event.data.get("wake_word", "")
+    """Lee el bus hasta encontrar wake_word_detected.
+
+    Issue #92: ``aclosing`` retira la suscripción en el acto al volver (o al
+    cancelarse), en vez de depender de que el finalizador de async-generators
+    de asyncio lo haga más tarde.
+    """
+    async with contextlib.aclosing(bus.subscribe()) as events:
+        async for event in events:
+            if event.type == "wake_word_detected":
+                return event.data.get("wake_word", "")
+    raise OSError("EventBus cerrado esperando wake_word_detected")
 
 
 async def _recording(
