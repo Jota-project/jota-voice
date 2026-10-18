@@ -30,6 +30,7 @@ _load_device() {
     _valid_device_name "$name" || { _err "Nombre de dispositivo inválido: '$name' (solo letras, dígitos, _ y -)"; exit 1; }
     local file="$DEVICES_DIR/${name}.env"
     [ -f "$file" ] || { _err "Dispositivo '$name' no encontrado en $DEVICES_DIR/"; exit 1; }
+    chmod 600 "$file" 2>/dev/null || true   # credenciales: issue #56
     set -a; . "$file"; set +a
 }
 
@@ -46,16 +47,28 @@ _auto_device() {
 
 # ── Helpers SSH ───────────────────────────────────────────────────────────────
 
+# Autenticación (issue #56): con PHONE_PASS vacío se usa la clave SSH
+# (recomendado); con contraseña, sshpass -e la lee de $SSHPASS en vez de
+# -p, que la dejaba visible en `ps`.
 _check_sshpass() {
-    command -v sshpass >/dev/null 2>&1 || { _err "sshpass no está instalado. Instalar con: brew install hudochenkov/sshpass/sshpass"; exit 1; }
+    if [ -n "${PHONE_PASS:-}" ]; then
+        command -v sshpass >/dev/null 2>&1 || { _err "PHONE_PASS definido pero sshpass no está instalado (brew install hudochenkov/sshpass/sshpass). Mejor: clave SSH y PHONE_PASS vacío."; exit 1; }
+        export SSHPASS="$PHONE_PASS"
+    else
+        unset SSHPASS   # --all: no heredar la contraseña del dispositivo anterior
+    fi
+}
+
+_sshpass() {
+    if [ -n "${SSHPASS:-}" ]; then sshpass -e "$@"; else "$@"; fi
 }
 
 _ssh() {
-    sshpass -p "$PHONE_PASS" ssh -o StrictHostKeyChecking=no -p "$PHONE_PORT" "$PHONE_USER@$PHONE_HOST" "$@"
+    _sshpass ssh -o StrictHostKeyChecking=no -p "$PHONE_PORT" "$PHONE_USER@$PHONE_HOST" "$@"
 }
 
 _rsync() {
-    sshpass -p "$PHONE_PASS" rsync -av \
+    _sshpass rsync -av \
         -e "ssh -o StrictHostKeyChecking=no -p $PHONE_PORT" \
         --exclude='.git' --exclude='.venv' --exclude='__pycache__' \
         --exclude='.claude' --exclude='.agents' \
@@ -163,10 +176,12 @@ cmd_init() {
         printf "  Puerto SSH [8022]: "
         read -r PHONE_PORT
         PHONE_PORT="${PHONE_PORT:-8022}"
-        printf "  Contraseña SSH: "
+        printf "  Contraseña SSH (vacío = usar clave SSH, recomendado): "
         read -rs PHONE_PASS
         echo ""
 
+        # Creado ya con 600: lleva credenciales (issue #56).
+        ( umask 077; : > "$device_file" )
         cat > "$device_file" << EOF
 DEVICE_NAME="${DEVICE_NAME}"
 PHONE_HOST="${PHONE_HOST}"
@@ -181,6 +196,7 @@ EOF
     echo ""
     _info "Verificando conexión SSH..."
     _load_device "$DEVICE_NAME"
+    _check_sshpass
     if _ssh "echo 'SSH OK'" 2>/dev/null; then
         _ok "SSH conecta correctamente"
     else

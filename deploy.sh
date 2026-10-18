@@ -5,9 +5,10 @@
 #      ./deploy.sh macbook
 #
 # phone   -> rsync al teléfono Android vía Termux (ssh) y reinicia jota-voice
-#            vía supervisorctl. Lee credenciales de devices/<device_name>.env
+#            vía supervisorctl. Lee la conexión de devices/<device_name>.env
 #            (ver devices/example.env). Si solo hay un devices/*.env, se
-#            autodetecta.
+#            autodetecta. Autenticación: clave SSH (recomendado, PHONE_PASS
+#            vacío) o contraseña vía sshpass -e (nunca en la línea de órdenes).
 # macbook -> rsync local a $HOME/Work/jota-voice y reinicia el launchd service.
 
 set -euo pipefail
@@ -86,17 +87,15 @@ case "$TARGET" in
             exit 1
         fi
 
-        command -v sshpass >/dev/null 2>&1 || {
-            echo "ERROR: falta sshpass (brew install sshpass / pkg install sshpass)."
-            exit 1
-        }
+        # Issue #56: los .env de devices/ llevan credenciales; 600 en cada deploy.
+        jota_secure_perms "$REPO_LOCAL_SELF" >/dev/null
 
         set -a
         # shellcheck disable=SC1090
         . "$DEVICE_ENV"
         set +a
 
-        for var in PHONE_HOST PHONE_PORT PHONE_USER PHONE_PASS PHONE_DIR; do
+        for var in PHONE_HOST PHONE_PORT PHONE_USER PHONE_DIR; do
             eval val=\$$var
             if [ -z "$val" ]; then
                 echo "ERROR: $var no definida en $DEVICE_ENV"
@@ -106,11 +105,25 @@ case "$TARGET" in
 
         PHONE_TARGET="${PHONE_USER}@${PHONE_HOST}"
 
+        # Con PHONE_PASS vacío se usa la clave SSH (ssh-copy-id -p 8022 ...).
+        # Con contraseña, sshpass -e la lee de $SSHPASS: con -p quedaba
+        # visible para cualquier usuario en `ps` mientras dura la conexión.
+        _sshpass=""
+        if [ -n "${PHONE_PASS:-}" ]; then
+            command -v sshpass >/dev/null 2>&1 || {
+                echo "ERROR: PHONE_PASS definido pero falta sshpass (brew install sshpass). Mejor: usa una clave SSH y deja PHONE_PASS vacío."
+                exit 1
+            }
+            export SSHPASS="$PHONE_PASS"
+            unset PHONE_PASS
+            _sshpass="sshpass -e"
+        fi
+
         _phone_ssh() {
-            sshpass -p "$PHONE_PASS" ssh -p "$PHONE_PORT" "$PHONE_TARGET" "$@"
+            $_sshpass ssh -p "$PHONE_PORT" "$PHONE_TARGET" "$@"
         }
         _phone_rsync() {
-            sshpass -p "$PHONE_PASS" rsync -a --delete \
+            $_sshpass rsync -a --delete \
                 -e "ssh -p $PHONE_PORT" \
                 --exclude '.git' --exclude '.venv' --exclude '__pycache__' \
                 --exclude 'config.yaml' --exclude 'devices' \
