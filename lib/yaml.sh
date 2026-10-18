@@ -14,7 +14,10 @@ yaml_get() {
 #     key: "valor"
 yaml_get_nested() {
     local section="$1" key="$2"
+    # Las líneas de comentario (también en columna 0) se saltan: si no, un
+    # "# ..." sin indentar dentro de la sección la cerraba antes de tiempo.
     awk -v section="$section" -v key="$key" '
+        /^[[:space:]]*#/ { next }
         $0 ~ "^"section":" { in_section=1; next }
         in_section && /^[^[:space:]]/ { in_section=0 }
         in_section && $0 ~ "^[[:space:]]*"key"[[:space:]]*:" {
