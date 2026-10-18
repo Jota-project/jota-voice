@@ -16,7 +16,6 @@ import asyncio
 import json
 import os
 import stat
-import threading
 from pathlib import Path
 
 import pytest
@@ -28,7 +27,7 @@ from backends.display_ws import (
     PROTOCOL_VERSION,
     TOKEN_HEADER,
     WsDisplayBackend,
-    _load_or_create_token,
+    _rotate_token,
 )
 from config import DisplayConfig
 
@@ -65,7 +64,7 @@ async def server(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Token (fichero 0600, mismas garantías que tenía control_server + #115)
+# Token: fichero 0600 que se ROTA en cada start() (revisión Fase D, #115)
 # ---------------------------------------------------------------------------
 
 
@@ -83,123 +82,110 @@ async def test_token_se_autogenera_con_permisos_600(server, tmp_path: Path) -> N
     assert len(token) == 64
 
 
-def test_token_existente_se_reutiliza_tal_cual(tmp_path: Path) -> None:
-    path = tmp_path / "token"
-    path.write_text("token-fijo-de-prueba")
-    os.chmod(path, 0o600)
-    assert _load_or_create_token(path) == "token-fijo-de-prueba"
-    assert path.read_text() == "token-fijo-de-prueba"
+@pytest.mark.asyncio
+async def test_token_rota_en_cada_start(tmp_path: Path) -> None:
+    """El token da acceso a transcripciones, respuestas y tool calls: un
+    token filtrado (p.ej. a quien ocupó el puerto con jota-voice parado)
+    deja de valer en el siguiente arranque."""
+    seen = []
+    for _ in range(2):
+        backend = WsDisplayBackend(_cfg(tmp_path))
+        await backend.start()
+        try:
+            token = (tmp_path / "token").read_text().strip()
+            seen.append(token)
+            ws = await _connect(backend, token)
+            assert (await _recv(ws))["type"] == "sync"
+            await ws.close()
+        finally:
+            await backend.stop()
+    assert seen[0] != seen[1]
+    assert all(len(t) == 64 for t in seen)
 
 
-@pytest.mark.parametrize("contenido", ["", "   \n\n\t  \n"])
-def test_token_vacio_o_whitespace_se_regenera(tmp_path: Path, contenido: str, monkeypatch) -> None:
-    """Un fichero vacío no puede devolver '' (compare_digest(b'', b'') es
-    True: bypass de auth, #108)."""
+@pytest.mark.asyncio
+async def test_token_viejo_deja_de_valer_tras_reiniciar(tmp_path: Path) -> None:
+    first = WsDisplayBackend(_cfg(tmp_path))
+    await first.start()
+    old = (tmp_path / "token").read_text().strip()
+    await first.stop()
+    second = WsDisplayBackend(_cfg(tmp_path))
+    await second.start()
+    try:
+        with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
+            await _connect(second, old)
+        assert exc.value.response.status_code == 401
+    finally:
+        await second.stop()
+
+
+@pytest.mark.parametrize("contenido,modo", [("token-viejo", 0o644), ("", 0o600), ("  \n", 0o666)])
+def test_rotar_sustituye_cualquier_fichero_previo_y_deja_600(
+    tmp_path: Path, contenido: str, modo: int
+) -> None:
     path = tmp_path / "token"
     path.write_text(contenido)
+    os.chmod(path, modo)
+    token = _rotate_token(path)
+    assert len(token) == 64 and token != contenido.strip()
+    assert path.read_text() == token
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_rotar_nunca_deja_el_fichero_vacio_ni_temporales(tmp_path: Path, monkeypatch) -> None:
+    """#115: el token se escribe en un temporal 0600 y se publica con
+    os.replace (atómico): un lector ve el token viejo completo o el nuevo
+    completo, nunca un fichero vacío."""
+    path = tmp_path / "token"
+    path.write_text("token-viejo")
     os.chmod(path, 0o600)
-    monkeypatch.setattr(display_ws, "_EMPTY_TOKEN_WAIT_S", 0.01)
-    token = _load_or_create_token(path)
-    assert len(token) == 64
-    assert path.read_text().strip() == token
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    seen: list[tuple[str, str]] = []
+    real_replace = os.replace
 
+    def _spy_replace(src, dst, *a, **kw):
+        seen.append((Path(src).read_text(), Path(dst).read_text()))
+        real_replace(src, dst, *a, **kw)
 
-def test_token_con_permisos_laxos_se_corrige(tmp_path: Path, caplog) -> None:
-    """Re-verificación de permisos al arrancar aunque el token sea válido (#105)."""
-    import logging
-
-    path = tmp_path / "token"
-    path.write_text("token-con-permisos-laxos")
-    os.chmod(path, 0o644)
-    with caplog.at_level(logging.WARNING):
-        assert _load_or_create_token(path) == "token-con-permisos-laxos"
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    assert any("permisos laxos" in m for m in caplog.messages)
-
-
-def test_token_regenerado_desde_fichero_laxo_queda_en_600(tmp_path: Path, monkeypatch) -> None:
-    path = tmp_path / "token"
-    path.write_text("")
-    os.chmod(path, 0o644)
-    monkeypatch.setattr(display_ws, "_EMPTY_TOKEN_WAIT_S", 0.01)
-    _load_or_create_token(path)
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
-
-
-def test_token_nunca_es_visible_vacio_al_crearlo(tmp_path: Path, monkeypatch) -> None:
-    """Issue #115: el fichero se publica con os.link desde un temporal ya
-    escrito, así que en ningún instante existe vacío en la ruta final. Se
-    comprueba mirando la ruta justo en el momento del link."""
-    path = tmp_path / "token"
-    seen: list[str] = []
-    real_link = os.link
-
-    def _spy_link(src, dst, *a, **kw):
-        seen.append(Path(src).read_text())
-        assert not Path(dst).exists()
-        real_link(src, dst, *a, **kw)
-        seen.append(Path(dst).read_text())
-
-    monkeypatch.setattr(display_ws.os, "link", _spy_link)
-    token = _load_or_create_token(path)
-    assert seen == [token, token]
-    assert [p.name for p in tmp_path.iterdir()] == ["token"]  # sin temporales
-
-
-def test_token_otro_proceso_gana_la_carrera_se_adopta_el_suyo(tmp_path: Path, monkeypatch) -> None:
-    """Otro proceso crea el fichero entre nuestro is_file() y el link: se
-    adopta su token (FileExistsError), no se pisa."""
-    path = tmp_path / "token"
-    real_link = os.link
-
-    def _rival_first(src, dst, *a, **kw):
-        Path(dst).write_text("token-del-rival")
-        os.chmod(dst, 0o600)
-        real_link(src, dst, *a, **kw)  # -> FileExistsError
-
-    monkeypatch.setattr(display_ws.os, "link", _rival_first)
-    assert _load_or_create_token(path) == "token-del-rival"
-
-
-def test_token_race_o_excl_lector_espera_al_escritor(tmp_path: Path, monkeypatch) -> None:
-    """Issue #115, ruta de fallback (sistemas sin hard links): el ganador de
-    O_EXCL crea el inode vacío y se suspende antes de escribir. Un segundo
-    lector no puede devolver '' ni regenerar encima: espera y adopta el token
-    del ganador."""
-    path = tmp_path / "token"
-    path.write_text("")  # el ganador ya hizo os.open(O_EXCL) pero no write()
-    os.chmod(path, 0o600)
-
-    def _winner_writes_later() -> None:
-        threading.Event().wait(0.05)
-        path.write_text("token-del-ganador")
-
-    t = threading.Thread(target=_winner_writes_later)
-    t.start()
-    monkeypatch.setattr(display_ws, "_EMPTY_TOKEN_WAIT_S", 2.0)
-    try:
-        assert _load_or_create_token(path) == "token-del-ganador"
-    finally:
-        t.join()
-
-
-def test_token_fallback_sin_hard_links(tmp_path: Path, monkeypatch) -> None:
-    def _no_links(src, dst, *a, **kw):
-        raise PermissionError("link not permitted")
-
-    monkeypatch.setattr(display_ws.os, "link", _no_links)
-    path = tmp_path / "token"
-    token = _load_or_create_token(path)
-    assert path.read_text() == token and len(token) == 64
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    monkeypatch.setattr(display_ws.os, "replace", _spy_replace)
+    token = _rotate_token(path)
+    assert seen == [(token, "token-viejo")]
     assert [p.name for p in tmp_path.iterdir()] == ["token"]
+
+
+def test_rotar_crea_el_directorio_con_0700(tmp_path: Path) -> None:
+    path = tmp_path / "nuevo" / "token"
+    _rotate_token(path)
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+
+
+def test_rotar_limpia_el_temporal_si_falla(tmp_path: Path, monkeypatch) -> None:
+    def _boom(src, dst, *a, **kw):
+        raise OSError("disco lleno")
+
+    monkeypatch.setattr(display_ws.os, "replace", _boom)
+    with pytest.raises(OSError):
+        _rotate_token(tmp_path / "token")
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.asyncio
 async def test_start_falla_cerrado_si_no_hay_token(tmp_path: Path, monkeypatch) -> None:
     """Defensa en profundidad (#115): sin token no vacío no se sirve."""
-    monkeypatch.setattr(display_ws, "_load_or_create_token", lambda path: "")
+    monkeypatch.setattr(display_ws, "_rotate_token", lambda path: "")
+    backend = WsDisplayBackend(_cfg(tmp_path))
+    await backend.start()
+    try:
+        assert backend.port is None
+    finally:
+        await backend.stop()
+
+
+@pytest.mark.asyncio
+async def test_start_falla_cerrado_si_no_se_puede_escribir_el_token(tmp_path: Path, monkeypatch) -> None:
+    def _boom(path):
+        raise OSError("sin permisos")
+
+    monkeypatch.setattr(display_ws, "_rotate_token", _boom)
     backend = WsDisplayBackend(_cfg(tmp_path))
     await backend.start()
     try:

@@ -65,14 +65,33 @@ renombrar un campo, cambiar su significado) sube la versión.
 ### Token
 
 - Fichero: `~/.jota-voice/display_token` (configurable con
-  `display.token_path`). Lo crea jota-voice al arrancar: 64 caracteres hex,
-  permisos `0600`, del mismo usuario que ejecuta jota-voice. En cada arranque
-  se re-verifican los permisos y se corrigen a `0600` si están más abiertos.
-- El fichero se publica de forma atómica: nunca existe vacío. Si un display
-  lo lee vacío (solo posible en sistemas de ficheros sin hard links, durante
-  la creación), debe reintentar al cabo de unos milisegundos.
-- Un display lee el token del fichero en cada intento de conexión (jota-voice
-  lo regenera si el fichero se borra o se vacía).
+  `display.token_path`). 64 caracteres hex, permisos `0600`, del mismo
+  usuario que ejecuta jota-voice.
+- **Se rota en cada arranque de jota-voice**: el token da acceso a
+  transcripciones, respuestas y `tool_call` (con `args` y `result`), así que
+  uno filtrado deja de valer en el siguiente arranque.
+- El fichero se sustituye de forma atómica (temporal 0600 + rename): un
+  lector ve el token anterior completo o el nuevo completo, nunca un fichero
+  vacío.
+- Un display **lee el token del fichero en cada intento de conexión**, nunca
+  lo cachea entre reconexiones: tras reiniciarse jota-voice, el token
+  anterior recibe `401`.
+
+### Riesgo conocido: otro usuario local en el puerto
+
+El servidor solo escucha en `127.0.0.1`, pero en una máquina **Linux
+multiusuario** cualquier usuario local puede abrir un socket en el 8767
+mientras jota-voice está parado. Un display que se conecte entonces le
+entregaría el token en la cabecera. Con la rotación en cada arranque ese
+token deja de valer cuando jota-voice vuelve, pero mientras tanto el
+impostor puede haber mostrado datos falsos al display, y ningún display
+puede saber con este protocolo que habla con el jota-voice auténtico.
+
+En macOS de un solo usuario y en Termux (cada app es un usuario aislado) el
+riesgo es despreciable. Mitigación futura, si hiciera falta: verificar el
+usuario del otro extremo (credenciales del peer, `SO_PEERCRED` /
+`LOCAL_PEERCRED`) o pasar a un socket Unix en un directorio `0700` del
+usuario, que ningún otro usuario puede ocupar.
 
 ### Handshake
 

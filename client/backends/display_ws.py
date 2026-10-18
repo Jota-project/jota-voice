@@ -17,9 +17,9 @@ servidor en 127.0.0.1 que
 
 Seguridad (portada del ControlServer, con #106 y #115 resueltas):
   - Token compartido en un fichero 0600 (``~/.jota-voice/display_token``),
-    con los permisos re-verificados en cada arranque (#105) y nunca vacío
-    (#108, #115: se publica con un hard link atómico desde un temporal ya
-    escrito; ``start()`` falla cerrado si aun así no hay token).
+    NUEVO en cada arranque y nunca vacío (#108, #115: se publica con
+    os.replace desde un temporal ya escrito; ``start()`` falla cerrado si
+    no hay token).
   - El token viaja en la cabecera ``X-Jota-Display-Token``: la API
     WebSocket de un navegador no puede fijar cabeceras, así que una página
     web no puede abrir esta conexión (ni por cross-site WebSocket hijacking).
@@ -35,7 +35,6 @@ import json
 import logging
 import os
 import secrets
-import stat
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -70,65 +69,23 @@ MAX_INCOMING_BYTES = 4096
 CLOSE_TIMEOUT_S = 1.0
 STOP_TIMEOUT_S = 1.0
 
-# Token: cuánto esperar a que otro proceso termine de escribir un fichero que
-# encontramos vacío (ruta de fallback O_EXCL, #115) y cuántas vueltas dar.
-_EMPTY_TOKEN_WAIT_S = 0.2
-_TOKEN_ATTEMPTS = 3
-
-
 # ---------------------------------------------------------------------------
 # Token
 # ---------------------------------------------------------------------------
 
 
-def _read_token(path: Path) -> str | None:
-    """Contenido del fichero sin espacios, o None si no existe."""
-    try:
-        return path.read_text().strip()
-    except FileNotFoundError:
-        return None
+def _rotate_token(path: Path) -> str:
+    """Genera un token nuevo (64 hex) y lo publica en ``path`` con permisos
+    0600. Se llama en cada start(): el token da acceso a transcripciones,
+    respuestas y tool calls, así que uno filtrado deja de valer al reiniciar.
 
-
-def _wait_non_empty(path: Path, timeout_s: float) -> str:
-    deadline = time.monotonic() + timeout_s
-    while True:
-        token = _read_token(path) or ""
-        if token or time.monotonic() >= deadline:
-            return token
-        time.sleep(0.01)
-
-
-def _ensure_mode_600(path: Path) -> None:
-    """Re-verifica los permisos aunque el token sea válido (#105)."""
-    try:
-        mode = stat.S_IMODE(path.stat().st_mode)
-    except OSError:
-        return
-    if mode != 0o600:
-        log.warning("display token con permisos laxos %s, corrigiendo a 0o600", oct(mode))
-        os.chmod(path, 0o600)
-
-
-def _publish_token_excl(path: Path, token: str) -> bool:
-    """Fallback sin hard links: O_EXCL + write. Deja una ventana en la que el
-    fichero existe vacío; los lectores la cubren con _wait_non_empty."""
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        return False
-    with os.fdopen(fd, "w") as f:
-        f.write(token)
-    return True
-
-
-def _publish_token(path: Path, token: str) -> bool:
-    """Crea ``path`` con ``token`` sin que exista nunca vacío (#115).
-
-    Escribe un temporal 0600 en el mismo directorio y lo enlaza con
-    ``os.link``, que es atómico y falla si ``path`` ya existe: o se ve el
-    fichero completo o no se ve. Devuelve False si otro proceso lo creó antes
-    (hay que adoptar el suyo, no pisarlo).
+    #115: se escribe en un temporal 0600 del mismo directorio y se publica
+    con ``os.replace`` (atómico): un lector ve el token anterior completo o
+    el nuevo completo, nunca un fichero vacío. Sustituye cualquier fichero
+    previo (vacío, con permisos laxos o con un token viejo).
     """
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    token = secrets.token_hex(32)
     tmp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
@@ -136,48 +93,15 @@ def _publish_token(path: Path, token: str) -> bool:
             f.write(token)
             f.flush()
             os.fsync(f.fileno())
-        try:
-            os.link(tmp, path)
-            return True
-        except FileExistsError:
-            return False
-        except OSError as exc:
-            # Sistemas de ficheros sin hard links (algunos montajes Android).
-            log.debug("display token: os.link no disponible (%s); fallback O_EXCL", exc)
-            return _publish_token_excl(path, token)
-    finally:
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
         try:
             tmp.unlink()
         except FileNotFoundError:
             pass
-
-
-def _load_or_create_token(path: Path) -> str:
-    """Lee el token o lo crea (64 hex, 0600). Nunca devuelve ''.
-
-    - Fichero con token: se re-verifican permisos y se devuelve (#105).
-    - Fichero vacío: puede ser otro proceso a mitad de escribirlo por la ruta
-      O_EXCL; se espera un poco y, si sigue vacío, se regenera (#108, #115).
-    - Otro proceso lo crea mientras tanto: se adopta su token.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    for _ in range(_TOKEN_ATTEMPTS):
-        existing = _read_token(path)
-        if existing is not None:
-            if not existing:
-                existing = _wait_non_empty(path, _EMPTY_TOKEN_WAIT_S)
-            if existing:
-                _ensure_mode_600(path)
-                return existing
-            log.warning("WsDisplayBackend: fichero de token en %s vacío; regenerando", path)
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
-        token = secrets.token_hex(32)
-        if _publish_token(path, token):
-            return token
-    raise RuntimeError(f"no se pudo obtener un token de display no vacío en {path}")
+        raise
+    return token
 
 
 # ---------------------------------------------------------------------------
@@ -251,8 +175,8 @@ class WsDisplayBackend:
     async def start(self) -> None:
         token_path = Path(self._cfg.token_path or DEFAULT_TOKEN_PATH)
         try:
-            token = _load_or_create_token(token_path)
-        except (OSError, RuntimeError) as exc:
+            token = _rotate_token(token_path)
+        except OSError as exc:
             token = ""
             log.error("WsDisplayBackend: no se pudo preparar el token (%s)", exc)
         if not token:
