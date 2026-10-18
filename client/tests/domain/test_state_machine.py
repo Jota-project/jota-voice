@@ -48,32 +48,10 @@ def _install_stubs() -> None:
             stub.Stream = _FakeStream
             sys.modules["pyaudio"] = stub
 
-    # websockets stub (gateway_client lo importa). Añadimos las subclases
-    # que necesitamos para distinguir OK vs Error al módulo real de websockets
-    # si no están — websockets 16.0+ las tiene ya, así que esto es no-op en
-    # práctica; pero dejamos la defensa por si una versión más nueva las mueve.
-    def _ensure_exception_subclasses() -> None:
-        try:
-            from websockets import exceptions as _exc
-        except ImportError:
-            return
-
-        class _FakeConnectionClosed(Exception):
-            """Base laxa — hereda Exception directamente."""
-
-        class _FakeConnectionClosedOK(_FakeConnectionClosed):
-            pass
-
-        class _FakeConnectionClosedError(_FakeConnectionClosed):
-            pass
-
-        # Sustituimos siempre: websockets real puede tener __init__ estricto
-        # incompatible con tests que pasan solo un mensaje.
-        _exc.ConnectionClosed = _FakeConnectionClosed
-        _exc.ConnectionClosedOK = _FakeConnectionClosedOK
-        _exc.ConnectionClosedError = _FakeConnectionClosedError
-
-    _ensure_exception_subclasses()
+    # Antes aquí se sustituían websockets.exceptions.ConnectionClosed* por
+    # clases fake para toda la sesión de pytest, lo que rompía cualquier test
+    # posterior con un servidor WebSocket real (Fase R, #118). Los tests usan
+    # ahora las excepciones reales.
 
 
 _install_stubs()
@@ -1234,7 +1212,11 @@ async def _run_anomalous_close_during_tts_publishes_error_test() -> None:
     # Gateway que emite transcription + un tts_chunk y luego CAE con
     # ConnectionClosedError — el escenario exacto del bug: el servidor se
     # corta a mitad de un tts_chunk grande.
-    _drop_exc = ConnectionClosedError("gateway dropped mid-tts (1006 abnormal closure)")
+    # Excepción real de websockets (sin close frame = 1006). Ahora
+    # GatewayClient.receive() la traduce a GatewayDisconnected; aquí el mock
+    # la lanza tal cual para fijar que cualquier excepción del lector
+    # termina el turno con error.
+    _drop_exc = ConnectionClosedError(None, None)
 
     async def _receive_then_drop():
         yield GatewayEvent(type="transcription", data={"text": "hola"})
@@ -1301,7 +1283,7 @@ async def _run_anomalous_close_during_tts_publishes_error_test() -> None:
         f"Cierre anómalo a mitad de turno sin visibilidad: esperaba ≥1 "
         f"evento 'error', recibí {len(error_evs)}. Eventos: {event_types}"
     )
-    assert any("1006" in e.data["message"] or "mid-tts" in e.data["message"]
+    assert any("1006" in e.data["message"] or "no close frame" in e.data["message"]
                for e in error_evs), (
         f"Ningún evento 'error' refleja el cierre anómalo inyectado: "
         f"{[e.data['message'] for e in error_evs]}"
@@ -1738,78 +1720,13 @@ async def test_dos_turnos_con_una_sola_connect_persistente():
     )
 
 
-@pytest.mark.asyncio
-async def test_recording_guard_publica_error_si_ws_muerto():
-    """Issue #24: si gateway.is_connected es False al entrar a _recording, publica error."""
-    bus = EventBus()
-    cfg = _make_config(persistent_session=True)
-
-    gw_events = []  # primer turno no se ejecuta
-    gateway = MagicMock()
-    gateway.connect = AsyncMock()
-    gateway.disconnect = AsyncMock()
-    gateway.send_audio = AsyncMock()
-    gateway.send_end = AsyncMock()
-    gateway.is_connected = False  # WS muerto
-    gateway.receive = lambda: _make_async_iter(gw_events)
-    audio = _make_audio_mock(silent=True)
-    playback = _make_playback_mock()
-
-    # cancel_event fresca (no pre-set) — pasarla a sm_run para que
-    # _recording() pueda usarla sin conflicto de estado previo.
-    cancel_event = asyncio.Event()
-
-    # NO pre-publicar wake_word_detected — publicarla DESPUES de que
-    # sm_run haya entrado en _idle para evitar race conditions.
-    # Aquí esperamos a que el state_changed(idle) inicial confirme que
-    # sm_run está listo en _idle antes de publicar la wake word.
-    idle_ready = asyncio.Event()
-
-    async def _wait_idle_then_publish():
-        async for ev in bus.subscribe():
-            if ev.type == "state_changed" and ev.data.get("state") == "idle":
-                idle_ready.set()
-                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
-                return
-
-    publish_task = asyncio.create_task(_wait_idle_then_publish())
-
-    captured = []
-    stop_event = asyncio.Event()
-
-    async def _watch():
-        async for ev in bus.subscribe():
-            captured.append(ev)
-            if ev.type == "error":
-                stop_event.set()
-                return
-
-    watcher = asyncio.create_task(_watch())
-    sm_task = asyncio.create_task(sm_run(cfg, bus, audio, gateway, playback, cancel_event))
-
-    try:
-        await asyncio.wait_for(stop_event.wait(), timeout=3.0)
-    except asyncio.TimeoutError:
-        pass
-
-    sm_task.cancel()
-    publish_task.cancel()
-    try:
-        await sm_task
-    except asyncio.CancelledError:
-        pass
-    try:
-        await publish_task
-    except asyncio.CancelledError:
-        pass
-    watcher.cancel()
-
-    error_evts = [e for e in captured if e.type == "error"]
-    assert any(
-        e.data.get("code") == "GATEWAY_DISCONNECTED" for e in error_evts
-    ), f"Esperaba error con code='GATEWAY_DISCONNECTED', recibí {[(e.type, e.data) for e in captured]}"
-    # Además: send_audio NO debe haberse llamado
-    assert gateway.send_audio.await_count == 0
+# test_recording_guard_publica_error_si_ws_muerto fijaba el comportamiento
+# roto de #118 (sesión caída → GATEWAY_DISCONNECTED y turno perdido, sin
+# reconectar nunca). Sustituido por los tests de reconexión perezosa de
+# tests/domain/test_gateway_session.py:
+#   test_recording_reconecta_si_la_sesion_esta_caida
+#   test_recording_reconexion_fallida_da_error_visible_sin_enviar_audio
+#   test_cierre_a_mitad_de_turno_da_error_y_el_siguiente_turno_funciona
 
 
 @pytest.mark.asyncio

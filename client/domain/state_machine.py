@@ -23,8 +23,15 @@ import logging
 
 from app.playback_engine import PlaybackEngine
 from backends.audio_base import AudioBackend
-from backends.gateway_client import GatewayClient
+from collections.abc import Awaitable, Callable
+
+from backends.gateway_client import (
+    GatewayClient,
+    GatewayDisconnected,
+    GatewayHandshakeError,
+)
 from config import Config
+from core.aio import cancel_and_wait
 
 from .event_bus import EventBus, VoiceEvent
 
@@ -55,9 +62,12 @@ class _GatewayError(Exception):
     code/message/fatal directamente al bus (no envueltos en str(exc)).
     """
 
-    def __init__(self, code: str, message: str, fatal: object) -> None:
+    def __init__(
+        self, code: str, message: str, fatal: object, extra: dict | None = None
+    ) -> None:
         self.code = code
         self.message = message
+        self.extra = dict(extra or {})
         # El protocolo del gateway define fatal como JSON boolean. Aceptar
         # cualquier valor truthy (p.ej. bool("false") == True en Python) haría
         # que strings no-vacíos y enteros disparasen el camino de fatal=True
@@ -78,6 +88,32 @@ async def _safe_send_cancel(gateway: GatewayClient) -> None:
         pass
 
 async def _idle(
+    cfg: Config,
+    bus: EventBus,
+    audio: AudioBackend,
+    cancel_event: asyncio.Event,
+    background: Callable[[], Awaitable[None]] | None = None,
+) -> str:
+    """Envuelve ``_wait_idle`` con una tarea de fondo que solo vive en IDLE.
+
+    Issue #118: en modo persistente ``background`` es el supervisor de la
+    sesión con el gateway (``domain.gateway_session.idle_supervisor``): es el
+    único lector del socket mientras se espera la wake word y se cancela
+    —esperando a que termine— ANTES de volver, así que RECORDING/RESPONDING
+    nunca comparten el socket con él.
+    """
+    if background is None:
+        return await _wait_idle(cfg, bus, audio, cancel_event)
+    bg_task = asyncio.create_task(background(), name="gateway_idle_supervisor")
+    try:
+        return await _wait_idle(cfg, bus, audio, cancel_event)
+    finally:
+        await cancel_and_wait(bg_task)
+        if not bg_task.cancelled() and bg_task.exception() is not None:
+            log.error("IDLE: el supervisor del gateway falló: %r", bg_task.exception())
+
+
+async def _wait_idle(
     cfg: Config,
     bus: EventBus,
     audio: AudioBackend,
@@ -219,18 +255,32 @@ async def _recording(
         log.debug("RECORDING: descartados %d frames stale de la cola", drained)
 
     if cfg.gateway.persistent_session:
-        # Modo persistente: el connect() se hizo en main(); aquí solo
-        # verificamos que el WS sigue vivo (issue #24).
+        # Modo persistente (issue #118): si la sesión está caída al empezar
+        # el turno (cierre por inactividad, reinicio del gateway, corte...),
+        # reconectar AHORA de forma perezosa, acotado por connect_timeout_s.
+        # El audio que el usuario dice mientras tanto se acumula en la cola
+        # y se envía tras el handshake. Si no se puede, error visible.
         if not gateway.is_connected:
-            log.error("RECORDING: gateway no conectado al inicio del turno")
-            bus.publish(VoiceEvent(
-                type="error",
-                data={
-                    "code": "GATEWAY_DISCONNECTED",
-                    "message": "gateway session is not connected",
-                },
-            ))
-            raise _TurnCancelled()
+            log.warning("RECORDING: sesión con el gateway caída; reconectando")
+            try:
+                await asyncio.wait_for(
+                    gateway.ensure_connected(),
+                    timeout=cfg.gateway.connect_timeout_s,
+                )
+            except GatewayHandshakeError as exc:
+                raise _GatewayError(
+                    code="GATEWAY_HANDSHAKE_REJECTED",
+                    message=str(exc),
+                    fatal=exc.fatal,
+                    extra={"kind": exc.kind, "close_code": exc.code},
+                ) from exc
+            except Exception as exc:
+                raise _GatewayError(
+                    code="GATEWAY_DISCONNECTED",
+                    message=f"No se pudo reconectar con el gateway: {exc or type(exc).__name__}",
+                    fatal=False,
+                ) from exc
+            log.info("RECORDING: sesión con el gateway reabierta")
     else:
         # Modo efímero: conectamos en cada turno (comportamiento previo).
         try:
@@ -466,12 +516,28 @@ async def _responding(
             [receive_task, cancel_task, wake_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
-        for t in pending:
-            t.cancel()
-            try:
-                await t
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                pass
+        # Drenar sin tragarse la cancelación de esta tarea ni las
+        # excepciones de los hijos (se leen abajo).
+        await cancel_and_wait(*pending)
+
+        # Issue #103: si receive_task terminó con un error real (cierre de la
+        # conexión, error del gateway) a la vez que el cancel —en el mismo
+        # ciclo o mientras se cancelaba—, ese error manda: antes el cancel
+        # ganaba, el error se descartaba y en logs/UI solo quedaba "cancel".
+        real_exc: BaseException | None = None
+        if receive_task.done() and not receive_task.cancelled():
+            exc = receive_task.exception()
+            if exc is not None and not isinstance(exc, (asyncio.TimeoutError, _TurnCancelled)):
+                real_exc = exc
+
+        if real_exc is not None:
+            if cancel_task in done:
+                log.warning(
+                    "RESPONDING: cancel simultáneo con error del gateway; "
+                    "se informa el error: %s", real_exc,
+                )
+            playback.reset()
+            raise real_exc
 
         if cancel_task in done:
             await _safe_send_cancel(gateway)
@@ -489,15 +555,8 @@ async def _responding(
     finally:
         # Issue #21: si la tarea externa fue cancelada durante el wait
         # (SIGTERM durante shutdown), el código de arriba no se ejecuta
-        # pero los tasks hijos sí. Drenarlos siempre, replicando el patrón
-        # de _wait_wake_or_cancel (líneas 175-181) y _recording.
-        for t in (receive_task, cancel_task, wake_task):
-            if not t.done():
-                t.cancel()
-                try:
-                    await t
-                except asyncio.CancelledError:
-                    pass
+        # pero los tasks hijos sí. Drenarlos siempre.
+        await cancel_and_wait(receive_task, cancel_task, wake_task)
 
     await playback.drain()
     bus.publish(VoiceEvent(type="playback_ended", data={}))
@@ -521,8 +580,21 @@ def _log_error(state: str, exc: Exception, bus: EventBus) -> None:
             state, exc.code, exc.message, exc.fatal,
         )
         bus.publish(VoiceEvent(type="error", data={
+            **exc.extra,
             "code": exc.code,
             "message": exc.message,
+            "fatal": exc.fatal,
+        }))
+        return
+    if isinstance(exc, GatewayDisconnected):
+        # Issue #118: la sesión cayó a mitad de turno. El turno termina con
+        # error visible; el siguiente IDLE/turno reabre la sesión.
+        log.warning("Error en estado %s: %s", state, exc)
+        bus.publish(VoiceEvent(type="error", data={
+            "code": "GATEWAY_DISCONNECTED",
+            "message": str(exc),
+            "close_code": exc.code,
+            "reason": exc.reason,
             "fatal": exc.fatal,
         }))
         return
@@ -562,7 +634,15 @@ async def run(
     gateway: GatewayClient,
     playback: PlaybackEngine,
     cancel_event: asyncio.Event | None = None,
+    *,
+    idle_background: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
+    """Bucle principal IDLE → RECORDING → RESPONDING.
+
+    ``idle_background``: fábrica de la tarea que corre solo durante IDLE
+    (en modo persistente, el supervisor de la sesión con el gateway; ver
+    ``_idle``). None = nada en IDLE (modo efímero y tests).
+    """
     if cancel_event is None:
         cancel_event = asyncio.Event()
 
@@ -571,7 +651,7 @@ async def run(
     while True:
         state = "IDLE"
         try:
-            wake_word = await _idle(cfg, bus, audio, cancel_event)
+            wake_word = await _idle(cfg, bus, audio, cancel_event, idle_background)
         except asyncio.CancelledError:
             log.info("StateMachine: cancelado en IDLE")
             raise
