@@ -785,3 +785,51 @@ def test_orderly_close_still_drops_stale_service_statuses():
         _gw("disconnected", code=1001, reason="going away"),
     )
     assert health == [("info", "Transcripción degradada"), ("ok", "")]
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "kind, text",
+    [
+        ("invalid_client_key", "Gateway: client_key inválida"),
+        ("agent_not_permitted", "Gateway: agente no permitido"),
+        ("handshake_invalid", "Gateway: handshake inválido"),
+        ("http_rejected", "Gateway: acceso denegado (HTTP)"),
+        ("policy_rejected", "Gateway: conexión rechazada"),
+        ("error_message", "Gateway: conexión rechazada"),
+    ],
+)
+def test_fatal_handshake_texts_cover_every_fatal_kind(kind, text):
+    """Los kinds fatales son los de gateway_client._FATAL_HANDSHAKE_KINDS
+    (más error_message con fatal=True). agent_not_available y
+    service_unavailable nunca son fatales y no necesitan texto propio."""
+    _, health = _health_after(_fatal(kind))
+    assert health == [("fatal", text)]
+
+
+def test_fatal_kinds_match_gateway_client():
+    from backends.gateway_client import _FATAL_HANDSHAKE_KINDS
+    from ui.menubar_client import _HANDSHAKE_TEXTS
+
+    assert set(_HANDSHAKE_TEXTS) == set(_FATAL_HANDSHAKE_KINDS)
+
+
+def test_fatal_handshake_replaces_reconnecting_entry():
+    """Tras un rechazo fatal el supervisor deja de reintentar: "Gateway:
+    reconectando…" ya no es verdad y no debe acompañar al aviso rojo."""
+    _, health = _health_after(
+        _gw("reconnecting", attempt=1, delay_s=1.0), _fatal("invalid_client_key")
+    )
+    assert health[-1] == ("fatal", "Gateway: client_key inválida")
+
+
+def test_disconnect_error_drops_stale_service_statuses():
+    _, health = _health_after(
+        _status("transcriber", "degraded"),
+        VoiceEvent(type="error", data={
+            "code": "GATEWAY_DISCONNECTED", "message": "x", "fatal": False,
+        }),
+    )
+    assert health[-1] == ("warn", "Gateway: sin conexión")

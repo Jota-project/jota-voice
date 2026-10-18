@@ -64,13 +64,15 @@ _GATEWAY_TEXTS = {
     "disconnected": "Gateway: desconectado",
 }
 _ORDERLY_CLOSE_CODES = (1000, 1001)
-# kind de GatewayHandshakeError (backends.gateway_client.classify_handshake_close).
+# Texto por kind FATAL de GatewayHandshakeError: los de
+# backends.gateway_client._FATAL_HANDSHAKE_KINDS (un test lo comprueba).
+# Cualquier otro kind con fatal=True (error_message) usa el texto genérico.
 _HANDSHAKE_TEXTS = {
     "invalid_client_key": "Gateway: client_key inválida",
     "agent_not_permitted": "Gateway: agente no permitido",
-    "agent_not_available": "Gateway: agente no disponible",
+    "handshake_invalid": "Gateway: handshake inválido",
+    "http_rejected": "Gateway: acceso denegado (HTTP)",
     "policy_rejected": "Gateway: conexión rechazada",
-    "service_unavailable": "Gateway: servicio no disponible",
 }
 _MAX_DETAIL_CHARS = 60
 
@@ -279,11 +281,18 @@ class MenubarClient:
             # a abrirse (gateway_ready / connected).
             if code == "GATEWAY_HANDSHAKE_REJECTED":
                 text = _HANDSHAKE_TEXTS.get(data.get("kind"), "Gateway: conexión rechazada")
+                # El supervisor deja de reintentar: "reconectando…" ya no
+                # es cierto.
+                self._health.pop("gateway", None)
             else:
                 text = f"Error grave: {_shorten(data.get('message') or code or 'desconocido')}"
             self._health["fatal"] = (HEALTH_FATAL, text)
-        elif code == "GATEWAY_DISCONNECTED" and "gateway" not in self._health:
-            self._health["gateway"] = (HEALTH_WARN, "Gateway: sin conexión")
+        elif code == "GATEWAY_DISCONNECTED":
+            # Los status de servicios eran de la sesión que acaba de morir.
+            for service in _SERVICE_LABELS:
+                self._health.pop(service, None)
+            if "gateway" not in self._health:
+                self._health["gateway"] = (HEALTH_WARN, "Gateway: sin conexión")
 
     def _push_health(self) -> None:
         entries = [
