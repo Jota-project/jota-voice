@@ -6,6 +6,8 @@ is_silence() y get_preroll() con frames sintéticos.
 from __future__ import annotations
 
 import asyncio
+import queue as queue_mod
+import threading
 from unittest.mock import create_autospec
 
 import numpy as np
@@ -278,3 +280,128 @@ def test_start_succeeds_on_first_try_normal(monkeypatch, fake_sounddevice) -> No
 
     assert attempts["n"] == 1, f"sin error no debería reintentar (vi {attempts['n']})"
     assert be._input_stream is successful_stream
+
+
+# --- issue #88: _play_leftover compartido con el hilo realtime de PortAudio ---
+
+
+class _BlockingQueue:
+    """Cola falsa: get_nowait() entrega un chunk y se queda parada hasta que
+    el test la suelte, para abrir la ventana entre "el callback ya sacó el
+    chunk" y "el callback escribe _play_leftover"."""
+
+    def __init__(self, chunk: bytes) -> None:
+        self._chunk: bytes | None = chunk
+        self.inside = threading.Event()
+        self.proceed = threading.Event()
+
+    def get_nowait(self) -> bytes:
+        if self._chunk is None:
+            raise queue_mod.Empty
+        chunk, self._chunk = self._chunk, None
+        self.inside.set()
+        assert self.proceed.wait(5.0), "el test no soltó la cola"
+        return chunk
+
+    def empty(self) -> bool:
+        return self._chunk is None
+
+    def put(self, chunk: bytes) -> None:  # pragma: no cover - no se usa
+        self._chunk = chunk
+
+
+class _ObservedLock:
+    """Lock real con un aviso: ``trying`` se activa cuando alguien entra con
+    ``with`` (espera bloqueante, el lado de asyncio). El callback usa
+    ``acquire(blocking=False)``, que va directo al lock real."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.trying = threading.Event()
+
+    def acquire(self, blocking: bool = True) -> bool:
+        return self._lock.acquire(blocking)
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def __enter__(self) -> "_ObservedLock":
+        self.trying.set()
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._lock.release()
+
+
+def test_reset_no_deja_leftover_viejo_tras_callback_concurrente() -> None:
+    """Issue #88: el callback saca un chunk más grande que el bloque, reset()
+    limpia todo en otro hilo y después el callback guardaba el resto en
+    _play_leftover: ese audio viejo sonaba al principio del turno siguiente
+    (p. ej. tras interrumpir el TTS con la wake word)."""
+    be = SounddeviceBackend(_cfg())
+    lock = _ObservedLock()
+    be._play_lock = lock  # type: ignore[assignment]
+    frames = 4
+    q = _BlockingQueue(np.arange(1, 11, dtype=np.int16).tobytes())  # 10 > 4
+    be._play_q = q  # type: ignore[assignment]
+
+    outdata = np.zeros((frames, 1), dtype=np.int16)
+    cb = threading.Thread(target=be._out_callback, args=(outdata, frames, None, None))
+    cb.start()
+    resetter = threading.Thread(target=be.reset)
+    try:
+        assert q.inside.wait(5.0)
+        resetter.start()
+        # reset() tiene que pedir el lock de playback y quedarse esperando
+        # mientras el callback está a mitad de bloque (sin el lock, reset()
+        # vaciaba todo y terminaba aquí mismo).
+        assert lock.trying.wait(5.0), "reset() no usa el lock de playback"
+        assert resetter.is_alive(), "reset() mutó el estado de playback a mitad del callback"
+    finally:
+        q.proceed.set()
+        cb.join(5.0)
+        if resetter.ident is not None:  # join() de un hilo no arrancado lanza
+            resetter.join(5.0)
+    assert not cb.is_alive() and not resetter.is_alive()
+
+    assert be._play_leftover is None, "audio del turno anterior sobrevivió a reset()"
+
+
+def test_out_callback_no_bloquea_si_reset_tiene_el_lock() -> None:
+    """El callback realtime nunca espera un lock: si el hilo de asyncio está
+    limpiando la cola, ese bloque sale en silencio y el callback vuelve."""
+    be = SounddeviceBackend(_cfg())
+    be._play_q.put(np.arange(1, 5, dtype=np.int16).tobytes())
+    frames = 4
+    outdata = np.ones((frames, 1), dtype=np.int16)
+
+    with be._play_lock:
+        done = threading.Event()
+
+        def _run() -> None:
+            be._out_callback(outdata, frames, None, None)
+            done.set()
+
+        t = threading.Thread(target=_run)
+        t.start()
+        assert done.wait(5.0), "el callback realtime se quedó esperando el lock"
+        t.join(5.0)
+
+    assert np.all(outdata == 0)
+    # El chunk no se consumió: sonará en el siguiente bloque.
+    assert be._play_q.qsize() == 1
+
+
+def test_out_callback_no_usa_el_lock_del_preroll() -> None:
+    """El hilo de captura toma self._lock en cada frame; si el callback de
+    salida compartiera ese lock perdería bloques (silencio a mitad del TTS)."""
+    be = SounddeviceBackend(_cfg())
+    be._play_q.put(np.arange(1, 5, dtype=np.int16).tobytes())
+    frames = 4
+    outdata = np.zeros((frames, 1), dtype=np.int16)
+
+    with be._lock:
+        be._out_callback(outdata, frames, None, None)
+
+    assert list(outdata.ravel()) == [1, 2, 3, 4]

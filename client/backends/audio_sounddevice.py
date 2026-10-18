@@ -48,6 +48,14 @@ class SounddeviceBackend:
             frames_per_buffer=cfg.frames_per_buffer,
         )
         self._lock = threading.Lock()
+        # Lock propio del estado de reproducción (_play_q + _play_leftover),
+        # compartido con el callback realtime de PortAudio (issue #88). No se
+        # reutiliza self._lock: el hilo de captura lo toma en cada frame y el
+        # callback de salida perdería bloques (silencio a mitad del TTS).
+        # El callback solo lo intenta sin bloquear; el hilo de asyncio sí
+        # espera (unos microsegundos: lo que tarda el callback en un bloque).
+        # _enqueue_carry no lo necesita: solo se toca desde el hilo del loop.
+        self._play_lock = threading.Lock()
 
     # --- captura ---
 
@@ -133,14 +141,23 @@ class SounddeviceBackend:
             except Exception as exc:
                 log.warning("SounddeviceBackend.stop output: %s", exc)
             self._output_stream = None
-        # Drenar play queue
-        self._play_leftover = None
+        self._clear_playback()
+
+    def _clear_playback(self) -> None:
+        """Vacía la cola de reproducción y el resto pendiente del callback.
+
+        Toma _play_lock para no intercalarse con un bloque del callback
+        realtime: sin él, el callback podía sacar un chunk, reset() vaciar
+        todo y después el callback guardar el resto del chunk viejo en
+        _play_leftover, que sonaba al principio del turno siguiente (#88)."""
         self._enqueue_carry = b""
-        while not self._play_q.empty():
-            try:
-                self._play_q.get_nowait()
-            except queue_mod.Empty:
-                break
+        with self._play_lock:
+            self._play_leftover = None
+            while True:
+                try:
+                    self._play_q.get_nowait()
+                except queue_mod.Empty:
+                    break
 
     # --- acceso a datos ---
 
@@ -198,11 +215,19 @@ class SounddeviceBackend:
         # (no solo el chunk en curso), dejando el resto de la respuesta en
         # silencio permanente sin ningún error visible para el usuario. Por
         # eso nunca debe poder lanzar, pase lo que pase en la cola.
+        # Nunca esperar el lock en el hilo realtime: si el hilo de asyncio
+        # está vaciando la cola (reset/drain/stop), este bloque sale en
+        # silencio y el siguiente ya ve el estado limpio (issue #88).
+        if not self._play_lock.acquire(blocking=False):
+            outdata[:, 0] = 0
+            return
         try:
             self._out_callback_unsafe(outdata, frames, status)
         except Exception:
             log.exception("SounddeviceBackend: error en _out_callback, escribiendo silencio")
             outdata[:, 0] = 0
+        finally:
+            self._play_lock.release()
 
     def _out_callback_unsafe(self, outdata, frames, status) -> None:
         if status:
@@ -278,22 +303,9 @@ class SounddeviceBackend:
             except Exception as exc:
                 log.warning("SounddeviceBackend.drain close: %s", exc)
             self._output_stream = None
-        # Vaciar play queue
-        self._play_leftover = None
-        self._enqueue_carry = b""
-        while not self._play_q.empty():
-            try:
-                self._play_q.get_nowait()
-            except queue_mod.Empty:
-                break
+        self._clear_playback()
 
     def reset(self) -> None:
         with self._lock:
             self._preroll.clear()
-        self._play_leftover = None
-        self._enqueue_carry = b""
-        while not self._play_q.empty():
-            try:
-                self._play_q.get_nowait()
-            except queue_mod.Empty:
-                break
+        self._clear_playback()
