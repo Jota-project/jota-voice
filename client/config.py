@@ -40,6 +40,12 @@ DISPLAY_BACKENDS = ("ws", "http", "null")
 OWW_BACKENDS = ("wyoming",)
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 _PORT = {"min": 1, "max": 65535}
+# Placeholders de config.example.yaml / .env.local.example sin rellenar
+# (issue #50). Los dos primeros son los que comprueba install.sh en Termux;
+# load_config los aplica en todas las plataformas (p. ej. macOS arrancado por
+# launchd, que no pasa por ningún install.sh). No se miran las secciones
+# solo-shell (hosts: lleva "192.168.X.X" a propósito).
+PLACEHOLDER_MARKERS = ("RELLENAR", "YOUR_", "CHANGE-ME", "CHANGE_ME")
 # jota-gateway cierra la sesión tras IDLE_TIMEOUT_S sin mensajes del cliente.
 GATEWAY_IDLE_TIMEOUT_S = 300.0
 _TRUE = frozenset({"true", "yes", "on", "1"})
@@ -196,6 +202,10 @@ class _Section:
         text = str(value) if not isinstance(value, str) else value
         if non_empty and not text.strip():
             self._bad(key, value, "no puede estar vacío")
+            return default
+        marker = next((m for m in PLACEHOLDER_MARKERS if m in text), None)
+        if marker is not None:
+            self._bad(key, value, f"contiene el marcador {marker!r} sin rellenar")
             return default
         if choices is not None and text not in choices:
             opts = ", ".join(repr(c) for c in choices)

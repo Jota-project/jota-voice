@@ -582,6 +582,57 @@ def test_config_example_documenta_hosts_como_solo_shell() -> None:
     assert "solo" in block and "termux" in block and "python" in block, block
 
 
+# ---------------------------------------------------------------------------
+# Issue #50: placeholders sin rellenar (como el grep de install.sh)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("section,key,value", [
+    ("gateway", "client_key", "RELLENAR"),
+    ("gateway", "client_key", "YOUR_KEY"),
+    ("gateway", "client_key", "CHANGE-ME"),
+    ("gateway", "url", "wss://CHANGE-ME.example.com/api/gateway/ws/stream"),
+    ("gateway", "host", "YOUR_HOST.local"),
+    ("device", "id", "RELLENAR"),
+    ("oww", "host", "CHANGE_ME"),
+])
+def test_placeholder_sin_rellenar_falla_al_cargar(tmp_path, section, key, value) -> None:
+    from config import ConfigError
+    data = _with(section, {key: value})
+    if key == "url":
+        data["gateway"].pop("host")
+    with pytest.raises(ConfigError) as info:
+        _load_tmp(tmp_path, data)
+    msg = str(info.value)
+    assert f"{section}.{key}" in msg
+    assert "sin rellenar" in msg
+
+
+def test_config_example_sin_rellenar_falla_nombrando_las_claves(tmp_path) -> None:
+    from config import ConfigError, load_config
+    path = tmp_path / "config.yaml"
+    with open(os.path.join(_REPO_ROOT, "config.example.yaml")) as f:
+        path.write_text(f.read())
+    with pytest.raises(ConfigError) as info:
+        load_config(path)
+    msg = str(info.value)
+    assert "gateway.client_key" in msg and "gateway.url" in msg
+
+
+def test_config_example_rellena_carga_sin_avisos(tmp_path, caplog) -> None:
+    """El ejemplo, con sus placeholders rellenos, es una config válida y sin
+    claves desconocidas (hosts: incluida)."""
+    from config import load_config
+    with open(os.path.join(_REPO_ROOT, "config.example.yaml")) as f:
+        text = f.read()
+    text = text.replace("CHANGE-ME", "gw").replace("RELLENAR", "clave-real")
+    path = tmp_path / "config.yaml"
+    path.write_text(text)
+    with caplog.at_level("WARNING", logger="config"):
+        cfg = load_config(path)
+    assert cfg.gateway.client_key == "clave-real"
+    assert not caplog.records, caplog.text
+
+
 def test_la_config_del_wizard_de_macos_carga_sin_avisos(tmp_path, caplog) -> None:
     from config import load_config
     path = tmp_path / "config.yaml"
