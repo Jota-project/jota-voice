@@ -55,6 +55,8 @@ def _make_config(
             sample_rate=16000,
             frames_per_buffer=512,
             silence_timeout_s=0.1,   # ~3 frames de silencio con silence_count
+            # Cota superior de seguridad: con _make_audio_mock el turno acaba
+            # por silencio en ~3 frames y nunca llega a este plazo (#112).
             recording_timeout_s=5.0,
         ),
         oww=OWWConfig(),
