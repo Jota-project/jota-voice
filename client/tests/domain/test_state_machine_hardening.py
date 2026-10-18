@@ -388,6 +388,35 @@ async def test_respuesta_larga_pero_activa_no_se_corta() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reproducir_un_chunk_largo_no_cuenta_como_silencio_del_gateway() -> None:
+    """El plazo se reinicia DESPUÉS de reproducir cada chunk: si se reiniciara
+    al recibirlo, un play_chunk de 40 s (reloj falso) con plazo de 30 s
+    dejaría el plazo vencido antes de pedir el siguiente evento."""
+    clock = _FakeClock()
+    events = [
+        GatewayEvent(type="transcription", data={"text": "hola"}),
+        GatewayEvent(type="turn_start", data={"turn_id": "t-1", "turn_seq": 1}),
+        GatewayEvent(type="tts_chunk", data={"audio": b"\x01\x00", "turn_seq": 1}),
+        GatewayEvent(type="tts_chunk", data={"audio": b"\x02\x00", "turn_seq": 1}),
+        GatewayEvent(type="turn_end", data={"turn_id": "t-1"}),
+    ]
+    gateway = _streaming_gateway(events, clock, step_s=0)
+    playback = MagicMock(spec=PlaybackEngine)
+
+    async def _slow_play(_audio: bytes) -> None:
+        clock.now += 40
+
+    playback.play_chunk.side_effect = _slow_play
+    await asyncio.wait_for(state_machine._responding(
+        EventBus(), gateway, playback, asyncio.Event(),
+        gateway_cfg=_gcfg(response_start_timeout_s=30, turn_inactivity_timeout_s=30),
+        clock=clock,
+    ), 2.0)
+    assert playback.play_chunk.await_count == 2
+    gateway.send_cancel.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_hueco_largo_en_mitad_del_turno_vence_y_manda_cancel() -> None:
     """Tras empezar nuestro turno el gateway calla: vence
     turn_inactivity_timeout_s (aquí 0.01 s reales; el gateway falso no vuelve
