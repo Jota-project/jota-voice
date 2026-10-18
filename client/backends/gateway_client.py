@@ -48,6 +48,14 @@ class GatewayEvent:
 # perdida (keepalive ping sin pong).
 CLOSE_ABNORMAL = 1006
 
+# Tope de tamaño de un mensaje entrante (issue #113). El default de
+# websockets (1 MiB) cortaba frames TTS legítimos con 1009, y max_size=None
+# (sin límite) dejaba que un gateway comprometido o con un bug agotara la RAM
+# con un único frame. 16 MiB son ~5,8 min de PCM16 24 kHz mono en un solo
+# frame: muy por encima de cualquier chunk TTS real. Si se supera, la
+# librería cierra con 1009 y se trata como un corte recuperable.
+MAX_MESSAGE_BYTES = 16 * 1024 * 1024
+
 
 def close_code_label(code: int | None) -> str:
     """Etiqueta legible del código de cierre, para logs y para la UI."""
@@ -56,6 +64,7 @@ def close_code_label(code: int | None) -> str:
         1001: "el gateway se está apagando",
         1006: "conexión perdida sin close frame (red o keepalive)",
         1008: "rechazo de política (auth o agente)",
+        1009: "mensaje demasiado grande (supera MAX_MESSAGE_BYTES)",
         1011: "error interno del gateway",
         1012: "el gateway se está reiniciando",
         1013: "cliente demasiado lento",
@@ -289,10 +298,9 @@ class GatewayClient:
         ping_timeout = self._cfg.ping_timeout_s or None
         return dict(
             additional_headers=_cloudflare_access_headers() or None,
-            # max_size=None desactiva el límite de 1 MiB del default de
-            # websockets: un tts_chunk grande dispararía 1009 (payload too
-            # big). El framing binario TTS no acota tamaño por chunk.
-            max_size=None,
+            # Tope explícito (ver MAX_MESSAGE_BYTES): el default de 1 MiB
+            # cortaba tts_chunk grandes con 1009 y None no acotaba nada.
+            max_size=MAX_MESSAGE_BYTES,
             # Issue #118: max_queue=None hace que la librería vacíe el socket
             # siempre, aunque la app lea al ritmo de reproducción (el
             # _receive_loop espera a play_chunk) o no lea (RECORDING). Con el

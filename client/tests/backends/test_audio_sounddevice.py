@@ -710,3 +710,32 @@ def test_play_chunk_no_deja_audio_en_cola_si_el_stream_no_arranca(fake_sounddevi
         asyncio.run(be.play_chunk(b"\x01\x00\x02\x00"))
 
     assert be._play_q.empty()
+
+
+# --- issue #113: colas de captura acotadas --------------------------------
+
+
+def test_colas_de_captura_acotadas_sin_consumidor(fake_sounddevice) -> None:
+    """Mientras IDLE espera la wake word nadie consume get_queue(), y con OWW
+    reconectando nadie consume get_oww_queue(): sin maxsize crecían sin
+    límite (~60 KB/s). Ahora guardan los últimos ~10 s y descartan lo viejo."""
+    fake_sounddevice.InputStream.return_value = _stream_mock()
+    be = SounddeviceBackend(_cfg())
+
+    async def _run() -> tuple[int, int, bytes]:
+        await be.start()
+        maxsize = be.get_queue().maxsize
+        assert maxsize > 0 and be.get_oww_queue().maxsize == maxsize
+        for i in range(maxsize + 5):
+            be._on_frame(i.to_bytes(4, "little"))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        q = be.get_queue()
+        last = b""
+        while not q.empty():
+            last = q.get_nowait()
+        return be.get_oww_queue().qsize(), maxsize, last
+
+    oww_size, maxsize, last = asyncio.run(_run())
+    assert oww_size == maxsize
+    assert last == (maxsize + 4).to_bytes(4, "little"), "se perdió el frame más reciente"

@@ -24,6 +24,7 @@ from config import AudioConfig
 from core.audio.framing import int16_to_float32
 from core.audio.offloop import call_off_loop
 from core.audio.preroll import PrerollBuffer
+from core.audio.queues import capture_queue_maxsize, put_latest
 from core.audio.vad import is_silence as _is_silence
 
 logger = logging.getLogger(__name__)
@@ -69,8 +70,7 @@ class AudioCapture:
         self._gen += 1
         gen = self._gen
         self._loop = asyncio.get_running_loop()
-        self._queue = asyncio.Queue()
-        self._oww_queue = asyncio.Queue()
+        self._queue, self._oww_queue = self._new_queues()
         self._stop_event.clear()
 
         pulse_path = os.environ.get("PULSE_RUNTIME_PATH", os.path.expanduser("~/.pulse"))
@@ -139,6 +139,11 @@ class AudioCapture:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 10.0)
         return False
+
+    def _new_queues(self) -> tuple[asyncio.Queue[bytes], asyncio.Queue[bytes]]:
+        """Colas del fan-out acotadas (issue #113): ver core/audio/queues.py."""
+        maxsize = capture_queue_maxsize(self._cfg.sample_rate, self._cfg.frames_per_buffer)
+        return asyncio.Queue(maxsize=maxsize), asyncio.Queue(maxsize=maxsize)
 
     async def stop(self) -> None:
         """Detiene el proceso parec y el hilo lector.
@@ -268,5 +273,5 @@ class AudioCapture:
         loop, queue, oww_queue = self._loop, self._queue, self._oww_queue
         if loop is None or loop.is_closed() or queue is None or oww_queue is None:
             return
-        loop.call_soon_threadsafe(queue.put_nowait, float32_bytes)
-        loop.call_soon_threadsafe(oww_queue.put_nowait, float32_bytes)
+        loop.call_soon_threadsafe(put_latest, queue, float32_bytes)
+        loop.call_soon_threadsafe(put_latest, oww_queue, float32_bytes)

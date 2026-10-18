@@ -778,7 +778,9 @@ async def test_connect_pasa_keepalive_y_cola_explicitos(ws_connect):
     assert kw["ping_interval"] == 15.0
     assert kw["ping_timeout"] == 25.0
     assert kw["max_queue"] is None
-    assert kw["max_size"] is None
+    # Issue #113: tope explícito en vez de None (sin límite), holgado para
+    # los frames TTS grandes que el default de 1 MiB cortaba con 1009.
+    assert kw["max_size"] == 16 * 1024 * 1024
 
 
 @pytest.mark.asyncio
@@ -1066,3 +1068,12 @@ def test_handshake_error_conserva_el_code_del_gateway(ws_connect) -> None:
     assert info.value.code is None
     assert info.value.reason == "AUTH_FAILED: bad key"
     assert info.value.fatal is True
+
+
+def test_cierre_1009_es_recuperable_y_tiene_etiqueta():
+    """Issue #113: un frame que supere max_size cierra con 1009; se trata
+    como cualquier corte recuperable y el log dice qué pasó."""
+    from backends.gateway_client import close_code_label, close_is_fatal
+
+    assert close_is_fatal(1009) is False
+    assert "demasiado grande" in close_code_label(1009)

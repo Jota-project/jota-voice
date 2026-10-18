@@ -539,3 +539,23 @@ def test_reset_vacia_el_preroll() -> None:
     cap.reset()
 
     assert cap.get_preroll() == b""
+
+
+def test_colas_de_captura_acotadas_sin_consumidor() -> None:
+    """Issue #113: igual que en sounddevice, las colas guardan los últimos
+    ~10 s y descartan lo viejo si nadie las consume."""
+    cap = AudioCapture(_cfg())
+
+    async def _run() -> tuple[int, int]:
+        cap._loop = asyncio.get_running_loop()
+        cap._queue, cap._oww_queue = cap._new_queues()
+        maxsize = cap._queue.maxsize
+        for i in range(maxsize + 5):
+            cap._on_frame(i.to_bytes(4, "little"))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        return cap.get_queue().qsize(), maxsize
+
+    size, maxsize = asyncio.run(_run())
+    assert maxsize > 0
+    assert size == maxsize

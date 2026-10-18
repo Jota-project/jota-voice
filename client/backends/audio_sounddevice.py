@@ -16,6 +16,7 @@ import numpy as np
 from config import AudioConfig
 from core.audio.offloop import call_off_loop
 from core.audio.preroll import PrerollBuffer
+from core.audio.queues import capture_queue_maxsize, put_latest
 from core.audio.vad import is_silence as _is_silence
 from .notification_tone import synth_notification_tone
 
@@ -153,8 +154,10 @@ class SounddeviceBackend:
             ) from exc
 
         self._loop = asyncio.get_running_loop()
-        self._capture_q = asyncio.Queue()
-        self._oww_q = asyncio.Queue()
+        # Acotadas (issue #113): ver core/audio/queues.py.
+        maxsize = capture_queue_maxsize(self._cfg.sample_rate, self._cfg.frames_per_buffer)
+        self._capture_q = asyncio.Queue(maxsize=maxsize)
+        self._oww_q = asyncio.Queue(maxsize=maxsize)
         self._capture_stop.clear()
 
         def _callback(indata, frames, time, status):  # noqa: ARG001
@@ -255,8 +258,8 @@ class SounddeviceBackend:
         loop, capture_q, oww_q = self._loop, self._capture_q, self._oww_q
         if loop is None or loop.is_closed() or capture_q is None or oww_q is None:
             return
-        loop.call_soon_threadsafe(capture_q.put_nowait, chunk)
-        loop.call_soon_threadsafe(oww_q.put_nowait, chunk)
+        loop.call_soon_threadsafe(put_latest, capture_q, chunk)
+        loop.call_soon_threadsafe(put_latest, oww_q, chunk)
 
     def get_queue(self) -> asyncio.Queue[bytes]:
         if self._capture_q is None:
