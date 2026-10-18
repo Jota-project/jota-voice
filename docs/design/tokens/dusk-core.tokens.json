@@ -1,0 +1,98 @@
+{
+  "global": {
+    "color": {
+      "ink": {
+        "900": { "$value": "#1E1B26", "$type": "color", "$description": "Base del material HUD. Deriva de Ink pero más profundo, para que el vidrio no gris." },
+        "700": { "$value": "#2A2433", "$type": "color", "$description": "Ink de marca. Texto sobre fondos claros." },
+        "500": { "$value": "#6A6377", "$type": "color", "$description": "Ink suave. Texto secundario." }
+      },
+      "malva": {
+        "600": { "$value": "#6A5A96", "$type": "color" },
+        "500": { "$value": "#7C6AAE", "$type": "color", "$description": "Malva de marca. Color primario de Jota." },
+        "400": { "$value": "#9A87CE", "$type": "color", "$description": "Malva elevado. Sobre fondo oscuro el 500 se apaga; este mantiene la identidad." },
+        "200": { "$value": "#E9E3F2", "$type": "color" }
+      },
+      "sky": {
+        "500": { "$value": "#6E8CC4", "$type": "color", "$description": "Sky de marca. Cierra el gradiente del orbe." },
+        "200": { "$value": "#E1E8F3", "$type": "color" }
+      },
+      "linen": {
+        "100": { "$value": "#F6F3F0", "$type": "color", "$description": "Linen de marca. Fondo base en web." },
+        "200": { "$value": "#EFE9E4", "$type": "color" },
+        "300": { "$value": "#DED6CF", "$type": "color", "$description": "Línea o borde sobre superficies claras." }
+      },
+      "white": { "$value": "#FFFFFF", "$type": "color" },
+      "black": { "$value": "#000000", "$type": "color" },
+      "neutral": {
+        "50":  { "$value": "#F6F6F6", "$type": "color", "$description": "Fondo de ventana nativa (Preferencias). Gris neutro, NO el Linen cálido de marca — una ventana de sistema no debe leerse como material de marca." },
+        "100": { "$value": "#FFFFFF", "$type": "color", "$description": "Fondo de campo de formulario." },
+        "200": { "$value": "#E9E9EA", "$type": "color", "$description": "Fondo de app / pestaña inactiva." },
+        "300": { "$value": "#DCDCDE", "$type": "color", "$description": "Relleno de control activo (pestaña activa, fondo de switch/track)." },
+        "400": { "$value": "#C9C9CB", "$type": "color", "$description": "Borde estándar entre secciones." },
+        "500": { "$value": "#B6B6B8", "$type": "color", "$description": "Borde de campo de formulario." },
+        "600": { "$value": "#9A9A9C", "$type": "color", "$description": "Texto terciario sobre fondo claro." },
+        "700": { "$value": "#5A5A5C", "$type": "color", "$description": "Texto secundario sobre fondo claro." },
+        "900": { "$value": "#1A1A1A", "$type": "color", "$description": "Texto primario sobre fondo claro." }
+      },
+      "danger": {
+        "100": { "$value": "#FBEAEA", "$type": "color", "$description": "Fondo de campo en estado de error, superficies claras." },
+        "300": { "$value": "#FF6659", "$type": "color", "$description": "Texto/borde de error sobre superficies oscuras (Preferencias dark). 5.9:1 sobre ink.900." },
+        "500": { "$value": "#B3261E", "$type": "color", "$description": "Texto/borde de error sobre superficies claras. 6.5:1 sobre blanco, 5.6:1 sobre danger.100 — AA de sobra. NO usar sobre fondo oscuro: cae a 2.6:1." },
+        "900": { "$value": "#33201F", "$type": "color", "$description": "Fondo de campo en estado de error, superficies oscuras." }
+      }
+    },
+
+    "scale": {
+      "base":  { "$value": 4, "$type": "number", "$description": "Unidad base. Todo el espaciado deriva de aquí." },
+      "ratio": { "$value": 1.25, "$type": "number", "$description": "Multiplicador de la escala tipográfica." }
+    },
+
+    "space": {
+      "xs":  { "$value": "{global.scale.base}",     "$type": "spacing" },
+      "sm":  { "$value": "{global.scale.base} * 2", "$type": "spacing" },
+      "md":  { "$value": "{global.scale.base} * 3", "$type": "spacing" },
+      "lg":  { "$value": "{global.scale.base} * 4", "$type": "spacing" },
+      "xl":  { "$value": "{global.scale.base} * 5", "$type": "spacing" },
+      "xxl": { "$value": "{global.scale.base} * 6", "$type": "spacing" }
+    },
+
+    "radius": {
+      "sm":   { "$value": 6,   "$type": "borderRadius" },
+      "md":   { "$value": 13,  "$type": "borderRadius", "$description": "Widgets internos. Concéntrico aproximado respecto a lg." },
+      "lg":   { "$value": 22,  "$type": "borderRadius", "$description": "Superficie HUD. Radio generoso estilo macOS." },
+      "full": { "$value": 999, "$type": "borderRadius" }
+    },
+
+    "stroke": {
+      "hairline": { "$value": 0.5, "$type": "strokeWidth" },
+      "thin":     { "$value": 1,   "$type": "strokeWidth" }
+    },
+
+    "font": {
+      "family": {
+        "sans":    { "$value": "SF Pro Text, Inter, system-ui, sans-serif", "$type": "fontFamily", "$description": "UI de sistema. SF Pro es lo que hace que una app se sienta nativa en macOS." },
+        "display": { "$value": "Fraunces, Georgia, serif", "$type": "fontFamily", "$description": "Display de marca. SOLO web y materiales de marca, nunca dentro del HUD." },
+        "mono":    { "$value": "SF Mono, ui-monospace, Roboto Mono, monospace", "$type": "fontFamily", "$description": "Nombres de herramienta, argumentos, atajos." }
+      },
+      "weight": {
+        "regular":  { "$value": "400", "$type": "fontWeight" },
+        "medium":   { "$value": "500", "$type": "fontWeight" },
+        "semibold": { "$value": "600", "$type": "fontWeight" }
+      },
+      "size": {
+        "xxs": { "$value": 9.5,  "$type": "fontSize", "$description": "Versalitas de cabecera de tabla." },
+        "xs":  { "$value": 10.5, "$type": "fontSize" },
+        "sm":  { "$value": 11,   "$type": "fontSize" },
+        "md":  { "$value": 12.5, "$type": "fontSize" },
+        "lg":  { "$value": 13,   "$type": "fontSize" },
+        "xl":  { "$value": 14.5, "$type": "fontSize", "$description": "Turno de J. Domina la conversación." },
+        "xxl": { "$value": 16,   "$type": "fontSize" }
+      },
+      "tracking": {
+        "tight":  { "$value": -0.2, "$type": "letterSpacing" },
+        "normal": { "$value": 0,    "$type": "letterSpacing" },
+        "wide":   { "$value": 0.8,  "$type": "letterSpacing", "$description": "Versalitas y kickers." }
+      }
+    }
+  }
+}

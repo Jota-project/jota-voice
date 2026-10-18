@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Callable
 
 from config import Config
 from core.platform_key import UnsupportedPlatformError, detect_platform
@@ -44,11 +45,41 @@ def make_audio(cfg: Config):
     raise ConfigError(f"audio backend desconocido: {name!r}")
 
 
-def make_display(cfg: Config):
+def _default_display_backend(cfg: Config) -> str:
+    """Backend de display cuando `display.backend` no está fijado.
+
+    1. Una `display.url` explícita elige "http": es lo que llevan las configs
+       ya desplegadas (copiadas del config.example.yaml antiguo, con
+       `backend: null` + `url:`), y así el kiosk del teléfono no cambia.
+    2. Termux -> "http": el kiosk de jota-display solo entiende POST /state.
+    3. macOS / Linux -> "ws": servidor WebSocket local (docs/display-protocol.md),
+       al que se conectan el HUD de macOS y futuros displays. Sin displays
+       conectados no cuesta nada más que un socket escuchando en 127.0.0.1.
+    4. Plataforma no reconocida -> "null".
+    """
+    if cfg.display.url:
+        return "http"
+    try:
+        family = detect_platform().family
+    except UnsupportedPlatformError:
+        return "null"
+    if family == "termux":
+        return "http"
+    if family in ("darwin", "linux"):
+        return "ws"
+    return "null"
+
+
+def make_display(cfg: Config, *, on_cancel: Callable[[], None] | None = None):
+    """`on_cancel` se invoca cuando un display pide cancelar el turno activo
+    (comando `cancel` del protocolo; solo el backend ws lo recibe)."""
     from .display_http import HttpDisplayBackend
     from .display_null import NullDisplayBackend
+    from .display_ws import WsDisplayBackend
 
-    name = cfg.display.backend or ("http" if cfg.display.url else "null")
+    name = cfg.display.backend or _default_display_backend(cfg)
+    if name == "ws":
+        return WsDisplayBackend(cfg.display, on_cancel=on_cancel)
     if name == "http":
         return HttpDisplayBackend(cfg.display)
     if name == "null":

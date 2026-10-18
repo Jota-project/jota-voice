@@ -67,24 +67,62 @@ def test_make_audio_default_termux(monkeypatch: pytest.MonkeyPatch) -> None:
     assert inst.__class__.__name__ == "TermuxBackend"
 
 
-def test_make_display_null_when_no_url_and_no_backend() -> None:
-    cfg = Config(
+def _display_cfg(**kw) -> Config:
+    return Config(
         gateway=GatewayConfig(host="127.0.0.1", client_key="x"),
         device=DeviceConfig(id="test"),
-        display=DisplayConfig(url="", backend=None),
+        display=DisplayConfig(**kw),
     )
-    inst = registry.make_display(cfg)
-    assert inst.__class__.__name__ == "NullDisplayBackend"
 
 
-def test_make_display_http_when_url_set() -> None:
-    cfg = Config(
-        gateway=GatewayConfig(host="127.0.0.1", client_key="x"),
-        device=DeviceConfig(id="test"),
-        display=DisplayConfig(url="http://127.0.0.1:8766", backend=None),
-    )
-    inst = registry.make_display(cfg)
+@pytest.mark.parametrize("plat", ["darwin", "linux"])
+def test_make_display_ws_por_defecto_en_macos_y_linux(monkeypatch: pytest.MonkeyPatch, plat: str) -> None:
+    monkeypatch.delenv("PREFIX", raising=False)
+    monkeypatch.setattr(platform_key_sys, "platform", plat)
+    inst = registry.make_display(_display_cfg())
+    assert inst.__class__.__name__ == "WsDisplayBackend"
+
+
+def test_make_display_http_por_defecto_en_termux(monkeypatch: pytest.MonkeyPatch) -> None:
+    """El kiosk de jota-display vive en Termux y solo habla POST /state."""
+    from config import DEFAULT_DISPLAY_HTTP_URL
+    monkeypatch.setenv("PREFIX", "/data/data/com.termux/files/usr")
+    monkeypatch.setattr(platform_key_sys, "platform", "linux")
+    inst = registry.make_display(_display_cfg())
     assert inst.__class__.__name__ == "HttpDisplayBackend"
+    assert inst._url == DEFAULT_DISPLAY_HTTP_URL + "/state"
+
+
+def test_make_display_http_when_url_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Compat: configs desplegadas (copiadas del config.example.yaml antiguo)
+    tienen `backend: null` + `url:`. Una url explícita sigue eligiendo http
+    en cualquier plataforma: el kiosk del teléfono no cambia."""
+    monkeypatch.delenv("PREFIX", raising=False)
+    monkeypatch.setattr(platform_key_sys, "platform", "darwin")
+    inst = registry.make_display(_display_cfg(url="http://127.0.0.1:8766", backend=None))
+    assert inst.__class__.__name__ == "HttpDisplayBackend"
+
+
+def test_make_display_http_explicito_sin_url_usa_default_unico() -> None:
+    """Issue #58: `backend: http` sin url ya no construye la URL relativa
+    "/state"; usa la misma constante que el resto del código."""
+    from config import DEFAULT_DISPLAY_HTTP_URL
+    inst = registry.make_display(_display_cfg(backend="http"))
+    assert inst._url == DEFAULT_DISPLAY_HTTP_URL + "/state"
+
+
+def test_make_display_http_url_invalida_falla_al_arrancar() -> None:
+    """Issue #58: una url sin esquema/host falla al construir (ConfigError),
+    no en cada update() silenciada a DEBUG."""
+    with pytest.raises(ConfigError, match="display.url"):
+        registry.make_display(_display_cfg(backend="http", url="127.0.0.1:8766"))
+
+
+def test_make_display_ws_recibe_on_cancel() -> None:
+    called: list[bool] = []
+    inst = registry.make_display(_display_cfg(backend="ws"), on_cancel=lambda: called.append(True))
+    inst._on_cancel()
+    assert called == [True]
 
 
 def test_make_display_null_override() -> None:

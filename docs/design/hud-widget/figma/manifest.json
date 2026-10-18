@@ -1,0 +1,11 @@
+{
+  "name": "J Voice — HUD Builder",
+  "id": "jota-jvoice-hud-builder",
+  "api": "1.0.0",
+  "main": "code.js",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": ["none"]
+  }
+}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -115,11 +116,34 @@ class AudioConfig:
     start_retry_backoff_s: list[float] = field(default_factory=lambda: [0.5, 1.0, 2.0])
 
 
+# Kiosk de jota-display (server/server.py, POST /state). Única fuente del
+# default de la URL http (issue #58: antes la dataclass y el loader tenían
+# defaults distintos).
+DEFAULT_DISPLAY_HTTP_URL = "http://127.0.0.1:8766"
+# Servidor WebSocket local de displays (docs/display-protocol.md). No es el
+# 8766 (lo ocupa el kiosk de jota-display en el mismo teléfono) ni el 8765
+# (el antiguo ControlServer: configs y procesos viejos durante la migración).
+DEFAULT_DISPLAY_WS_PORT = 8767
+
+
 @dataclass
 class DisplayConfig:
-    url: str = "http://127.0.0.1:8766"
-    timeout_s: float = 2.0
+    # None -> por plataforma (ver registry.make_display): "http" si hay url
+    # explícita (compat con configs desplegadas), "http" en Termux (kiosk),
+    # "ws" en macOS/Linux. "null" desactiva el display.
     backend: str | None = None
+    # --- backend "http" (compatibilidad con el kiosk de jota-display) ---
+    # "" = sin url explícita; el backend http usa DEFAULT_DISPLAY_HTTP_URL.
+    url: str = ""
+    timeout_s: float = 2.0
+    # --- backend "ws" (docs/display-protocol.md) ---
+    port: int = DEFAULT_DISPLAY_WS_PORT
+    token_path: str | None = None  # None = ~/.jota-voice/display_token
+    # Cuota de handshakes con token INVÁLIDO por ventana (issue #106: un
+    # cliente con token válido nunca consume ni recibe 429 de este cubo).
+    rate_limit_max_requests: int = 10
+    rate_limit_window_s: float = 10.0
+    max_clients: int = 8
 
 
 @dataclass
@@ -137,14 +161,6 @@ class MenubarConfig:
 
 
 @dataclass
-class ControlConfig:
-    port: int = 8765
-    token_path: str | None = None
-    rate_limit_max_requests: int = 10
-    rate_limit_window_s: float = 10.0
-
-
-@dataclass
 class LoggingConfig:
     level: str = "INFO"
 
@@ -156,7 +172,6 @@ class Config:
     oww: OWWConfig = field(default_factory=OWWConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
     display: DisplayConfig = field(default_factory=DisplayConfig)
-    control: ControlConfig = field(default_factory=ControlConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     menubar: MenubarConfig = field(default_factory=MenubarConfig)
 
@@ -233,19 +248,18 @@ def _audio_from_dict(d: dict) -> AudioConfig:
 
 
 def _display_from_dict(d: dict) -> DisplayConfig:
+    default = DisplayConfig()
     return DisplayConfig(
         backend=d.get("backend"),
-        url=d.get("url", ""),
-        timeout_s=float(d.get("timeout_s", 2.0)),
-    )
-
-
-def _control_from_dict(d: dict) -> ControlConfig:
-    return ControlConfig(
-        port=int(d.get("port", 8765)),
+        url=d.get("url") or default.url,
+        timeout_s=float(d.get("timeout_s", default.timeout_s)),
+        port=int(d.get("port", default.port)),
         token_path=d.get("token_path"),
-        rate_limit_max_requests=int(d.get("rate_limit_max_requests", 10)),
-        rate_limit_window_s=float(d.get("rate_limit_window_s", 10.0)),
+        rate_limit_max_requests=int(
+            d.get("rate_limit_max_requests", default.rate_limit_max_requests)
+        ),
+        rate_limit_window_s=float(d.get("rate_limit_window_s", default.rate_limit_window_s)),
+        max_clients=int(d.get("max_clients", default.max_clients)),
     )
 
 
@@ -268,6 +282,15 @@ def load_config(path: str | Path) -> Config:
     if "device" not in data:
         raise ValueError("config.yaml: sección 'device' obligatoria")
 
+    if "control" in data:
+        # ControlServer eliminado (Fase D): su `cancel` va ahora por el
+        # WebSocket del display (display.port). Se ignora sin fallar.
+        logging.getLogger(__name__).warning(
+            "config.yaml: la sección 'control' está obsoleta y se ignora "
+            "(el cancel externo va por el WebSocket del display, ver "
+            "docs/display-protocol.md)"
+        )
+
     menubar_section = data.get("menubar", {})
     if os.environ.get("JOTA_DISABLE_MENUBAR") in ("1", "true", "yes"):
         menubar_section = {**menubar_section, "enabled": False}
@@ -278,7 +301,6 @@ def load_config(path: str | Path) -> Config:
         oww=_oww_from_dict(data.get("oww", {})),
         audio=_audio_from_dict(data.get("audio", {})),
         display=_display_from_dict(data.get("display", {})),
-        control=_control_from_dict(data.get("control", {})),
         logging=LoggingConfig(level=data.get("logging", {}).get("level", "INFO")),
         menubar=_menubar_from_dict(menubar_section),
     )
@@ -293,4 +315,7 @@ if __name__ == "__main__":
     print(f"  gateway: {cfg.gateway.ws_url}")
     print(f"  oww:     {cfg.oww.host}:{cfg.oww.port} (backend={cfg.oww.backend})")
     print(f"  audio:   backend={cfg.audio.backend}")
-    print(f"  display: backend={cfg.display.backend} url={cfg.display.url!r}")
+    print(
+        f"  display: backend={cfg.display.backend} url={cfg.display.url!r} "
+        f"ws_port={cfg.display.port}"
+    )

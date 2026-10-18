@@ -64,9 +64,19 @@ audio:
   output_device: null         # solo sounddevice
 
 display:
-  backend: null               # null = "http" si url, si no "null"
-  url: "http://127.0.0.1:8766"
-  timeout_s: 2.0
+  # Kiosk de jota-display (Termux): se queda en "http" hasta que jota-display
+  # migre al protocolo WebSocket (docs/display-protocol.md).
+  # En macOS/Linux usa backend: "ws" (o quita url y deja backend: null para
+  # elegir por plataforma: ws en macOS/Linux, http en Termux).
+  backend: "http"              # "ws" | "http" | "null" | null (por plataforma)
+  url: "http://127.0.0.1:8766" # solo http: POST /state del kiosk
+  timeout_s: 2.0               # solo http
+  # --- solo backend ws ---
+  # port: 8767                  # 8766 es del kiosk; 8765 era el ControlServer (eliminado)
+  # token_path: null            # null = ~/.jota-voice/display_token (nuevo en cada arranque, chmod 600)
+  # rate_limit_max_requests: 10 # handshakes con token inválido por ventana antes de 429
+  # rate_limit_window_s: 10.0
+  # max_clients: 8              # displays conectados a la vez
 
 hosts:
   - ip: "192.168.X.X"
@@ -76,12 +86,6 @@ hosts:
 
 logging:
   level: "INFO"
-
-control:
-  port: 8765
-  # token_path: null            # null = ~/.jota-voice/control_token (se autogenera, chmod 600)
-  # rate_limit_max_requests: 10  # peticiones máx. por ventana antes de responder 429
-  # rate_limit_window_s: 10.0
 
 # menubar:
 #   enabled: true                # false desactiva el UI nativo (macOS)

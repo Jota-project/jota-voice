@@ -99,6 +99,7 @@ class MenubarClient:
         pause_event: asyncio.Event,
         loop: asyncio.AbstractEventLoop,
         stop_event: asyncio.Event,
+        events=None,
     ) -> None:
         """Loop suscrito al bus. Termina al cerrarse el bus o al cancelarlo.
 
@@ -130,7 +131,10 @@ class MenubarClient:
         forwarder.start()
 
         try:
-            async for event in bus.subscribe():
+            # events: suscripción creada antes de arrancar la task (ver
+            # voice_client: antes del connect inicial, para no perder los
+            # status previos a ready). None -> se suscribe aquí.
+            async for event in (events if events is not None else bus.subscribe()):
                 await self._handle(event)
         finally:
             self._cancel_pending_idle()

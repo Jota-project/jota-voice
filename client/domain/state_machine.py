@@ -491,6 +491,12 @@ async def _responding(
                     # menor, el descarte ya está hecho en receive(). Aquí
                     # limpiamos el buffer de playback por si acaso.
                     playback.reset()
+                    # Protocolo display (docs/display-protocol.md): el display
+                    # correlaciona por turn_id lo que sigue. Solo el turno
+                    # propio: los push ajenos no se muestran ni se reproducen.
+                    bus.publish(VoiceEvent(type="turn_start", data={
+                        "turn_id": tid, "turn_seq": tseq,
+                    }))
                 else:
                     # Push del agente (antes de nuestro send) u otro turno:
                     # sus tokens/audio/turn_end no son nuestros.
@@ -529,6 +535,20 @@ async def _responding(
                 # invisible para la UI (TTS degradado, fallback engine…).
                 bus.publish(VoiceEvent(type="gateway_status", data=gw_event.data))
                 log.info("RESPONDING: status de gateway → %r", gw_event.data)
+
+            elif gw_event.type == "tool_call":
+                # jota-gateway client-protocol §5 (opt-in tool_calls_enabled):
+                # phase start/result, name, tool_call_id, args, result,
+                # is_error. Se pasa al display para mostrar la ejecución.
+                if _is_foreign(turn_id=gw_event.data.get("turn_id")):
+                    log.debug("RESPONDING: tool_call de otro turno ignorado")
+                    continue
+                data = {k: v for k, v in gw_event.data.items() if k != "type"}
+                bus.publish(VoiceEvent(type="tool_call", data=data))
+                log.info(
+                    "RESPONDING: tool_call %s %s",
+                    data.get("phase"), data.get("name"),
+                )
 
             elif gw_event.type == "error":
                 # Issue #18 — propagar AHORA el error del gateway con su
@@ -646,7 +666,7 @@ def _log_error(state: str, exc: Exception, bus: EventBus) -> None:
 
 def _log_cancelled(state: str, bus: EventBus) -> None:
     """Sin esto, un turn cancelado (nueva wake word interrumpiendo TTS, o
-    /cancel externo vía ControlServer) es invisible para cualquier UI: no
+    `cancel` de un display vía WsDisplayBackend) es invisible para cualquier UI: no
     hay error, no hay un nuevo "listening" garantizado, solo silencio hasta
     que _idle() vuelve a publicar "idle" en la siguiente iteración."""
     log.info("StateMachine: turn cancelado en %s", state)

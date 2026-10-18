@@ -12,21 +12,11 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 from domain.event_bus import EventBus, VoiceEvent
 from app.playback_engine import PlaybackEngine
 
-from tests.fakes.waiting import wait_until
-
-_real_sleep = asyncio.sleep
-
-
-async def _instant_sleep(delay: float, result=None):
-    """asyncio.sleep sin espera real: cede el loop una vez. Los ticks de
-    animación de PlaybackEngine pasan a ser instantáneos y deterministas
-    (issue #76)."""
-    return await _real_sleep(0, result)
 
 
 # ---------------------------------------------------------------------------
@@ -83,155 +73,106 @@ class TestPushToken(unittest.TestCase):
     def test_reset_limpia_buffer_y_cursor(self) -> None:
         engine, _, _ = _make_engine()
         engine.push_token("texto")
-        engine._text_cursor = 3.0
+        engine._text_cursor = 3
         engine.reset()
         self.assertEqual(engine._text_buffer, [])
-        self.assertEqual(engine._text_cursor, 0.0)
+        self.assertEqual(engine._text_cursor, 0)
 
 
 class TestPlayChunk(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self) -> None:
-        # Los tests miran qué se publica tick a tick, no cuánto tarda: sin
-        # esperas reales la clase pasa de ~3s a milisegundos y deja de
-        # depender de la carga de la máquina.
-        patcher = patch.object(asyncio, "sleep", _instant_sleep)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+    """Un evento display_text_update por chunk de audio (antes: un tick cada
+    50 ms, hasta ~20 publicaciones/s empujadas a cada display). El display
+    anima el reveal con chunk_text + duration_s (docs/display-protocol.md)."""
 
-    async def test_play_chunk_emite_eventos_display(self) -> None:
-        """play_chunk debe emitir al menos 1 evento display_text_update."""
-        engine, bus, captured = _make_engine()
+    def _display(self, captured: list[VoiceEvent]) -> list[VoiceEvent]:
+        return [e for e in captured if e.type == "display_text_update"]
+
+    async def test_un_evento_por_chunk_con_su_duracion(self) -> None:
+        engine, _, captured = _make_engine()
         engine.push_token("Hola mundo, esto es una prueba de texto largo.")
+        await engine.play_chunk(_make_audio(0.5))
+        events = self._display(captured)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].data["chunk_text"],
+                         "Hola mundo, esto es una prueba de texto largo.")
+        self.assertEqual(events[0].data["cumulative_text"],
+                         "Hola mundo, esto es una prueba de texto largo.")
+        self.assertAlmostEqual(events[0].data["duration_s"], 0.5, places=3)
 
-        audio = _make_audio(0.5)  # 0.5 segundos → 10 ticks de 50ms
-        await engine.play_chunk(audio)
+    async def test_texto_crece_entre_chunks(self) -> None:
+        engine, _, captured = _make_engine()
+        engine.push_token("Hola")
+        await engine.play_chunk(_make_audio(0.2))
+        engine.push_token(" mundo")
+        await engine.play_chunk(_make_audio(0.2))
+        events = self._display(captured)
+        self.assertEqual([e.data["chunk_text"] for e in events], ["Hola", " mundo"])
+        self.assertEqual([e.data["cumulative_text"] for e in events], ["Hola", "Hola mundo"])
 
-        display_events = [e for e in captured if e.type == "display_text_update"]
-        self.assertGreater(len(display_events), 0, "Debe emitirse al menos 1 display_text_update")
-
-    async def test_play_chunk_texto_crece_progresivamente(self) -> None:
-        """El texto visible debe ir creciendo tick a tick."""
-        engine, bus, captured = _make_engine()
-        engine.push_token("ABCDEFGHIJKLMNOPQRSTUVWXYZ")  # 26 chars
-
-        audio = _make_audio(0.5)
-        await engine.play_chunk(audio)
-
-        display_events = [e for e in captured if e.type == "display_text_update"]
-        texts = [e.data["text"] for e in display_events]
-
-        # El primer texto visible debe ser más corto que el último
-        self.assertLess(len(texts[0]), len(texts[-1]),
-                        f"El texto debe crecer: primer='{texts[0]}', último='{texts[-1]}'")
-
-    async def test_play_chunk_sin_tokens_no_emite_texto_extra(self) -> None:
-        """Sin tokens previos, debe emitir eventos con texto vacío (sin crash)."""
-        engine, bus, captured = _make_engine()
-        # No push_token
-
-        audio = _make_audio(0.3)
-        await engine.play_chunk(audio)  # No debe lanzar excepción
-
-        display_events = [e for e in captured if e.type == "display_text_update"]
-        for e in display_events:
-            self.assertEqual(e.data["text"], "", "Sin tokens, texto visible debe ser vacío")
-
-    async def test_play_chunk_cursor_no_supera_total_chars(self) -> None:
-        """El cursor nunca debe avanzar más allá del total de caracteres del buffer."""
-        engine, bus, captured = _make_engine()
-        engine.push_token("AB")  # solo 2 chars
-
-        audio = _make_audio(0.5)  # duración relativamente larga
-        await engine.play_chunk(audio)
-
-        display_events = [e for e in captured if e.type == "display_text_update"]
-        texts = [e.data["text"] for e in display_events]
-
-        for text in texts:
-            self.assertLessEqual(len(text), 2,
-                                 f"Texto '{text}' supera el buffer de 2 chars")
+    async def test_sin_tokens_nuevos_chunk_text_vacio(self) -> None:
+        engine, _, captured = _make_engine()
+        await engine.play_chunk(_make_audio(0.3))
+        engine.push_token("AB")
+        await engine.play_chunk(_make_audio(0.3))
+        await engine.play_chunk(_make_audio(0.3))
+        events = self._display(captured)
+        self.assertEqual([e.data["chunk_text"] for e in events], ["", "AB", ""])
+        self.assertEqual([e.data["cumulative_text"] for e in events], ["", "AB", "AB"])
 
     async def test_play_chunk_vacio_no_reproduce(self) -> None:
-        """play_chunk con bytes vacíos no debe invocar al audio backend ni emitir eventos."""
-        engine, bus, captured = _make_engine()
+        engine, _, captured = _make_engine()
         await engine.play_chunk(b"")
-
-        display_events = [e for e in captured if e.type == "display_text_update"]
-        self.assertEqual(len(display_events), 0)
+        self.assertEqual(self._display(captured), [])
         engine._audio.play_chunk.assert_not_called()
 
     async def test_duracion_calculo_correcto(self) -> None:
-        """Verificar que audio_duration se calcula correctamente."""
-        # 24000 muestras * 2 bytes = 48000 bytes → 1 segundo
-        audio_1s = b"\x00\x00" * 24000
-        duration = len(audio_1s) / (24000 * 2)
-        self.assertAlmostEqual(duration, 1.0, places=10)
+        # PCM16 mono 24 kHz: 48000 bytes = 1 s.
+        engine, _, captured = _make_engine()
+        await engine.play_chunk(b"\x00\x00" * 24000)
+        await engine.play_chunk(b"\x00\x00" * 1200)
+        durations = [e.data["duration_s"] for e in self._display(captured)]
+        self.assertAlmostEqual(durations[0], 1.0, places=10)
+        self.assertAlmostEqual(durations[1], 0.05, places=10)
 
-        # 1200 muestras * 2 bytes = 2400 bytes → 0.05 segundos (1 tick)
-        audio_1tick = b"\x00\x00" * 1200
-        duration_tick = len(audio_1tick) / (24000 * 2)
-        self.assertAlmostEqual(duration_tick, 0.05, places=10)
+    async def test_evento_se_publica_antes_de_reproducir(self) -> None:
+        """El display recibe el chunk al empezar a sonar, no al terminar: el
+        reveal dura lo que el audio."""
+        engine, _, captured = _make_engine()
+        engine.push_token("Texto")
+        seen_at_play: list[int] = []
 
-    async def test_play_chunk_no_duplica_espera_del_backend(self) -> None:
-        """Si el backend ya bloquea la duración real del audio, PlaybackEngine no
-        debe esperar otra vez esa misma duración para animar el texto."""
-        engine, bus, captured = _make_engine()
-        engine.push_token("Texto de prueba para animar")
+        async def _play(audio: bytes) -> None:
+            seen_at_play.append(len(self._display(captured)))
 
-        # Issue #76: antes medía el tiempo real (< 1.6x de 0.2s), frágil con
-        # la CPU cargada. Ahora el backend "reproduce" hasta que el test lo
-        # libera: si la animación corre en paralelo, todos sus ticks se
-        # publican mientras el backend sigue bloqueado; con la doble espera
-        # (animar después de reproducir) no saldría ninguno.
-        backend_playing = asyncio.Event()
-        release_backend = asyncio.Event()
+        engine._audio.play_chunk = _play
+        await engine.play_chunk(_make_audio(0.2))
+        self.assertEqual(seen_at_play, [1])
 
-        async def _blocking_play_chunk(audio: bytes) -> None:
-            backend_playing.set()
-            await release_backend.wait()
+    async def test_no_espera_mas_que_el_backend(self) -> None:
+        """Sin animación interna: play_chunk termina en cuanto el backend
+        termina (antes había un bucle de sleep(0.05) en paralelo)."""
+        engine, _, _ = _make_engine()
+        release = asyncio.Event()
 
-        engine._audio.play_chunk = _blocking_play_chunk
+        async def _blocking(audio: bytes) -> None:
+            await release.wait()
 
-        audio = _make_audio(0.2)  # 4 ticks de 50ms
-        n_ticks = 4
-        task = asyncio.create_task(engine.play_chunk(audio))
-        try:
-            def _ticks() -> int:
-                return sum(1 for e in captured if e.type == "display_text_update")
-
-            await wait_until(lambda: _ticks() >= n_ticks or task.done(),
-                             message="ticks de animación")
-            self.assertTrue(backend_playing.is_set())
-            self.assertFalse(task.done(), "play_chunk no debe terminar antes que el backend")
-            self.assertEqual(
-                _ticks(), n_ticks,
-                "la animación del texto debe correr en paralelo al backend, no después "
-                "(bug de doble espera)",
-            )
-        finally:
-            release_backend.set()
-            await asyncio.wait_for(task, timeout=5.0)
+        engine._audio.play_chunk = _blocking
+        task = asyncio.create_task(engine.play_chunk(_make_audio(5.0)))
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+        release.set()
+        await asyncio.wait_for(task, timeout=1.0)
 
     async def test_reset_entre_turnos(self) -> None:
-        """Después de reset, play_chunk del siguiente turno empieza desde cero."""
-        engine, bus, captured = _make_engine()
+        engine, _, captured = _make_engine()
         engine.push_token("Primer turno de texto")
-        audio = _make_audio(0.3)
-        await engine.play_chunk(audio)
-
-        # Reset para nuevo turno
+        await engine.play_chunk(_make_audio(0.3))
         engine.reset()
         captured.clear()
-
         engine.push_token("Nuevo")
-        audio2 = _make_audio(0.3)
-        await engine.play_chunk(audio2)
-
-        display_events = [e for e in captured if e.type == "display_text_update"]
-        texts = [e.data["text"] for e in display_events]
-        # Ningún evento debe contener texto del turno anterior
-        for text in texts:
-            self.assertNotIn("Primer", text,
-                             "Texto del turno anterior no debe aparecer tras reset")
-
-
+        await engine.play_chunk(_make_audio(0.3))
+        for e in self._display(captured):
+            self.assertNotIn("Primer", e.data["chunk_text"])
+            self.assertNotIn("Primer", e.data["cumulative_text"])
+        self.assertEqual(self._display(captured)[0].data["cumulative_text"], "Nuevo")

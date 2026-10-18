@@ -98,11 +98,23 @@ _apply() {
     _install_file "$REPO_DIR/boot/supervisord.conf.tpl" "$HOME/supervisord.conf" 0600
     _ok "supervisord.conf generado"
 
+    # El kiosk de jota-display solo habla POST /state (backend http). La
+    # config del teléfono lo debe pedir explícitamente (config.example.yaml)
+    # o implícitamente (display.url sin backend). Cualquier otro backend deja
+    # el kiosk sin estado: avisar.
+    local display_backend
+    display_backend=$(yaml_get_nested display backend)
+    display_backend=$(echo "$display_backend" | tr -d "'" | xargs)
+    case "$display_backend" in
+        ""|null|http) ;;
+        *) _warn "display.backend=$display_backend: el kiosk de jota-display necesita backend \"http\" (ver config.example.yaml)" ;;
+    esac
+
+    # yaml_get display.url buscaba una línea "display.url:" que no existe en
+    # el YAML anidado: siempre caía al default. Se lee la clave anidada.
     local display_url
-    display_url=$(yaml_get display.url 2>/dev/null)
+    display_url=$(yaml_get_nested display url)
     display_url="${display_url:-http://127.0.0.1:8766}"
-    # Limpiar comentario inline si existe
-    display_url="${display_url%%#*}"
     display_url=$(echo "$display_url" | xargs)
     echo "$display_url" > "$HOME/.jota-display-url"
     _ok "display URL guardada: $display_url"

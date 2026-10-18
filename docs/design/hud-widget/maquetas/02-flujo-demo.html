@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>J Voice — Flujo completo (demo animada)</title>
+<style>
+  :root{
+    --malva:#7C6AAE;
+    --malva-lift:#9A87CE;
+    --sky:#6E8CC4;
+
+    --glass-tint: 30, 27, 38;
+    --glass-opacity: .72;
+    --glass-blur: 50px;
+    --glass-saturate: 180%;
+
+    --label:   rgba(255,255,255,.95);
+    --label-2: rgba(255,255,255,.62);
+    --label-3: rgba(255,255,255,.48);
+
+    --sep:         rgba(255,255,255,.09);
+    --fill-subtle: rgba(255,255,255,.055);
+    --fill-hover:  rgba(255,255,255,.10);
+    --edge:        rgba(255,255,255,.10);
+    --edge-top:    rgba(255,255,255,.30);
+
+    --r-panel: 22px;
+    --r-card: 13px;
+    --r-pill: 999px;
+
+    /* mismo ritmo que el prototipo de Figma/Penpot: llega con calma, se va rápido */
+    --ease: cubic-bezier(.32,.72,0,1);
+    --enter: .42s;
+    --exit: .24s;
+  }
+
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Inter',system-ui,sans-serif;
+    background:#0d0d10;
+    overflow:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+
+  .screen{position:fixed;inset:0;overflow:hidden}
+  .bd-wall{
+    position:absolute;inset:0;
+    background:
+      radial-gradient(1200px 800px at 20% 15%, #6a4fa3 0%, transparent 55%),
+      radial-gradient(1000px 900px at 85% 30%, #2f7fb8 0%, transparent 55%),
+      radial-gradient(900px 700px at 60% 90%, #c2568a 0%, transparent 50%),
+      linear-gradient(160deg,#1a1338 0%,#243a63 45%,#7a3560 100%);
+  }
+
+  .menubar{
+    position:absolute;top:0;left:0;right:0;height:26px;
+    background:rgba(0,0,0,.28);backdrop-filter:blur(30px);-webkit-backdrop-filter:blur(30px);
+    display:flex;align-items:center;justify-content:flex-end;gap:20px;
+    padding:0 16px;font-size:12.5px;color:rgba(255,255,255,.85);z-index:5;
+  }
+  .menubar .j{width:14px;height:14px;border-radius:50%;
+    background:linear-gradient(135deg,var(--malva),var(--sky));
+    box-shadow:0 0 8px rgba(124,106,174,.7)}
+
+  /* ============ WIDGET ============ */
+  .hud{
+    position:absolute;
+    top:38px; right:14px; z-index:10;
+    background:rgba(var(--glass-tint), var(--glass-opacity));
+    backdrop-filter:blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    -webkit-backdrop-filter:blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    box-shadow:
+      inset 0 1px 0 0 var(--edge-top),
+      0 1px 3px rgba(0,0,0,.35),
+      0 24px 60px -12px rgba(0,0,0,.55);
+    transition:width var(--enter) var(--ease), border-radius var(--enter) var(--ease);
+    overflow:hidden;
+    width:230px;
+    border-radius:var(--r-pill);
+  }
+  .hud.w-glance{width:340px;border-radius:var(--r-panel)}
+  .hud.w-panel{width:380px;border-radius:var(--r-panel)}
+  .hud.collapsing{transition-duration:var(--exit)}
+
+  /* orbe — mismos 4 estados que en Penpot, con halo/anillo en vez de solo color */
+  .orb-wrap{width:40px;height:40px;flex:none;display:grid;place-items:center;position:relative}
+  .orb{
+    width:22px;height:22px;border-radius:50%;
+    background:linear-gradient(135deg,var(--malva-lift),var(--sky));
+    transition:width .4s var(--ease),height .4s var(--ease),opacity .3s ease;
+  }
+  .halo{
+    position:absolute;inset:0;border-radius:50%;
+    background:radial-gradient(circle,rgba(154,135,206,.55) 0%,rgba(110,140,196,.0) 70%);
+    opacity:0;transition:opacity .4s ease;filter:blur(6px);
+  }
+  .ring{
+    position:absolute;width:32px;height:32px;border-radius:50%;
+    border:1.5px dashed rgba(154,135,206,.55);
+    opacity:0;transition:opacity .3s ease;
+  }
+  [data-state="listening"] .orb{width:26px;height:26px;animation:breathe 1.4s ease-in-out infinite}
+  [data-state="listening"] .halo{opacity:.85}
+  [data-state="thinking"] .orb{width:26px;height:26px;opacity:.8}
+  [data-state="thinking"] .halo{opacity:.5}
+  [data-state="thinking"] .ring{opacity:1;animation:spin 2.2s linear infinite}
+  [data-state="speaking"] .orb{width:28px;height:28px;animation:breathe .9s ease-in-out infinite}
+  [data-state="speaking"] .halo{opacity:1;filter:blur(8px)}
+  [data-state="idle"] .orb{animation:breathe 2.6s ease-in-out infinite}
+  @keyframes breathe{0%,100%{transform:scale(1);opacity:.92}50%{transform:scale(1.08);opacity:1}}
+  @keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+
+  /* --- cara A: pill (idle / listening) --- */
+  .pill-face{display:flex;align-items:center;gap:8px;padding:8px 14px 8px 8px;opacity:1;transition:opacity .25s ease}
+  .pill-text{font-size:11.5px;color:var(--label-2);white-space:nowrap;flex:1;
+    overflow:hidden;text-overflow:ellipsis}
+  .pill-caret{display:inline-block;width:1px;height:11px;background:var(--label-2);
+    vertical-align:-2px;margin-left:1px;animation:blink 1s step-end infinite}
+  @keyframes blink{50%{opacity:0}}
+
+  /* --- cara B: panel (thinking → hold) --- */
+  .panel-face{display:none;opacity:0;transition:opacity .3s ease}
+  .head{display:flex;align-items:center;gap:10px;padding:14px 16px 10px}
+  .head .status{font-size:11px;color:var(--label-3)}
+  .convo{padding:2px 16px 16px;display:flex;flex-direction:column;gap:16px}
+
+  /* técnica grid-rows para revelar cada bloque con altura animada, sin medir en JS */
+  .reveal{display:grid;grid-template-rows:0fr;opacity:0;
+    transition:grid-template-rows var(--enter) var(--ease), opacity .3s ease}
+  .reveal > div{overflow:hidden;min-height:0}
+  .reveal.show{grid-template-rows:1fr;opacity:1}
+
+  .turn-user{align-self:flex-end;text-align:right;max-width:88%;font-size:12.5px;line-height:1.5;color:var(--label-2)}
+  .turn-j{max-width:96%;font-size:14.5px;line-height:1.55;color:var(--label);letter-spacing:-.005em}
+  .turn-j .cursor{display:inline-block;width:2px;height:14px;background:var(--label);vertical-align:-2px;
+    margin-left:2px;animation:blink 1s step-end infinite}
+
+  .tool{background:var(--fill-subtle);border-radius:var(--r-card);padding:9px 12px}
+  .tool .tr{display:flex;align-items:center;gap:9px}
+  .tool .glyph{width:16px;text-align:center;font-size:11px;color:var(--label);flex:none}
+  .tool .tname{font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:11px;color:var(--label-2);flex:1}
+  .tool .status{font-size:10.5px;color:var(--label-3)}
+  .progress{height:3px;border-radius:2px;background:var(--fill-hover);margin-top:8px;overflow:hidden}
+  .progress i{display:block;height:100%;width:0%;border-radius:2px;background:var(--malva-lift);
+    transition:width 1.7s linear}
+
+  .tbl{width:100%;border-collapse:collapse}
+  .tbl th{font-size:9.5px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;
+    color:var(--label-3);text-align:left;padding:0 0 7px}
+  .tbl td{font-size:11px;color:var(--label-2);padding:6px 0;border-top:.5px solid var(--sep)}
+  .tbl tr:first-child td{color:var(--label)}
+  .tbl-rows tr{opacity:0;transform:translateY(4px);transition:opacity .35s ease,transform .35s ease}
+  .tbl-rows.show tr{opacity:1;transform:none}
+  .tbl-rows.show tr:nth-child(2){transition-delay:.08s}
+
+  /* ============ CONTROLES DE LA DEMO ============ */
+  .ctl{
+    position:absolute;left:16px;bottom:16px;z-index:20;display:flex;align-items:center;gap:10px;
+    background:rgba(22,22,28,.82);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);
+    border:.5px solid rgba(255,255,255,.12);border-radius:13px;padding:8px 8px 8px 14px;
+    transition:opacity .3s ease;
+  }
+  .ctl.hidden{opacity:0;pointer-events:none}
+  .ctl button{
+    border:none;background:rgba(255,255,255,.08);cursor:pointer;border-radius:8px;
+    font:inherit;font-size:11.5px;color:rgba(255,255,255,.85);padding:7px 12px;
+  }
+  .ctl button:hover{background:rgba(255,255,255,.16)}
+  .ctl label{font-size:10.5px;color:rgba(255,255,255,.5);display:flex;align-items:center;gap:5px;cursor:pointer}
+  .rail{position:absolute;left:0;bottom:0;height:2px;background:var(--malva-lift);width:0%;
+    transition:width .1s linear}
+
+  .reveal-toggle{position:fixed;top:14px;left:16px;z-index:20;font-size:11px;color:rgba(255,255,255,.4);
+    font-family:ui-monospace,'SF Mono',Menlo,monospace}
+
+  @media (prefers-reduced-motion: reduce){ *{animation:none !important} }
+</style>
+</head>
+<body>
+<div class="screen">
+  <div class="bd-wall"></div>
+
+  <div class="menubar"><div class="j"></div><span>100%</span><span>Dom 2 ago  14:32</span></div>
+
+  <div class="reveal-toggle" id="phaseLabel">fase: idle</div>
+
+  <div class="hud" id="hud" data-state="idle">
+    <div class="rail" id="rail"></div>
+
+    <!-- cara pill: idle + listening -->
+    <div class="pill-face" id="pillFace">
+      <div class="orb-wrap"><div class="halo"></div><div class="ring"></div><div class="orb"></div></div>
+      <div class="pill-text" id="pillText"></div>
+    </div>
+
+    <!-- cara panel: thinking → hold -->
+    <div class="panel-face" id="panelFace">
+      <div class="head">
+        <div class="orb-wrap"><div class="halo"></div><div class="ring"></div><div class="orb"></div></div>
+        <div class="status" id="panelStatus">Pensando…</div>
+      </div>
+      <div class="convo">
+        <div class="reveal" id="rowUser"><div><div class="turn-user" id="userText"></div></div></div>
+
+        <div class="reveal" id="rowTool"><div>
+          <div class="tool">
+            <div class="tr">
+              <span class="glyph" id="toolGlyph">⋯</span>
+              <span class="tname">read_calendar_events</span>
+              <span class="status" id="toolStatus">Ejecutando</span>
+            </div>
+            <div class="progress"><i id="toolBar"></i></div>
+          </div>
+        </div></div>
+
+        <div class="reveal" id="rowJ"><div><div class="turn-j"><span id="jText"></span><span class="cursor" id="jCursor"></span></div></div></div>
+
+        <div class="reveal" id="rowTable"><div>
+          <table class="tbl">
+            <thead><tr><th>Hora</th><th>Evento</th><th>Estado</th></tr></thead>
+            <tbody class="tbl-rows" id="tblRows">
+              <tr><td>16:00</td><td>Sync diseño</td><td>Confirmada</td></tr>
+              <tr><td>18:30</td><td>1:1 con Marta</td><td>Pendiente</td></tr>
+            </tbody>
+          </table>
+        </div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="ctl" id="ctl">
+    <button id="btnPlay">⏸ Pausar</button>
+    <button id="btnRestart">↻ Reiniciar</button>
+    <label><input type="checkbox" id="chkLoop" checked> loop</label>
+    <label><input type="checkbox" id="chkHide"> modo captura (oculta esto)</label>
+  </div>
+</div>
+
+<script>
+(function(){
+  const hud = document.getElementById('hud');
+  const pillFace = document.getElementById('pillFace');
+  const panelFace = document.getElementById('panelFace');
+  const pillText = document.getElementById('pillText');
+  const userText = document.getElementById('userText');
+  const jText = document.getElementById('jText');
+  const jCursor = document.getElementById('jCursor');
+  const panelStatus = document.getElementById('panelStatus');
+  const toolGlyph = document.getElementById('toolGlyph');
+  const toolStatus = document.getElementById('toolStatus');
+  const toolBar = document.getElementById('toolBar');
+  const rowUser = document.getElementById('rowUser');
+  const rowTool = document.getElementById('rowTool');
+  const rowJ = document.getElementById('rowJ');
+  const rowTable = document.getElementById('rowTable');
+  const tblRows = document.getElementById('tblRows');
+  const rail = document.getElementById('rail');
+  const phaseLabel = document.getElementById('phaseLabel');
+
+  const USER_LINE = 'Recuérdame la reunión de las cuatro y prepárame un resumen de los pendientes.';
+  const J_LINE = 'Tienes la reunión con el equipo de diseño a las 16:00. Te dejo el resumen de pendientes abajo.';
+
+  let playing = true;
+  let timer = null;
+  let stepIndex = 0;
+
+  function setState(s){ hud.dataset.state = s; }
+
+  function typewriter(el, text, msPerChar, onDone){
+    el.textContent = '';
+    let i = 0;
+    const id = setInterval(() => {
+      el.textContent = text.slice(0, i);
+      i++;
+      if (i > text.length){ clearInterval(id); if (onDone) onDone(); }
+    }, msPerChar);
+    return id;
+  }
+
+  // cada paso: { label, run(cb), duration } — run() hace el trabajo, cb() se llama cuando puede
+  // avanzar el paso siguiente (permite que dure más que su propia animación si hace falta).
+  const steps = [
+    {
+      label: 'idle', duration: 1400,
+      run(){
+        hud.className = 'hud';
+        setState('idle');
+        panelFace.style.display = 'none'; panelFace.style.opacity = 0;
+        pillFace.style.display = 'flex'; pillFace.style.opacity = 1;
+        pillText.textContent = '';
+        [rowUser, rowTool, rowJ, rowTable].forEach(r => r.classList.remove('show'));
+        tblRows.classList.remove('show');
+        toolBar.style.transition = 'none'; toolBar.style.width = '0%';
+        toolGlyph.textContent = '⋯'; toolStatus.textContent = 'Ejecutando';
+      }
+    },
+    {
+      label: 'listening', duration: 3000,
+      run(){
+        setState('listening');
+        typewriter(pillText, USER_LINE, 34);
+      }
+    },
+    {
+      label: 'thinking → panel', duration: 900,
+      run(){
+        setState('thinking');
+        hud.classList.add('w-panel');
+        pillFace.style.opacity = 0;
+        setTimeout(() => {
+          pillFace.style.display = 'none';
+          panelFace.style.display = 'block';
+          panelFace.style.opacity = 1;
+          panelStatus.textContent = 'Pensando…';
+          userText.textContent = USER_LINE;
+          rowUser.classList.add('show');
+        }, 180);
+      }
+    },
+    {
+      label: 'tool: running', duration: 1900,
+      run(){
+        rowTool.classList.add('show');
+        requestAnimationFrame(() => {
+          toolBar.style.transition = 'width 1.7s linear';
+          toolBar.style.width = '100%';
+        });
+      }
+    },
+    {
+      label: 'tool: done', duration: 500,
+      run(){
+        toolGlyph.textContent = '✓';
+        toolStatus.textContent = '1.8s';
+      }
+    },
+    {
+      label: 'responding', duration: 3100,
+      run(){
+        setState('speaking');
+        panelStatus.textContent = 'Respondiendo…';
+        rowJ.classList.add('show');
+        jCursor.style.display = 'inline-block';
+        typewriter(jText, J_LINE, 28, () => { jCursor.style.display = 'none'; });
+      }
+    },
+    {
+      label: 'table', duration: 900,
+      run(){
+        rowTable.classList.add('show');
+        requestAnimationFrame(() => tblRows.classList.add('show'));
+      }
+    },
+    {
+      label: 'hold', duration: 3200,
+      run(){ setState('idle'); panelStatus.textContent = 'Escuchando…'; }
+    },
+    {
+      label: 'collapse', duration: 800,
+      run(){
+        hud.classList.add('collapsing');
+        panelFace.style.opacity = 0;
+        [rowUser, rowTool, rowJ, rowTable].forEach(r => r.classList.remove('show'));
+        setTimeout(() => {
+          hud.classList.remove('w-panel','w-glance');
+          panelFace.style.display = 'none';
+          pillFace.style.display = 'flex';
+          requestAnimationFrame(() => pillFace.style.opacity = 1);
+        }, 260);
+      }
+    },
+  ];
+
+  function runStep(){
+    if (!playing) return;
+    const s = steps[stepIndex];
+    phaseLabel.textContent = 'fase: ' + s.label;
+    s.run();
+
+    const start = performance.now();
+    function tick(now){
+      if (!playing) return;
+      const pct = Math.min(100, ((now - start) / s.duration) * 100);
+      rail.style.width = pct + '%';
+      if (pct < 100) requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+
+    timer = setTimeout(() => {
+      stepIndex++;
+      if (stepIndex >= steps.length){
+        if (document.getElementById('chkLoop').checked) stepIndex = 0;
+        else { playing = false; return; }
+      }
+      runStep();
+    }, s.duration);
+  }
+
+  document.getElementById('btnPlay').onclick = function(){
+    playing = !playing;
+    this.textContent = playing ? '⏸ Pausar' : '▶ Reanudar';
+    if (playing) runStep();
+    else clearTimeout(timer);
+  };
+  document.getElementById('btnRestart').onclick = function(){
+    clearTimeout(timer);
+    stepIndex = 0;
+    playing = true;
+    document.getElementById('btnPlay').textContent = '⏸ Pausar';
+    runStep();
+  };
+  document.getElementById('chkHide').onchange = function(){
+    document.getElementById('ctl').classList.toggle('hidden', this.checked);
+    phaseLabel.style.display = this.checked ? 'none' : '';
+  };
+
+  runStep();
+})();
+</script>
+</body>
+</html>
