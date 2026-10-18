@@ -86,8 +86,9 @@ async def test_mensajes_que_el_kiosk_no_entiende_no_se_postean() -> None:
         backend.send("health", {"key": "oww", "level": "warning"})
         backend.send("state", {"value": "error", "text": ""})
         backend.send("state", {"value": "idle", "text": ""})
+        # La cola es FIFO y el idle es lo último que se envió: cuando llega
+        # su POST, lo anterior ya se descartó (sin sleep extra, issue #76).
         await wait_until(lambda: len(posts) == 1, message="solo el idle")
-        await asyncio.sleep(0.05)
     finally:
         await backend.stop()
     assert posts == [{"state": "idle", "text": ""}]
@@ -139,9 +140,11 @@ async def test_text_update_anima_el_reveal_durante_el_chunk() -> None:
 @pytest.mark.asyncio
 async def test_send_no_bloquea_y_coalesce_text_updates_con_display_lento() -> None:
     gate = threading.Event()
+    entered = threading.Event()
     posts: list[dict] = []
 
     def _slow_post(payload: dict) -> None:
+        entered.set()
         gate.wait(timeout=5)
         posts.append(payload)
 
@@ -150,7 +153,8 @@ async def test_send_no_bloquea_y_coalesce_text_updates_con_display_lento() -> No
     await backend.start()
     try:
         backend.send("state", {"value": "response", "text": ""})
-        await asyncio.sleep(0.02)  # el sender ya está bloqueado en el POST
+        # El sender ya está bloqueado en el POST (antes: sleep(0.02), #76).
+        await wait_until(entered.is_set, message="sender bloqueado en el POST")
         cumulative = ""
         for i in range(500):
             cumulative += f"{i} "
@@ -173,12 +177,18 @@ async def test_send_no_bloquea_y_coalesce_text_updates_con_display_lento() -> No
 @pytest.mark.asyncio
 async def test_cola_acotada_descarta_lo_mas_antiguo() -> None:
     gate = threading.Event()
+    entered = threading.Event()
+
+    def _blocked_post(payload: dict) -> None:
+        entered.set()
+        gate.wait(timeout=5)
+
     backend = HttpDisplayBackend(DisplayConfig(backend="http", timeout_s=5.0))
-    backend._do_post = lambda payload: gate.wait(timeout=5)  # type: ignore[method-assign]
+    backend._do_post = _blocked_post  # type: ignore[method-assign]
     await backend.start()
     try:
         backend.send("state", {"value": "idle", "text": ""})
-        await asyncio.sleep(0.02)
+        await wait_until(entered.is_set, message="sender bloqueado en el POST")
         for i in range(200):
             backend.send("state", {"value": "listening" if i % 2 else "thinking", "text": str(i)})
         assert len(backend._pending) == backend.MAX_PENDING
@@ -263,7 +273,10 @@ async def test_post_real_contra_un_servidor_como_el_kiosk() -> None:
 
 @pytest.mark.asyncio
 async def test_error_de_red_no_propaga() -> None:
+    calls: list[dict] = []
+
     def _boom(payload: dict) -> None:
+        calls.append(payload)
         raise OSError("connection refused")
 
     backend = HttpDisplayBackend(DisplayConfig(backend="http"))
@@ -271,8 +284,11 @@ async def test_error_de_red_no_propaga() -> None:
     await backend.start()
     try:
         backend.send("state", {"value": "idle", "text": ""})
-        await wait_until(lambda: not backend._pending, message="drenado")
-        await asyncio.sleep(0.02)
+        await wait_until(lambda: len(calls) == 1, message="primer POST")
+        # Prueba positiva de que el sender sigue vivo tras el error: procesa
+        # el siguiente mensaje (antes: sleep(0.02) y mirar task.done(), #76).
+        backend.send("state", {"value": "listening", "text": ""})
+        await wait_until(lambda: len(calls) == 2, message="el sender sobrevivió al error")
         assert backend._task is not None and not backend._task.done()
     finally:
         await backend.stop()

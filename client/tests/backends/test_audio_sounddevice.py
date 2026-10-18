@@ -6,8 +6,7 @@ is_silence() y get_preroll() con frames sintéticos.
 from __future__ import annotations
 
 import asyncio
-import sys
-from unittest.mock import MagicMock
+from unittest.mock import create_autospec
 
 import numpy as np
 import pytest
@@ -172,7 +171,7 @@ def test_enqueue_and_wait_queues_audio_before_starting_stream() -> None:
     assert qsize_at_ensure == [1]
 
 
-def test_enqueue_and_wait_sleeps_solo_la_duracion_real() -> None:
+def test_enqueue_and_wait_sleeps_solo_la_duracion_real(monkeypatch) -> None:
     """Bug: se dormía duration + 0.05s tras encolar cada chunk. Como el
     callback de PortAudio consume el chunk en su duración real (sin ese
     margen extra), esos 50ms de más hacían que el productor entregara el
@@ -188,31 +187,20 @@ def test_enqueue_and_wait_sleeps_solo_la_duracion_real() -> None:
 
     import backends.audio_sounddevice as mod
 
-    original_sleep = mod.asyncio.sleep
-    mod.asyncio.sleep = fake_sleep
-    try:
-        audio = bytes(range(1, 1 + 240))  # 120 samples int16 → 120/24000s
-        asyncio.run(be.play_chunk(audio))
-    finally:
-        mod.asyncio.sleep = original_sleep
+    # mod.asyncio ES el módulo asyncio global: parchearlo a mano con
+    # try/finally afectaba a todo el proceso; monkeypatch lo acota al test.
+    monkeypatch.setattr(mod.asyncio, "sleep", fake_sleep)
+    audio = bytes(range(1, 1 + 240))  # 120 samples int16 → 120/24000s
+    asyncio.run(be.play_chunk(audio))
 
     expected_duration = len(audio) / (24000 * 2)
     assert slept == [pytest.approx(expected_duration)]
 
 
 # --- issue #25: start() debe reintentar ante PortAudioError transitorio ---
-
-
-def _install_fake_sd(monkeypatch, make_input_stream):
-    """Instala un mock de sounddevice en sys.modules que ``start()`` ve al
-    hacer ``import sounddevice as sd``. ``make_input_stream`` es un callable
-    ``(**kwargs)`` que decide en cada intento si lanza PortAudioError o
-    devuelve un stream con ``.start()`` válido."""
-    fake_sd = MagicMock()
-    fake_sd.PortAudioError = sd.PortAudioError  # reusamos la real
-    fake_sd.InputStream = MagicMock(side_effect=make_input_stream)
-    monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
-    return fake_sd
+#
+# El módulo sounddevice se sustituye con el fixture fake_sounddevice
+# (tests/conftest.py): spec del módulo real y PortAudioError real.
 
 
 def _no_wait_sleep(monkeypatch):
@@ -226,14 +214,13 @@ def _no_wait_sleep(monkeypatch):
     monkeypatch.setattr(mod.asyncio, "sleep", fake_sleep)
 
 
-def test_start_retries_on_portaudio_error_then_succeeds(monkeypatch) -> None:
+def test_start_retries_on_portaudio_error_then_succeeds(monkeypatch, fake_sounddevice) -> None:
     """Issue #25: si sd.InputStream() lanza PortAudioError en los primeros
     intentos (p.ej. 'device busy', host API no lista, dispositivo recién
     desconectado), start() debe reintentar hasta tener éxito y NO dejar al
     cliente sin captura."""
     attempts = {"n": 0}
-    successful_stream = MagicMock()
-    successful_stream.start = MagicMock(return_value=None)
+    successful_stream = create_autospec(sd.InputStream, instance=True)
 
     def make_input_stream(**_kwargs):
         attempts["n"] += 1
@@ -241,7 +228,7 @@ def test_start_retries_on_portaudio_error_then_succeeds(monkeypatch) -> None:
             raise sd.PortAudioError(f"transient (attempt {attempts['n']})")
         return successful_stream
 
-    _install_fake_sd(monkeypatch, make_input_stream)
+    fake_sounddevice.InputStream.side_effect = make_input_stream
     _no_wait_sleep(monkeypatch)
 
     be = SounddeviceBackend(_cfg())
@@ -252,7 +239,7 @@ def test_start_retries_on_portaudio_error_then_succeeds(monkeypatch) -> None:
     successful_stream.start.assert_called_once()
 
 
-def test_start_raises_after_all_retries_exhausted(monkeypatch) -> None:
+def test_start_raises_after_all_retries_exhausted(monkeypatch, fake_sounddevice) -> None:
     """Si TODOS los intentos fallan, la última PortAudioError se propaga al
     llamador para que el usuario vea el problema en vez de quedarse en
     idle perpetuo sin señal."""
@@ -262,7 +249,7 @@ def test_start_raises_after_all_retries_exhausted(monkeypatch) -> None:
         attempts["n"] += 1
         raise sd.PortAudioError(f"always fails (attempt {attempts['n']})")
 
-    _install_fake_sd(monkeypatch, make_input_stream)
+    fake_sounddevice.InputStream.side_effect = make_input_stream
     _no_wait_sleep(monkeypatch)
 
     be = SounddeviceBackend(_cfg())
@@ -273,18 +260,17 @@ def test_start_raises_after_all_retries_exhausted(monkeypatch) -> None:
     assert attempts["n"] == 3, f"esperaba 3 intentos, vi {attempts['n']}"
 
 
-def test_start_succeeds_on_first_try_normal(monkeypatch) -> None:
+def test_start_succeeds_on_first_try_normal(monkeypatch, fake_sounddevice) -> None:
     """No regresión: si NO hay error, start() debe abrir el stream en el
     primer intento sin reintentos espurios."""
     attempts = {"n": 0}
-    successful_stream = MagicMock()
-    successful_stream.start = MagicMock(return_value=None)
+    successful_stream = create_autospec(sd.InputStream, instance=True)
 
     def make_input_stream(**_kwargs):
         attempts["n"] += 1
         return successful_stream
 
-    _install_fake_sd(monkeypatch, make_input_stream)
+    fake_sounddevice.InputStream.side_effect = make_input_stream
     _no_wait_sleep(monkeypatch)
 
     be = SounddeviceBackend(_cfg())

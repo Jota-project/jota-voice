@@ -24,6 +24,8 @@ from config import GatewayConfig
 from domain import gateway_session
 from domain.event_bus import EventBus
 
+from tests.fakes.waiting import wait_until
+
 
 class FakeGatewayServer:
     """``plan`` es una lista de acciones por conexión (la última se repite):
@@ -105,16 +107,6 @@ def _cfg(url: str, **kw) -> GatewayConfig:
     return GatewayConfig(**base)
 
 
-async def _wait_for(pred, timeout: float = 3.0) -> bool:
-    loop = asyncio.get_running_loop()
-    end = loop.time() + timeout
-    while loop.time() < end:
-        if pred():
-            return True
-        await asyncio.sleep(0.02)
-    return pred()
-
-
 async def _supervise(cfg, gw, bus=None):
     return asyncio.create_task(gateway_session.idle_supervisor(cfg, bus or EventBus(), gw))
 
@@ -147,7 +139,7 @@ async def test_real_cierre_ordenado_en_idle_reconecta(code, monkeypatch):
         gw = GatewayClient(_cfg(srv.url))
         await gw.connect()
         sup = await _supervise(gw._cfg, gw)
-        assert await _wait_for(lambda: srv.connections == 2 and gw.is_connected)
+        await wait_until(lambda: srv.connections == 2 and gw.is_connected)
         assert gw.last_close.code == code
         assert gw._session_id == "c:2"
         await _stop(sup)
@@ -160,7 +152,7 @@ async def test_real_corte_sin_close_frame_reconecta():
         gw = GatewayClient(_cfg(srv.url))
         await gw.connect()
         sup = await _supervise(gw._cfg, gw)
-        assert await _wait_for(lambda: srv.connections == 2 and gw.is_connected)
+        await wait_until(lambda: srv.connections == 2 and gw.is_connected)
         assert gw.last_close.code == 1006
         await _stop(sup)
         await gw.disconnect()
@@ -174,8 +166,13 @@ async def test_real_rechazo_1008_tipado_y_sin_bucle():
             await gw.connect()
         assert info.value.kind == "invalid_client_key" and info.value.fatal
         assert not gw.is_connected
-        sup = await _supervise(gw._cfg, gw)
-        await asyncio.sleep(0.4)
+        bus = EventBus()
+        events = bus.subscribe()
+        sup = await _supervise(gw._cfg, gw, bus)
+        # El supervisor publica el rechazo fatal una vez y se queda esperando
+        # sin reintentar: esperar a ese evento en vez de mirar 0.4 s (#76).
+        ev = await asyncio.wait_for(events.__anext__(), 5.0)
+        assert ev.type == "error" and ev.data["kind"] == "invalid_client_key"
         await _stop(sup)
         assert srv.connections == 1, "no debe reintentar un 1008 en segundo plano"
 
@@ -210,7 +207,7 @@ async def test_real_keepalive_de_aplicacion_llega_al_gateway():
         gw = GatewayClient(_cfg(srv.url, keepalive_interval_s=0.1))
         await gw.connect()
         sup = await _supervise(gw._cfg, gw)
-        assert await _wait_for(
+        await wait_until(
             lambda: any(json.loads(m).get("type") == "keepalive" for m in srv.received_text), 2.0)
         await _stop(sup)
         await gw.disconnect()

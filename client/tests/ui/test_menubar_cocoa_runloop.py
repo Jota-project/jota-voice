@@ -16,12 +16,9 @@ import textwrap
 
 import pytest
 
-pytestmark = pytest.mark.skipif(sys.platform != "darwin", reason="Cocoa solo en macOS")
+from tests.fakes.cocoa import requires_cocoa
 
-try:
-    import AppKit  # noqa: F401
-except ImportError:  # pragma: no cover
-    pytestmark = pytest.mark.skip(reason="pyobjc no instalado")
+pytestmark = requires_cocoa
 
 CLIENT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TIMEOUT_S = 15.0
