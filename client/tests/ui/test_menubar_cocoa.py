@@ -54,6 +54,74 @@ def test_cocoa_backend_fulfils_both_protocols(backend):
     assert needs_main_thread(backend)
 
 
+def _noop_commands():
+    from ui.menubar_base import MenubarCommands
+
+    return MenubarCommands(
+        on_toggle_pause=lambda: None,
+        on_open_logs=lambda: None,
+        on_open_config=lambda: None,
+        on_shutdown_service=lambda: None,
+        on_quit=lambda: None,
+    )
+
+
+def _items_by_title(menu):
+    items = {}
+    for i in range(menu.numberOfItems()):
+        item = menu.itemAtIndex_(i)
+        items[item.title()] = item
+        if item.submenu() is not None:
+            items.update(_items_by_title(item.submenu()))
+    return items
+
+
+def test_command_items_disabled_until_set_commands(backend):
+    """Issue #71: el menú es visible desde el constructor, pero los clics se
+    perdían en silencio hasta set_commands(). Hasta entonces los items que
+    dependen de los comandos van deshabilitados y la cabecera dice
+    "Arrancando…"; Salir y Acerca de siguen activos."""
+    items = _items_by_title(backend._menu)
+    gated = ["Pausar escucha", "Apagar servicio", "Abrir logs", "Abrir configuración"]
+
+    assert not backend._menu.autoenablesItems()
+    for title in gated:
+        assert not items[title].isEnabled(), title
+    assert items["Salir"].isEnabled()
+    assert items["Acerca de jota-voice"].isEnabled()
+    assert backend._header_item.title() == "Arrancando…"
+
+    backend.tick_(None)
+    for title in gated:
+        assert not items[title].isEnabled(), title
+
+    backend.set_commands(_noop_commands())
+    backend.tick_(None)
+
+    for title in gated:
+        assert items[title].isEnabled(), title
+    assert backend._header_item.title() != "Arrancando…"
+
+
+def test_startup_error_is_not_hidden_behind_arrancando(backend):
+    """Si audio.start() falla, set_commands() nunca llega pero el estado pasa
+    a error: la cabecera debe enseñar el error, no "Arrancando…"."""
+    backend.set_state("error")
+    backend.tick_(None)
+
+    assert backend._header_item.title() != "Arrancando…"
+
+
+def test_set_commands_requests_repaint(backend):
+    backend._app = _RecordingApp()
+    scheduled = []
+    backend._call_on_main = lambda fn, *args: scheduled.append((fn, args))
+
+    backend.set_commands(_noop_commands())
+
+    assert scheduled == [(backend.tick_, (None,))]
+
+
 def test_status_item_created(backend):
     assert backend.status_item is not None
     assert backend.status_item.button() is not None

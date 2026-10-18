@@ -41,6 +41,9 @@ class CocoaMenubarBackend:
         self._menu: Optional[AppKit.NSMenu] = None
         self._header_item: Optional[AppKit.NSMenuItem] = None
         self._pause_menu_item: Optional[AppKit.NSMenuItem] = None
+        # Items que solo funcionan con MenubarCommands: deshabilitados hasta
+        # que set_commands() llegue (issue #71).
+        self._command_items: list[AppKit.NSMenuItem] = []
         self._timer: Optional[Foundation.NSTimer] = None
         self._status_bar = AppKit.NSStatusBar.systemStatusBar()
 
@@ -60,6 +63,9 @@ class CocoaMenubarBackend:
             self.status_item.button().setToolTip_("jota-voice")
 
         self._menu = AppKit.NSMenu.alloc().init()
+        # Sin esto NSMenu recalcula el enabled de cada item por su cuenta e
+        # ignoraría el setEnabled_ de los items de comandos.
+        self._menu.setAutoenablesItems_(False)
         self.status_item.setMenu_(self._menu)
 
         # 1. Cabecera no seleccionable
@@ -74,15 +80,18 @@ class CocoaMenubarBackend:
             "Servicio", None, ""
         )
         servicio_menu = AppKit.NSMenu.alloc().init()
+        servicio_menu.setAutoenablesItems_(False)
         self._pause_menu_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "Pausar escucha", "togglePause:", ""
         )
         self._pause_menu_item.setTarget_(self)
+        self._command_items.append(self._pause_menu_item)
         servicio_menu.addItem_(self._pause_menu_item)
         shutdown_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "Apagar servicio", "shutdownService:", ""
         )
         shutdown_item.setTarget_(self)
+        self._command_items.append(shutdown_item)
         servicio_menu.addItem_(shutdown_item)
         servicio_item.setSubmenu_(servicio_menu)
         self._menu.addItem_(servicio_item)
@@ -94,6 +103,7 @@ class CocoaMenubarBackend:
             "Abrir logs", "openLogs:", ""
         )
         logs_item.setTarget_(self)
+        self._command_items.append(logs_item)
         self._menu.addItem_(logs_item)
 
         # 5. Abrir configuración
@@ -101,6 +111,7 @@ class CocoaMenubarBackend:
             "Abrir configuración", "openConfig:", ""
         )
         cfg_item.setTarget_(self)
+        self._command_items.append(cfg_item)
         self._menu.addItem_(cfg_item)
 
         self._menu.addItem_(AppKit.NSMenuItem.separatorItem())
@@ -119,6 +130,15 @@ class CocoaMenubarBackend:
         quit_item.setTarget_(self)
         self._menu.addItem_(quit_item)
 
+        self._apply_commands_ready()
+
+    def _apply_commands_ready(self) -> None:
+        """Habilita los items de comandos solo cuando set_commands() ya
+        corrió. Salir y Acerca de no dependen de ellos. Hilo principal."""
+        ready = self._commands is not None
+        for item in self._command_items:
+            item.setEnabled_(ready)
+
     def _icon_for_state(self, state: str) -> AppKit.NSImage:
         symbol_name = _STATE_ICONS.get(state, "mic")
         image = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(
@@ -134,6 +154,11 @@ class CocoaMenubarBackend:
 
     def _header_title(self) -> str:
         state, _, errors, paused = self._shared.read()
+        if self._commands is None and state != "error":
+            # Ventana de arranque (issue #71): audio.start() aún no terminó.
+            # Un error de arranque sí se enseña, porque set_commands() ya
+            # no llegará.
+            return "Arrancando…"
         suffix = " (pausado)" if paused else ""
         if errors:
             return f"{state.upper()} — {errors} error(es){suffix}"
@@ -162,6 +187,7 @@ class CocoaMenubarBackend:
 
     def set_commands(self, cmds: MenubarCommands) -> None:
         self._commands = cmds
+        self._request_repaint()  # habilita los items en el hilo principal
 
     def _request_repaint(self) -> None:
         """Fuerza un repintado inmediato en vez de esperar al siguiente
@@ -268,6 +294,7 @@ class CocoaMenubarBackend:
         self._menu = None
         self._header_item = None
         self._pause_menu_item = None
+        self._command_items = []
 
     # ------------------------------------------------------------------
     # Tick del NSTimer (corre en hilo Cocoa)
@@ -282,6 +309,8 @@ class CocoaMenubarBackend:
 
         if self._header_item is not None:
             self._header_item.setTitle_(self._header_title())
+
+        self._apply_commands_ready()
 
         if self._pause_menu_item is not None:
             self._pause_menu_item.setTitle_(
