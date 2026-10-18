@@ -147,7 +147,7 @@ async def test_connect_con_credenciales_cf_las_manda_en_el_upgrade(monkeypatch, 
 
 
 async def _test_receive_termina_en_turn_end_sin_esperar_done() -> None:
-    """El gateway real (green-house) señaliza fin de turno con "turn_end", no
+    """El gateway real (mi-servidor) señaliza fin de turno con "turn_end", no
     con "done" — receive() debía quedarse esperando mensajes que nunca
     llegaban hasta el timeout de 30s de RESPONDING. Debe terminar también
     al ver turn_end, igual que hace con done."""
@@ -486,7 +486,7 @@ async def test_connect_parsea_session_id_y_agent_de_ready(ws_connect):
     ws_mock = make_ws()
     ws_mock.recv.return_value = json.dumps({
         "type": "ready",
-        "session_id": "hab_sito:1751289600000",
+        "session_id": "mi-telefono:1751289600000",
         "agent": "main",
         "input_mode": "audio",
         "output_mode": ["audio", "text", "status"],
@@ -498,7 +498,7 @@ async def test_connect_parsea_session_id_y_agent_de_ready(ws_connect):
     client = GatewayClient(cfg)
     await client.connect()
 
-    assert client._session_id == "hab_sito:1751289600000"
+    assert client._session_id == "mi-telefono:1751289600000"
     assert client._agent == "main"
     assert client._capabilities["requested"]["barge_in"] is True
     assert client._capabilities["live"]["tts"] is False

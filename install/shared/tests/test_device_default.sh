@@ -28,12 +28,13 @@ host_id="$(unset DEVICE_ID; jota_default_device_id "$TMP/cero")"
 if jota_valid_id "$host_id"; then echo "ok: sin configs → hostname saneado ($host_id)"; else echo "FAIL: id de hostname inválido '$host_id'"; fail=1; fi
 check "varios configs → hostname" "$(unset DEVICE_ID; jota_default_device_id "$TMP/dos")" "$host_id"
 
-# Ningún script de instalación lleva ya el id de un dispositivo real.
-if grep -rn "macbook_sito\|hab_sito" "$ROOT/install" "$ROOT/lib" "$ROOT/deploy.sh" "$ROOT/install.sh" \
+# Ningún script fija un id de dispositivo literal como default
+# (antes: DEVICE_ID="${DEVICE_ID:-<id real>}").
+if grep -rnE 'DEVICE_ID:-[A-Za-z0-9_]' "$ROOT/install" "$ROOT/lib" "$ROOT/deploy.sh" "$ROOT/install.sh" \
         --include='*.sh' --exclude='test_device_default.sh' 2>/dev/null; then
-    echo "FAIL: quedan ids reales en los scripts"; fail=1
+    echo "FAIL: queda un DEVICE_ID por defecto literal"; fail=1
 else
-    echo "ok: sin ids reales en los scripts"
+    echo "ok: sin DEVICE_ID por defecto literal"
 fi
 
 exit $fail
