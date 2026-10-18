@@ -41,7 +41,7 @@ está en `--custom-model-dir` como `hey_jarvis_v0.1.tflite`, y Wyoming dice
 mv ~/wyoming-data/hey_jarvis_v0.1.tflite ~/wyoming-data/hey_jarvis.tflite
 ```
 
-Esto se aplicó en `devices/macbook_sito/`.
+Esto se aplicó en `devices/mi-mac/`.
 
 ## 3. Cliente sin evento `detect`
 

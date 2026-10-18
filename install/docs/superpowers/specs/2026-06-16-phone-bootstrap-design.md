@@ -20,7 +20,7 @@ Sistema completo para configurar, arrancar y monitorizar todos los servicios del
 - Soporte multi-dispositivo desde el primer día
 
 **Fuera del scope:**
-- Servicios de green-house (jota-gateway, transcriber, etc.)
+- Servicios de mi-servidor (jota-gateway, transcriber, etc.)
 - Mac-side (adb_screen.py, kiosk_server.py)
 
 ---
@@ -84,7 +84,7 @@ jota-voice/
 DEVICE_NAME="salon"
 
 # Conexión SSH
-PHONE_HOST="192.168.1.129"
+PHONE_HOST="192.168.X.X"
 PHONE_PORT="8022"
 PHONE_PASS="CAMBIAR"
 

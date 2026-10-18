@@ -8,11 +8,11 @@
   - Ver detalles en [`openclaw-integracion.md`](openclaw-integracion.md)
 
 - [ ] **Configurar integración OpenAI Conversation en HA**
-  - Base URL: `http://green-house/api/gateway/v1`
+  - Base URL: `http://mi-servidor/api/gateway/v1`
   - Una vez el bridge esté activo
 
-- [ ] **Instalar wyoming-openai en worker-01**
-  - Proxy STT: Wyoming → `POST http://green-house/api/stt/v1/audio/transcriptions`
+- [ ] **Instalar wyoming-openai en mi-asistente**
+  - Proxy STT: Wyoming → `POST http://mi-servidor/api/stt/v1/audio/transcriptions`
   - Verificar endpoint exacto de jota-transcriber (¿`/v1/audio/transcriptions` o `/transcribe`?)
 
 - [ ] **Configurar Assist pipeline en HA**
@@ -42,15 +42,15 @@
   - Reducido de 0.5 a 0.3 para detección más rápida
 
 - [x] **Infraestructura kiosk** ✅ 2026-05-21
-  - `kiosk-server` en worker-01 (systemd user service) — ver `docs/kiosk.md`
-  - ADB WiFi desde worker-01 controla pantalla del teléfono
+  - `kiosk-server` en mi-asistente (systemd user service) — ver `docs/kiosk.md`
+  - ADB WiFi desde mi-asistente controla pantalla del teléfono
   - Hooks wyoming-satellite disparan estados → pantalla + UI web
   - UI web en `kiosk/index.html`: orb animado, barras de sonido, puntos pensando
 
 - [ ] **Kiosk — página accesible sin aceptar certificado** ⬅️ PRÓXIMO
   - El servidor HTTPS usa cert autofirmado → Chrome muestra warning
   - Solución A: usuario acepta el cert una vez en Chrome y añade PWA a inicio
-  - Solución B: proxy por nginx de green-house (ya tiene SSL válido)
+  - Solución B: proxy por nginx de mi-servidor (ya tiene SSL válido)
   - URL actual: `https://<IP_ASISTENTE>:8443/`
 
 - [ ] **Kiosk — apagado automático de pantalla tras respuesta**
@@ -85,7 +85,7 @@
   - Teléfono para respuestas rápidas / personales
   - Google Home Mini para anuncios del hogar
 
-- [ ] **Reserva DHCP para green-house**
+- [ ] **Reserva DHCP para mi-servidor**
   - Fijar MAC de `eno2` en el router para IP estable
   - Evitar que cambie y rompa conexiones LAN
 

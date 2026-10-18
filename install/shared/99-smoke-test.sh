@@ -41,8 +41,14 @@ _warn() { printf "  ${Y}!${N} %s\n" "$1"; }
 _info() { printf "  ${C}→${N} %s\n" "$1"; }
 
 # ---------- Detección de paths ----------
-REPO_DIR="${REPO_DIR:-$HOME/Work/jota-voice}"
-DEVICE_ID="${DEVICE_ID:-macbook_sito}"
+# Sin rutas ni ids del despliegue real (issue #101).
+REPO_DIR="${REPO_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
+if [ -f "$REPO_DIR/lib/device.sh" ]; then
+    . "$REPO_DIR/lib/device.sh"
+    DEVICE_ID="$(jota_default_device_id "$REPO_DIR")"
+else
+    DEVICE_ID="${DEVICE_ID:-}"
+fi
 
 # Si el usuario exporta CONFIG explícitamente (CI, test, etc.), respetarlo.
 # Si no, buscar en las ubicaciones estándar.

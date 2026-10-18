@@ -251,7 +251,7 @@ Una vez entrenado, copiar `models/ok_jota.tflite` al Huawei P8 Lite:
 
 ```bash
 scp models/ok_jota.tflite \
-  -P 8022 u0_a161@192.168.1.129:\
+  -P 8022 u0_aXXX@192.168.X.X:\
   /data/data/com.termux/files/home/oww-venv/lib/python3.13/\
   site-packages/wyoming_openwakeword/models/
 ```

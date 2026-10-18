@@ -138,7 +138,7 @@ El cliente funciona en **happy path** (mac con permisos correctos, red estable, 
 - [ ] **#53** 🟡 `[045]` — `install/shared/99-smoke-test.sh`: override de `GW_HOST`/`GW_PORT` por env var es un no-op — **XS**
 - [ ] **#54** 🟡 `[046]` — Sin instalador para Linux de escritorio pese a que el cliente Python ya lo soporta — **L**
 - [ ] **#55** 🟡 `[047]` — `02-config-wizard.sh` no sanea el device id antes de usarlo en rutas de fichero — **XS**
-- [ ] **#56** 🟡 `[048]` — `devices/hab_sito.env`: contraseña real en claro, permisos 644, sin cifrado — **XS**
+- [ ] **#56** 🟡 `[048]` — `devices/mi-telefono.env`: contraseña real en claro, permisos 644, sin cifrado — **XS**
 - [ ] **#57** 🟡 `[049]` — Sin herramienta de escaneo de secretos (gitleaks/pre-commit) — **S**
 - [ ] **#58** 🟡 `[050]` — Split-brain de defaults en `DisplayConfig.url` — config inválida silenciosa si se activa el backend http sin url — **XS**
 - [ ] **#59** 🟡 `[051]` — `HttpDisplayBackend.update()`: sin cobertura de timeout para la resolución DNS — **S**

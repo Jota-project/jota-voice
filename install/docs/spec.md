@@ -346,5 +346,5 @@ Sin Pydantic — usar dataclasses stdlib.
 - Coordinación entre dispositivos
 - Servidor de observabilidad externo (API reactiva)
 - Barge-in
-- Wake word local en el dispositivo (siempre en worker-01)
+- Wake word local en el dispositivo (siempre en mi-asistente)
 - Implementación ESP32

@@ -179,9 +179,9 @@ nohup ~/oww-venv/bin/python3 -m wyoming_openwakeword \
 
 ---
 
-## 5. openwakeword en worker-01 — threshold 0.3
+## 5. openwakeword en mi-asistente — threshold 0.3
 
-**Servicio:** Docker `wyoming-openwakeword` en worker-01
+**Servicio:** Docker `wyoming-openwakeword` en mi-asistente
 **Fecha:** 2026-05-20
 **Estado actual:** parado (la detección la hace el teléfono)
 

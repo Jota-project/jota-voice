@@ -54,7 +54,7 @@ cat > devices/example.env << 'EOF'
 DEVICE_NAME="salon"
 
 # Conexión SSH
-PHONE_HOST="192.168.1.129"
+PHONE_HOST="192.168.X.X"
 PHONE_PORT="8022"
 PHONE_PASS="CAMBIAR"
 

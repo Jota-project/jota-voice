@@ -21,10 +21,19 @@ TARGET="${1:-phone}"
 case "$TARGET" in
     macbook)
         REPO_LOCAL="${REPO_LOCAL:-$HOME/Work/jota-voice}"
-        DEVICE_DIR="$REPO_LOCAL/devices/macbook_sito"
+        # Id del Mac: DEVICE_ID, o el único devices/<id>/config.yaml, o el
+        # hostname (issue #101: sin ids reales en el código).
+        # shellcheck source=lib/device.sh
+        . "$REPO_LOCAL_SELF/lib/device.sh"
+        MAC_ID="$(jota_default_device_id "$REPO_LOCAL")"
+        if ! jota_valid_id "$MAC_ID"; then
+            echo "ERROR: DEVICE_ID inválido: '$MAC_ID'"
+            exit 1
+        fi
+        DEVICE_DIR="$REPO_LOCAL/devices/$MAC_ID"
 
-        if [ ! -d "$DEVICE_DIR" ]; then
-            echo "ERROR: $DEVICE_DIR no existe. Crea devices/macbook_sito/config.yaml primero."
+        if [ ! -f "$DEVICE_DIR/config.yaml" ]; then
+            echo "ERROR: $DEVICE_DIR/config.yaml no existe. Ejecuta install/macos/02-config-wizard.sh o define DEVICE_ID=<id>."
             exit 1
         fi
 

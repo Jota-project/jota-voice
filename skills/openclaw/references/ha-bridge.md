@@ -17,8 +17,8 @@ The bridge in `jota-gateway` adds value beyond simple proxying:
 ## Architecture
 
 ```
-HA (worker-01)
-  POST http://green-house/api/gateway/v1/chat/completions
+HA (mi-asistente)
+  POST http://mi-servidor/api/gateway/v1/chat/completions
        │ (no auth needed from HA — LAN is trusted)
        ▼
 nginx :80 → /api/gateway/ → jota-gateway :8004
@@ -121,13 +121,13 @@ app.include_router(openclaw_router)   # no prefix — /v1/ is in the router itse
 ```
 
 nginx already has `location /api/gateway/` → `:8004`.  
-HA uses: `http://green-house/api/gateway/v1/chat/completions`
+HA uses: `http://mi-servidor/api/gateway/v1/chat/completions`
 
 ## HA Configuration
 
 1. Settings → Devices & Services → Add Integration → **"OpenAI Conversation"**
 2. API Key: any string (jota-gateway doesn't verify it for this endpoint, or use a simple env token)
-3. Base URL: `http://green-house/api/gateway/v1`
+3. Base URL: `http://mi-servidor/api/gateway/v1`
 4. Model: `default` (or whatever OpenClaw's `/v1/models` returns)
 
 Then: Settings → Voice Assistants → New Assistant:
@@ -181,7 +181,7 @@ name: home-assistant
 description: Use to control Home Assistant devices (lights, switches, climate, etc.)
 ---
 
-HA URL: http://worker-01.local:8123
+HA URL: http://mi-asistente.local:8123
 Token: <long-lived-access-token from HA Profile>
 
 Use fetch/browser to call:

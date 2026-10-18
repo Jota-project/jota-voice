@@ -1,5 +1,5 @@
 #!/bin/sh
-# Crea symlink ~/Library/Application Support/jota-voice/config.yaml → devices/macbook_sito/config.yaml
+# Crea symlink ~/Library/Application Support/jota-voice/config.yaml → devices/<DEVICE_ID>/config.yaml
 set -e
 . "$(dirname "$0")/00-lib.sh"
 

@@ -121,7 +121,7 @@ no existe: su `cancel` va por el WebSocket del display, y una sección
 | [`install/docs/pendientes.md`](install/docs/pendientes.md) | Roadmap y tareas pendientes |
 | [`install/docs/openclaw-integracion.md`](install/docs/openclaw-integracion.md) | Integración OpenClaw ↔ Home Assistant |
 | [`install/docs/kiosk.md`](install/docs/kiosk.md) | Kiosk de voz — legacy (Huawei P8 Lite) |
-| [`install/docs/nginx.md`](install/docs/nginx.md) | Proxy inverso en green-house |
+| [`install/docs/nginx.md`](install/docs/nginx.md) | Proxy inverso en mi-servidor |
 | [`install/docs/bootstrap-setup.md`](install/docs/bootstrap-setup.md) | Instalación manual de APKs (una vez por teléfono) |
 | [`install/docs/fullyKiosk-setup.md`](install/docs/fullyKiosk-setup.md) | Setup manual de FullyKiosk Browser |
 | [`install/docs/parches-movil.md`](install/docs/parches-movil.md) | Parches aplicados a librerías de terceros en el móvil |

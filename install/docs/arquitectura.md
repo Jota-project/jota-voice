@@ -11,19 +11,19 @@ Huawei P8 Lite (LineageOS 18.1) como satélite de voz en Home Assistant, usando 
 | Servicio | Host | Puerto | Estado | Descripción |
 |---|---|---|---|---|
 | **wyoming-satellite** | <IP_TELEFONO> (teléfono) | 10700 | ✅ | Captura micrófono, Wyoming Protocol |
-| **wyoming-openwakeword** | worker-01.local (Docker) | 10400 | ✅ | Wake word "ok nabu" |
-| **Home Assistant** | worker-01.local | 8123 | ✅ | Orquestador domótico, detecta el satélite |
-| **nginx** | green-house | 80 / 443 | ✅ | Proxy inverso único para todos los servicios |
-| **OpenClaw gateway** | green-house | 18789 | ✅ | Cerebro del asistente. WebSocket propietario. Solo loopback. |
-| **jota-transcriber** | green-house | 8003 | ✅ | STT C++/whisper.cpp |
-| **jota_db_api** | green-house | 8002 | ✅ | API BD conversacional |
-| **jota-gateway (BFF)** | green-house | 8004 | ⚠️ | BFF — será el bridge OpenClaw↔OpenAI REST |
-| **jota-speaker** | green-house | 8005 | ❌ | TTS streaming (parado) |
-| **Ollama** | green-house | 11434 | ✅ | LLM local. Modelos: Qwen3.5-4B (x2) |
+| **wyoming-openwakeword** | mi-asistente.local (Docker) | 10400 | ✅ | Wake word "ok nabu" |
+| **Home Assistant** | mi-asistente.local | 8123 | ✅ | Orquestador domótico, detecta el satélite |
+| **nginx** | mi-servidor | 80 / 443 | ✅ | Proxy inverso único para todos los servicios |
+| **OpenClaw gateway** | mi-servidor | 18789 | ✅ | Cerebro del asistente. WebSocket propietario. Solo loopback. |
+| **jota-transcriber** | mi-servidor | 8003 | ✅ | STT C++/whisper.cpp |
+| **jota_db_api** | mi-servidor | 8002 | ✅ | API BD conversacional |
+| **jota-gateway (BFF)** | mi-servidor | 8004 | ⚠️ | BFF — será el bridge OpenClaw↔OpenAI REST |
+| **jota-speaker** | mi-servidor | 8005 | ❌ | TTS streaming (parado) |
+| **Ollama** | mi-servidor | 11434 | ✅ | LLM local. Modelos: Qwen3.5-4B (x2) |
 | **Google Home Mini** | <IP_ALTAVOZ> | — | ✅ | Altavoz Cast (en HA) |
 
-> **green-house** = <IP_SERVIDOR> (IP dinámica, DNS local resuelve `green-house`)  
-> Acceso externo vía Cloudflare Tunnel → `green-house.mi-dominio.com`
+> **mi-servidor** = <IP_SERVIDOR> (IP dinámica, DNS local resuelve `mi-servidor`)  
+> Acceso externo vía Cloudflare Tunnel → `mi-servidor.mi-dominio.com`
 
 ---
 
@@ -34,18 +34,18 @@ Huawei P8 Lite (LineageOS 18.1) como satélite de voz en Home Assistant, usando 
   wyoming-satellite :10700
        │ Wyoming Protocol
        ▼
-[worker-01.local]
+[mi-asistente.local]
   Home Assistant :8123
        │ Assist pipeline
-       ├──► STT  ──► http://green-house/api/stt/
+       ├──► STT  ──► http://mi-servidor/api/stt/
        │              └── nginx → jota-transcriber :8003
        │
-       ├──► LLM  ──► http://green-house/api/openclaw/v1/chat/completions  ← PENDIENTE bridge
+       ├──► LLM  ──► http://mi-servidor/api/openclaw/v1/chat/completions  ← PENDIENTE bridge
        │              └── nginx → OpenClaw :18789 (hoy solo WS, necesita bridge)
        │
        └──► TTS  ──► jota-speaker :8005 (parado) / ElevenLabs / HA built-in
 
-[green-house - <IP_SERVIDOR>]
+[mi-servidor - <IP_SERVIDOR>]
   nginx :80 / :443 → proxy inverso
   OpenClaw gateway :18789 (loopback)
   jota-transcriber :8003 (0.0.0.0)
@@ -57,7 +57,7 @@ Huawei P8 Lite (LineageOS 18.1) como satélite de voz en Home Assistant, usando 
 
 ## Proxy inverso nginx
 
-Un solo punto de entrada en green-house. Rutas definidas en `/etc/nginx/includes/api-locations.conf`, incluido en bloques HTTP (`:80`) y HTTPS (`:443`).
+Un solo punto de entrada en mi-servidor. Rutas definidas en `/etc/nginx/includes/api-locations.conf`, incluido en bloques HTTP (`:80`) y HTTPS (`:443`).
 
 | Ruta | Puerto interno | Servicio |
 |---|---|---|
@@ -81,17 +81,17 @@ Ver detalle en [`nginx.md`](nginx.md).
 
 ```
 1. "ok nabu"
-   └── wyoming-openwakeword (worker-01) detecta wake word
+   └── wyoming-openwakeword (mi-asistente) detecta wake word
 
 2. HA envía RunPipeline al satélite
    └── wyoming-satellite captura audio PCM
 
 3. STT
-   └── HA → POST http://green-house/api/stt/v1/audio/transcriptions
+   └── HA → POST http://mi-servidor/api/stt/v1/audio/transcriptions
        └── jota-transcriber devuelve texto
 
 4. LLM
-   └── HA → POST http://green-house/api/openclaw/v1/chat/completions
+   └── HA → POST http://mi-servidor/api/openclaw/v1/chat/completions
        └── nginx → jota-gateway (bridge) → OpenClaw WebSocket → respuesta
 
 5. TTS
@@ -106,7 +106,7 @@ Ver detalle en [`nginx.md`](nginx.md).
 ## Acceso a OpenClaw
 
 **Desde el Mac (app nativa):** SSH tunnel automático → `localhost:18789`  
-**Desde la LAN (HA, scripts):** `http://green-house/api/openclaw/` (nginx proxy)  
+**Desde la LAN (HA, scripts):** `http://mi-servidor/api/openclaw/` (nginx proxy)  
 **Externo:** no configurado intencionalmente — no necesario
 
 OpenClaw usa protocolo WebSocket propietario con challenge/response.  
@@ -116,11 +116,11 @@ Ver detalles en [`openclaw-integracion.md`](openclaw-integracion.md).
 
 ## Cloudflare Tunnel
 
-Configurado en `/etc/cloudflared/config.yml` en green-house.
+Configurado en `/etc/cloudflared/config.yml` en mi-servidor.
 
 | Hostname | Destino |
 |---|---|
-| `green-house.mi-dominio.com` | `https://127.0.0.1:443` (nginx) |
+| `mi-servidor.mi-dominio.com` | `https://127.0.0.1:443` (nginx) |
 | `ssh.mi-dominio.com` | `ssh://127.0.0.1:22` |
 
 `j.mi-dominio.com` existe en DNS de CF pero no tiene regla en el túnel — no se usa.
