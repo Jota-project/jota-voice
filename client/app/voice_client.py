@@ -491,12 +491,16 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
     )
     _fh.readInBackgroundAndNotify()
 
-    # En Cocoa mode las señales las gestiona exclusivamente el NSFileHandle
-    # observer — el hilo principal no ejecuta bytecode Python, así que un
-    # signal handler clásico nunca se invocaría. Las llamadas a signal.signal()
-    # fueron eliminadas al convertir _handle_os_signal en dead code (issue #104).
+    # Handlers Python no-op para SIGTERM/SIGINT: el trabajo lo hace el
+    # observer de NSFileHandle, pero CPython solo escribe en el wakeup fd si
+    # la señal tiene un handler Python. Con SIG_DFL el SO mataba el proceso
+    # en seco (exit 143) sin apagado ordenado: ni audio.stop() ni cierre del
+    # gateway en "Apagar servicio" o `launchctl stop`.
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(_sig, lambda _signum, _frame: None)
 
     menubar_backend.run_forever()  # bloquea el hilo principal (NSApp.run)
+
     t.join(timeout=10.0)
 
 
