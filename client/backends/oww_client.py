@@ -175,7 +175,7 @@ class OWWClient:
                         None,
                     )
                     if matched:
-                        now = asyncio.get_running_loop().time()
+                        now = self._now()
                         last = self._last_trigger_at.get(matched)
                         if last is not None and (now - last) < self._cfg.debounce_s:
                             log.debug(
@@ -316,6 +316,11 @@ class OWWClient:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _now(self) -> float:
+        """Reloj del debounce. Separado para que los tests puedan usar un
+        reloj falso sin tocar loop.time(), del que depende el scheduler."""
+        return asyncio.get_running_loop().time()
 
     async def _send_json(self, obj: dict) -> None:
         line = json.dumps(obj, separators=(",", ":")) + "\n"

@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from config import AudioConfig, OWWConfig
 from backends.oww_client import OWWClient
@@ -20,30 +20,38 @@ class _EmptyAudio:
         return asyncio.Queue()
 
 
-async def _drop_after_handshake_server(disconnects: list) -> asyncio.base_events.Server:
-    """Servidor Wyoming fake: completa el handshake (detect + audio-start) y
-    cierra la conexión inmediatamente — simula un 'Connection reset' real
-    como el visto en producción con Docker."""
+async def _test_run_forever_aplica_backoff_tras_desconexion_post_conexion() -> None:
+    """Si OWW cierra la conexión justo tras conectar (no un fallo de connect()
+    inicial), run_forever debe esperar el backoff configurado antes de
+    reconectar — no debe entrar en un hot-loop de reconexión sin límite.
+
+    Issue #76: antes medía el tiempo real entre desconexiones (>= 0.35s
+    dentro de una ventana de 2s), frágil con la CPU cargada. Ahora
+    asyncio.sleep se sustituye por uno que registra el delay pedido y cede
+    sin esperar: se comprueba el backoff solicitado, no el reloj."""
+    disconnects: list = []
+    three_disconnects = asyncio.Event()
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await reader.readline()  # detect
         await reader.readline()  # audio-start
-        disconnects.append(asyncio.get_running_loop().time())
+        disconnects.append(len(requested_sleeps))
+        if len(disconnects) >= 3:
+            three_disconnects.set()
         writer.close()
         try:
             await writer.wait_closed()
         except Exception:
             pass
 
-    return await asyncio.start_server(handler, "127.0.0.1", 0)
+    real_sleep = asyncio.sleep
+    requested_sleeps: list = []
 
+    async def fake_sleep(delay: float, *args, **kwargs):
+        requested_sleeps.append(delay)
+        await real_sleep(0)
 
-async def _test_run_forever_aplica_backoff_tras_desconexion_post_conexion() -> None:
-    """Si OWW cierra la conexión justo tras conectar (no un fallo de connect()
-    inicial), run_forever debe esperar el backoff configurado antes de
-    reconectar — no debe entrar en un hot-loop de reconexión sin límite."""
-    disconnects: list = []
-    server = await _drop_after_handshake_server(disconnects)
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
 
     async with server:
@@ -51,59 +59,49 @@ async def _test_run_forever_aplica_backoff_tras_desconexion_post_conexion() -> N
             host="127.0.0.1",
             port=port,
             wake_words=["ok_nabu"],
-            reconnect_backoff_s=[0.2, 0.2],
+            reconnect_backoff_s=[0.2, 0.3],
         )
         client = OWWClient(cfg)
 
         async def _on_wake(_name: str) -> None:
             pass
 
-        task = asyncio.create_task(client.run_forever(_EmptyAudio(), _on_wake))
-        start = asyncio.get_running_loop().time()
-        try:
-            while len(disconnects) < 3 and asyncio.get_running_loop().time() - start < 2.0:
-                await asyncio.sleep(0.01)
-        finally:
-            task.cancel()
+        with patch.object(asyncio, "sleep", fake_sleep):
+            task = asyncio.create_task(client.run_forever(_EmptyAudio(), _on_wake))
             try:
-                await task
-            except asyncio.CancelledError:
-                pass
+                await asyncio.wait_for(three_disconnects.wait(), timeout=5.0)
+            finally:
+                task.cancel()
+                await asyncio.wait([task], timeout=5.0)
 
-        assert len(disconnects) >= 3, f"Esperaba >=3 desconexiones, hubo {len(disconnects)}"
-        elapsed = disconnects[2] - disconnects[0]
-        # Sin backoff, 3 desconexiones ocurren en <50ms (hot-loop). Con el
-        # backoff de 0.2s aplicado entre reconexiones, deben mediar ~0.4s
-        # entre la 1ª y la 3ª desconexión.
-        assert elapsed >= 0.35, (
-            f"Reconectó demasiado rápido tras la desconexión post-conexión "
-            f"(hot-loop sin backoff): {elapsed:.3f}s entre 3 desconexiones"
-        )
+    # Cada reconexión va precedida de su backoff: antes de la 2ª conexión se
+    # pidió 1 sleep y antes de la 3ª, 2. Sin backoff (hot-loop) serían 0.
+    assert disconnects[:3] == [0, 1, 2], (
+        f"Reconectó sin backoff tras la desconexión post-conexión: "
+        f"sleeps pedidos antes de cada conexión = {disconnects[:3]}"
+    )
+    # Escalera de backoff respetada y capada al último valor.
+    assert requested_sleeps[:2] == [0.2, 0.3], requested_sleeps
 
 
 def test_run_forever_aplica_backoff_tras_desconexion_post_conexion() -> None:
     asyncio.run(_test_run_forever_aplica_backoff_tras_desconexion_post_conexion())
 
 
-async def _detection_burst_server(name: str, n_burst: int, gap_s: float) -> asyncio.base_events.Server:
-    """Servidor Wyoming fake: completa el handshake y envía ``n_burst``
-    eventos 'detection' de golpe (sin delay) — simula el comportamiento real
+async def _detection_burst_server(name: str, n_events: int) -> asyncio.base_events.Server:
+    """Servidor Wyoming fake: completa el handshake, envía ``n_events``
+    eventos 'detection' de golpe y cierra — simula el comportamiento real
     de wyoming-openwakeword, que dispara Detection en cada chunk de audio
     por encima del threshold mientras dura la locución, no una vez por
-    locución. Tras ``gap_s`` (mayor que la ventana de debounce bajo prueba),
-    envía un evento más para simular una segunda locución genuina."""
+    locución."""
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await reader.readline()  # detect
         await reader.readline()  # audio-start
 
         line = json.dumps({"type": "detection", "data": {"name": name}}).encode() + b"\n"
-        for _ in range(n_burst):
+        for _ in range(n_events):
             writer.write(line)
-        await writer.drain()
-
-        await asyncio.sleep(gap_s)
-        writer.write(line)
         await writer.drain()
 
         writer.close()
@@ -124,8 +122,15 @@ async def _test_wait_for_detection_ignora_detecciones_duplicadas_de_la_misma_wak
     RECORDING justo tras interrumpir RESPONDING, sin que el usuario haya
     dicho nada nuevo). wait_for_detection debe colapsar una ráfaga de
     detecciones de la misma wake word en una sola, y solo volver a aceptar
-    otra tras la ventana de debounce."""
-    server = await _detection_burst_server("ok_jota", n_burst=5, gap_s=0.2)
+    otra tras la ventana de debounce.
+
+    Issue #76: antes dependía de un gap real de 0.2s en el servidor y de un
+    sleep(0.4) fijo. Ahora el reloj del debounce es falso: cada detección
+    consulta _now() una vez y recibe el siguiente instante del guion, así que
+    el resultado no depende de cuándo llegan los bytes."""
+    # 5 detecciones de la ráfaga (dentro de 0.1s) + 1 locución nueva a 0.25s.
+    script = [0.0, 0.01, 0.02, 0.03, 0.099, 0.25]
+    server = await _detection_burst_server("ok_jota", n_events=len(script))
     port = server.sockets[0].getsockname()[1]
 
     async with server:
@@ -136,6 +141,13 @@ async def _test_wait_for_detection_ignora_detecciones_duplicadas_de_la_misma_wak
             debounce_s=0.1,
         )
         client = OWWClient(cfg)
+        clock = iter(script)
+        accepted_at: list = []
+
+        def _fake_now() -> float:
+            return next(clock)
+
+        client._now = _fake_now  # type: ignore[method-assign]
         await client.connect()
 
         detections: list = []
@@ -145,23 +157,20 @@ async def _test_wait_for_detection_ignora_detecciones_duplicadas_de_la_misma_wak
                 while True:
                     name = await client.wait_for_detection()
                     detections.append(name)
+                    accepted_at.append(client._last_trigger_at[name])
             except ConnectionError:
-                pass  # el servidor fake cierra tras la 2ª detección — esperado
+                pass  # el servidor fake cierra tras la ráfaga — esperado
 
-        task = asyncio.create_task(_collect())
-        try:
-            await asyncio.sleep(0.4)  # ráfaga inicial + gap_s(0.2) + 2ª detección
-        finally:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        # Termina sola cuando el servidor cierra; el timeout es solo red de
+        # seguridad.
+        await asyncio.wait_for(_collect(), timeout=5.0)
+        await client.disconnect()
 
-        assert detections == ["ok_jota", "ok_jota"], (
-            f"Esperaba 2 detecciones (ráfaga colapsada + 2ª tras el gap), "
-            f"hubo {len(detections)}: {detections}"
-        )
+    assert detections == ["ok_jota", "ok_jota"], (
+        f"Esperaba 2 detecciones (ráfaga colapsada + 2ª tras el debounce), "
+        f"hubo {len(detections)}: {detections}"
+    )
+    assert accepted_at == [0.0, 0.25]
 
 
 def test_wait_for_detection_ignora_detecciones_duplicadas_de_la_misma_wake_word() -> None:
@@ -230,6 +239,7 @@ async def _test_audio_start_refleja_rate_y_channels_de_audio_config() -> None:
     async with server:
         client = OWWClient(OWWConfig(host="127.0.0.1", port=port))
         await client.connect()
+        await client.disconnect()
 
     assert len(captured) == 1, f"Esperaba 1 mensaje audio-start, recibí {len(captured)}"
     audio_data = captured[0].get("data", {})
@@ -259,6 +269,7 @@ async def _test_audio_start_refleja_rate_y_channels_personalizados() -> None:
     async with server:
         client = OWWClient(OWWConfig(host="127.0.0.1", port=port), audio_cfg=audio_cfg)
         await client.connect()
+        await client.disconnect()
 
     assert len(captured) == 1, f"Esperaba 1 mensaje audio-start, recibí {len(captured)}"
     audio_data = captured[0].get("data", {})
@@ -290,6 +301,7 @@ async def _test_audio_chunk_refleja_rate_y_channels_de_audio_config() -> None:
         client = OWWClient(OWWConfig(host="127.0.0.1", port=port), audio_cfg=audio_cfg)
         await client.connect()
         await client.send_audio(b"\x00\x01\x02\x03")
+        await client.disconnect()
 
     assert len(captured) == 1, f"Esperaba 1 audio-chunk, recibí {len(captured)}"
     chunk_msg, payload = captured[0]
