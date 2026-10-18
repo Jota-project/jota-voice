@@ -428,9 +428,12 @@ class GatewayClient:
                 self._publish("gateway_status", msg)
                 continue
             if msg_type == "error":
-                err = GatewayHandshakeError(
-                    "error_message", None, str(msg.get("message", msg))
-                )
+                # El `code` del gateway (AUTH_FAILED…) va en el reason: el
+                # atributo .code es el close code WS (issue #113).
+                reason = str(msg.get("message", msg))
+                if msg.get("code"):
+                    reason = f"{msg['code']}: {reason}"
+                err = GatewayHandshakeError("error_message", None, reason)
                 if msg.get("fatal") is True:
                     err.fatal = True
                 raise err

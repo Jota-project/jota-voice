@@ -116,6 +116,12 @@ class _TurnCancelled(Exception):
     """Lanzada cuando cancel_event gana la race en RECORDING o RESPONDING."""
 
 
+def _str_or_empty(value: object) -> str:
+    """str() de un campo del gateway, con JSON null → "" (issue #113: antes
+    un ``"code": null`` llegaba a logs y UI como el texto 'None')."""
+    return "" if value is None else str(value)
+
+
 class _GatewayError(Exception):
     """Error reportado por el gateway mid-turno (issue #18).
 
@@ -448,7 +454,9 @@ async def _recording(
         await playback.play_notification()
     except Exception as exc:
         log.warning("RECORDING: fallo al reproducir notificación (no crítico): %s", exc)
-        bus.publish(VoiceEvent(type="error", data={"message": f"Notificación de audio falló: {exc}"}))
+        bus.publish(VoiceEvent(type="error", data={
+            "code": None, "message": f"Notificación de audio falló: {exc}", "fatal": False,
+        }))
 
     await gateway.send_end()
     bus.publish(VoiceEvent(type="recording_ended", data={}))
@@ -659,8 +667,8 @@ async def _responding(
                 # No publicamos playback_ended ni playback.drain() — el
                 # turno termina con error, no con éxito.
                 raise _GatewayError(
-                    code=str(gw_event.data.get("code", "")),
-                    message=str(gw_event.data.get("message", "")),
+                    code=_str_or_empty(gw_event.data.get("code")),
+                    message=_str_or_empty(gw_event.data.get("message")),
                     fatal=gw_event.data.get("fatal", False),
                 )
 
@@ -771,7 +779,11 @@ def _log_error(state: str, exc: Exception, bus: EventBus) -> None:
     log.error("Error en estado %s: %r", state, exc)
     # str() de algunas excepciones (TimeoutError()) es "": que la UI no
     # muestre un error vacío.
-    bus.publish(VoiceEvent(type="error", data={"message": str(exc) or type(exc).__name__}))
+    # Mismo shape {code, message, fatal} que los errores del gateway (issue
+    # #113); code=None marca un error local (docs/display-protocol.md).
+    bus.publish(VoiceEvent(type="error", data={
+        "code": None, "message": str(exc) or type(exc).__name__, "fatal": False,
+    }))
 
 
 def _log_cancelled(state: str, bus: EventBus) -> None:

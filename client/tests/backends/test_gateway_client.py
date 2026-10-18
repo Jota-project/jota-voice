@@ -1033,3 +1033,20 @@ async def test_cancelar_handshake_no_espera_el_close_lento(ws_connect):
     # _ABORT_CLOSE_S (0.5 s). Margen amplio para no fallar por carga (#76).
     assert loop.time() - t0 < 5.0
     assert aborted, "debe abortar el transporte si el close no termina enseguida"
+
+
+def test_handshake_error_conserva_el_code_del_gateway(ws_connect) -> None:
+    """Issue #113: un `error` antes de `ready` ya no pierde su `code`; va en
+    el reason (el atributo .code sigue siendo el close code WS, aquí None)."""
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
+    ws_mock = make_ws()
+    ws_mock.recv.return_value = json.dumps(
+        {"type": "error", "code": "AUTH_FAILED", "message": "bad key", "fatal": True}
+    )
+    ws_connect(AsyncMock(return_value=ws_mock))
+
+    with pytest.raises(GatewayHandshakeError) as info:
+        asyncio.run(GatewayClient(cfg).connect())
+    assert info.value.code is None
+    assert info.value.reason == "AUTH_FAILED: bad key"
+    assert info.value.fatal is True
