@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-import types
 import warnings
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -45,25 +44,19 @@ from backends.gateway_client import (
 )
 
 
-class _FakeConnectionClosed(Exception):
-    """Stub para ConnectionClosed: el real (websockets.exceptions) requiere
-    frames rcvd/sent en el constructor, demasiado para este test. connect()
-    solo necesita propagar la excepción sin capturarla, así que cualquier
-    subclase de Exception sirve."""
-
-
 class _FakeWS:
-    """WS fake iterable async — basta para probar receive() sin servidor real."""
+    """Async-iterable mínimo que simula los mensajes de un websocket real."""
 
     def __init__(self, messages: list) -> None:
-        self._messages = messages
+        self._messages = list(messages)
 
     def __aiter__(self):
-        return self._gen()
+        return self
 
-    async def _gen(self):
-        for m in self._messages:
-            yield m
+    async def __anext__(self):
+        if not self._messages:
+            raise StopAsyncIteration
+        return self._messages.pop(0)
 
 
 async def _test_receive_separa_header_de_audio_binario() -> None:
@@ -143,21 +136,6 @@ def test_cloudflare_access_headers_con_solo_una_variable(monkeypatch) -> None:
     monkeypatch.setenv("CF_ACCESS_CLIENT_ID", "abc123")
     monkeypatch.delenv("CF_ACCESS_CLIENT_SECRET", raising=False)
     assert _cloudflare_access_headers() == {}
-
-
-class _FakeWS:
-    """Async-iterable mínimo que simula los mensajes de un websocket real."""
-
-    def __init__(self, messages: list) -> None:
-        self._messages = list(messages)
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        if not self._messages:
-            raise StopAsyncIteration
-        return self._messages.pop(0)
 
 
 async def _test_receive_termina_en_turn_end_sin_esperar_done() -> None:

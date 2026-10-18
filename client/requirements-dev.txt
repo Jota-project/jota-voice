@@ -5,3 +5,7 @@ pytest>=8.0
 # >=1.0: la suite no usa el fixture event_loop (eliminado en 1.x).
 pytest-asyncio>=1.0
 pytest-timeout>=2.0
+# Lint de la suite (issue #37): F811 detecta tests/helpers redefinidos que
+# se pisan en silencio (pytest no avisa); F401, imports muertos.
+#   ruff check --select F811,F401 tests/
+ruff>=0.5

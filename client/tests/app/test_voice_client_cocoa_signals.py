@@ -16,7 +16,6 @@ import os
 import signal
 import subprocess
 import sys
-import textwrap
 import time
 
 import pytest

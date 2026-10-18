@@ -557,7 +557,7 @@ async def _test_idle_listener_exception_no_controlada_publica_error():
 
     async def _boom():
         raise RuntimeError("test explosion")
-        yield  # noqa: nunca llega, pero el generador debe ser async
+        yield  # nunca llega, pero el generador debe ser async
 
     gateway.receive = _boom
 
