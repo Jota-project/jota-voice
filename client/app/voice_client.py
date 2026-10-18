@@ -189,6 +189,12 @@ async def main(
     # status previos a ready nunca llegaban al bus en producción.
     gateway = GatewayClient(cfg.gateway, bus=bus)
 
+    # Suscripciones de los consumidores de UI ANTES del connect inicial: los
+    # `status` previos a `ready` se publican durante gateway.connect(), antes
+    # de que arranquen sus tasks, y sin esto se perdían.
+    menubar_events = bus.subscribe()
+    display_events = bus.subscribe()
+
     # --- Issue #24/#118: sesión persistente ---
     # Conexión eager al arrancar. Si falla NO se aborta (antes sí): con la
     # red aún no lista al iniciar sesión, launchd/Termux relanzaban el
@@ -255,6 +261,8 @@ async def main(
             await gateway.disconnect()  # no dejar la sesión eager abierta
         except Exception:
             pass
+        await menubar_events.aclose()
+        await display_events.aclose()
         return
     log.info("AudioCapture iniciado")
 
@@ -316,7 +324,8 @@ async def main(
     menubar_backend.set_commands(cmds)
 
     menubar_task = asyncio.create_task(
-        menubar_client.run(bus, ui_queue, pause_event, loop, stop_event), name="menubar"
+        menubar_client.run(bus, ui_queue, pause_event, loop, stop_event, menubar_events),
+        name="menubar",
     )
 
     # --- Task background permanente: OWW (pausable) ---
@@ -325,7 +334,7 @@ async def main(
     )
 
     # --- Task background permanente: DisplayClient ---
-    display_task = asyncio.create_task(display.run(bus), name="display")
+    display_task = asyncio.create_task(display.run(bus, display_events), name="display")
 
     # --- Task principal: StateMachine ---
     sm_task = asyncio.create_task(

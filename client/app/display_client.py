@@ -51,9 +51,14 @@ class DisplayClient:
     def __init__(self, backend) -> None:
         self._backend = backend
 
-    async def run(self, bus: EventBus) -> None:
-        """Loop suscrito al bus. Se cancela externamente (asyncio.CancelledError)."""
-        async for event in bus.subscribe():
+    async def run(self, bus: EventBus, events=None) -> None:
+        """Loop suscrito al bus. Se cancela externamente (asyncio.CancelledError).
+
+        ``events``: suscripción ya creada con ``bus.subscribe()`` antes de
+        arrancar la task (voice_client lo hace antes del connect inicial para
+        no perder los `status` previos a `ready`). Si es None, se suscribe
+        aquí."""
+        async for event in (events if events is not None else bus.subscribe()):
             if not isinstance(event.data, dict):
                 log.warning("DisplayClient: evento %s con data no dict ignorado", event.type)
                 continue

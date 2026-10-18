@@ -71,19 +71,33 @@ class EventBus:
         for q in self._queues:
             q.put_nowait(event)
 
-    async def subscribe(self) -> AsyncGenerator[VoiceEvent, None]:
+    def subscribe(self) -> "_Subscription":
         """
         Devuelve un iterador async independiente que recibe todos los eventos
-        publicados desde el momento de la suscripción.
+        publicados desde el momento de la LLAMADA (no desde la primera
+        iteración): así un consumidor puede suscribirse antes de que arranque
+        su task y no pierde lo publicado mientras tanto (p.ej. los `status`
+        previos a `ready` del connect inicial).
 
         Uso:
             async for event in bus.subscribe():
                 handle(event)
 
-        Para detener la iteración llama a bus.close() o usa una tarea cancelable.
+        Para detener la iteración llama a bus.close() o usa una tarea
+        cancelable; ``aclose()`` retira la suscripción aunque no se haya
+        llegado a iterar.
         """
         q: asyncio.Queue[VoiceEvent | None] = asyncio.Queue()
         self._queues.append(q)
+        return _Subscription(self, q)
+
+    def _unsubscribe(self, q: asyncio.Queue) -> None:
+        try:
+            self._queues.remove(q)
+        except ValueError:
+            pass
+
+    async def _iterate(self, q: asyncio.Queue) -> AsyncGenerator[VoiceEvent, None]:
         try:
             while True:
                 event = await q.get()
@@ -92,9 +106,33 @@ class EventBus:
                     break
                 yield event
         finally:
-            self._queues.remove(q)
+            self._unsubscribe(q)
 
     def close(self) -> None:
         """Envía sentinel None a todos los suscriptores para que terminen limpiamente."""
         for q in self._queues:
             q.put_nowait(None)
+
+
+class _Subscription:
+    """Iterador async de una suscripción ya registrada en el bus.
+
+    Envuelve el generador ``EventBus._iterate`` (que retira la cola en su
+    ``finally`` al terminar, cerrarse o recogerse) y añade que ``aclose()``
+    la retire también si nunca se llegó a iterar.
+    """
+
+    def __init__(self, bus: EventBus, q: asyncio.Queue) -> None:
+        self._bus = bus
+        self._q = q
+        self._gen = bus._iterate(q)
+
+    def __aiter__(self) -> "_Subscription":
+        return self
+
+    async def __anext__(self) -> VoiceEvent:
+        return await self._gen.__anext__()
+
+    async def aclose(self) -> None:
+        await self._gen.aclose()
+        self._bus._unsubscribe(self._q)

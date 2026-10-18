@@ -333,6 +333,72 @@ def test_menubar_stops_after_async_cleanup(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_status_previos_a_ready_del_connect_inicial_llegan_a_display_y_menubar(monkeypatch) -> None:
+    """Hueco de Fase 7: los `status` que el gateway manda antes de `ready`
+    se publican durante el gateway.connect() inicial de main(), antes de que
+    arranquen las tasks de MenubarClient y DisplayClient, y se perdían.
+    Ahora ambos consumidores se suscriben antes del connect."""
+    from app.display_client import DisplayClient
+    from domain.event_bus import VoiceEvent
+
+    display_sent: list[tuple[str, dict]] = []
+    menubar_got: list[str] = []
+
+    class _Display(NullDisplayBackend):
+        def send(self, type: str, data: dict) -> None:
+            display_sent.append((type, data))
+
+    class _Gateway:
+        def __init__(self, cfg, bus=None, **kw) -> None:
+            self._bus = bus
+            self._ws = None
+
+        async def connect(self) -> None:
+            # Como GatewayClient: status previo a ready -> bus.
+            self._bus.publish(VoiceEvent(type="gateway_status",
+                                         data={"service": "transcriber", "state": "unavailable"}))
+
+        async def disconnect(self) -> None:
+            pass
+
+    class _Menubar:
+        def __init__(self, *a, **kw) -> None:
+            pass
+
+        async def run(self, bus, ui_queue, pause_event, loop, stop_event, events=None):
+            async for ev in (events if events is not None else bus.subscribe()):
+                menubar_got.append(ev.type)
+
+    sm_done = asyncio.Event()
+
+    async def _sm(*a, **kw):
+        await asyncio.sleep(0.05)  # deja drenar a los consumidores
+        sm_done.set()
+
+    audio = MagicMock(start=AsyncMock(), stop=AsyncMock())
+    monkeypatch.setattr(registry, "make_audio", lambda cfg: audio)
+    monkeypatch.setattr(registry, "make_oww", lambda cfg, **kw: MagicMock(
+        run_forever=AsyncMock(side_effect=lambda *a: asyncio.Future()), disconnect=AsyncMock()))
+    monkeypatch.setattr(registry, "make_display", lambda cfg, **kw: _Display())
+    monkeypatch.setattr(voice_client, "GatewayClient", _Gateway)
+    monkeypatch.setattr(voice_client, "DisplayClient", DisplayClient)
+    monkeypatch.setattr(voice_client, "MenubarClient", _Menubar)
+    monkeypatch.setattr(voice_client, "sm_run", _sm)
+
+    cfg = _make_cfg()
+    assert cfg.gateway.persistent_session
+    await asyncio.wait_for(
+        voice_client.main(cfg, _SpyMenubarBackend(), external_stop_event=asyncio.Event()),
+        timeout=5.0,
+    )
+    assert sm_done.is_set()
+    assert "gateway_status" in menubar_got
+    healths = [d for t, d in display_sent if t == "health"]
+    assert healths and healths[0]["key"] == "gateway.transcriber"
+    assert healths[0]["level"] == "warning"
+
+
+@pytest.mark.asyncio
 async def test_main_arranca_y_para_el_display_y_su_cancel_llega_a_la_state_machine(monkeypatch) -> None:
     """Fase D: el `cancel` de un display (on_cancel del backend ws) activa el
     mismo cancel_event que recibe la state machine (antes: ControlServer)."""

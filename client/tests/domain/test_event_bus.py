@@ -93,6 +93,29 @@ def test_event_bus() -> None:
     asyncio.run(_run_test())
 
 
+def test_subscribe_registra_al_llamar_no_al_iterar() -> None:
+    """Integración Fase D + Fase 7: los status que llegan antes de `ready`
+    durante el connect inicial se publicaban antes de que los consumidores
+    empezaran a iterar y se perdían. subscribe() registra la cola en el
+    momento de la llamada; aclose() la retira aunque no se haya iterado."""
+
+    async def _run() -> None:
+        bus = EventBus()
+        sub = bus.subscribe()
+        bus.publish(VoiceEvent(type="gateway_status", data={"state": "unavailable"}))
+        ev = await asyncio.wait_for(sub.__anext__(), 1.0)
+        assert ev.type == "gateway_status"
+        await sub.aclose()
+        assert bus._queues == []
+
+        never_iterated = bus.subscribe()
+        assert len(bus._queues) == 1
+        await never_iterated.aclose()
+        assert bus._queues == []
+
+    asyncio.run(_run())
+
+
 def test_voice_event_acepta_tipos_nuevos_issue_24():
     """Issue #24: VoiceEvent admite los tipos nuevos sin mypy complaint."""
     for event_type in ("gateway_ready", "interrupted", "turn_start", "tool_call"):
