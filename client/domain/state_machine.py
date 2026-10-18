@@ -143,8 +143,15 @@ async def _wait_idle(
     evento. Esto permite que OWW siga escuchando durante RECORDING/RESPONDING
     y pueda interrumpir el turno actual.
 
-    Limpia el cancel_event por si quedó seteado de un /cancel externo o de
-    una wake_word recibida mientras estábamos en otro estado.
+    Issue #62 — el turno empieza en el instante en que se consume la wake
+    word: ahí (y solo ahí) se limpia ``cancel_event``. Un cancel anterior (un
+    /cancel pulsado en reposo, o el resto de un turno anterior) no tiene turno
+    al que aplicar y se descarta; uno posterior pertenece al turno nuevo y
+    RECORDING/RESPONDING lo respetan aunque llegue entre estados. Equivale a
+    marcar cada cancel con su instante y compararlo con el inicio del turno,
+    sin cambiar el tipo de ``cancel_event`` (lo comparten el display y
+    voice_client como un asyncio.Event normal) y sin ventana: entre consumir
+    la wake word y limpiar no hay ningún await.
     """
     q = audio.get_queue()
 
@@ -156,14 +163,11 @@ async def _wait_idle(
     if drained:
         log.debug("IDLE: descartados %d frames stale", drained)
 
-    # 2. Limpiar cualquier cancel pendiente
-    cancel_event.clear()
-
-    # 3. Publicar state_changed("idle")
+    # 2. Publicar state_changed("idle")
     bus.publish(VoiceEvent(type="state_changed", data={"state": "idle"}))
     log.info("IDLE: esperando wake_word del bus…")
 
-    # 4. Suscribirse al bus y esperar primer wake_word_detected
+    # 3. Suscribirse al bus y esperar primer wake_word_detected
     timeout_s = cfg.oww.idle_detection_timeout_s
     if timeout_s > 0:
         # Aplicar timeout: si no llega wake_word_detected en `timeout_s`,
@@ -176,6 +180,8 @@ async def _wait_idle(
             )
     else:
         wake_word = await _consume_wake(bus)
+    # 4. Inicio del turno: descartar los cancel anteriores (ver docstring).
+    cancel_event.clear()
     log.info("IDLE: wake word recibido → %r", wake_word)
     return wake_word
 
@@ -203,8 +209,8 @@ async def _recording(
     cfg: Config,
     cancel_event: asyncio.Event,
 ) -> None:
-    cancel_event.clear()
-
+    # Sin cancel_event.clear() (issue #62): lo hace IDLE al consumir la wake
+    # word; un cancel posterior es de este turno y debe respetarse.
     bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": wake_word}))
     bus.publish(VoiceEvent(type="recording_started", data={}))
 
@@ -366,10 +372,9 @@ async def _responding(
     playback: PlaybackEngine,
     cancel_event: asyncio.Event,
 ) -> None:
-    # Limpiar cualquier cancel pendiente del turn anterior o de /cancel
-    # recibido fuera de contexto — si quedó seteado, el wait() siguiente
-    # completaría inmediatamente y abortaría el turn sin reproducir respuesta.
-    cancel_event.clear()
+    # Sin cancel_event.clear() (issue #62): un cancel que llegó al terminar
+    # RECORDING (enviando `end`, durante el beep) es de este turno y debe
+    # cancelarlo; los anteriores al turno ya los descartó IDLE.
     playback_started = False
 
     async def _receive_loop() -> None:

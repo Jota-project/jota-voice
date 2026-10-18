@@ -12,8 +12,8 @@ import pytest
 
 from app.playback_engine import PlaybackEngine
 from backends.audio_base import AudioBackend
-from backends.gateway_client import GatewayClient, GatewayDisconnected
-from config import Config, DeviceConfig, GatewayConfig, OWWConfig
+from backends.gateway_client import GatewayClient, GatewayDisconnected, GatewayEvent
+from config import AudioConfig, Config, DeviceConfig, GatewayConfig, OWWConfig
 from domain import state_machine
 from domain.event_bus import EventBus, VoiceEvent
 
@@ -109,6 +109,132 @@ async def test_wait_idle_retira_su_suscripcion_al_volver(idle_timeout) -> None:
     _wake_soon(bus)
     assert await state_machine._wait_idle(cfg, bus, audio, asyncio.Event()) == "ok_nabu"
     assert bus._queues == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #62: un cancel que llega DURANTE el turno (aunque sea entre RECORDING
+# y RESPONDING) no se pierde; uno de antes de la wake word sí se descarta
+# ---------------------------------------------------------------------------
+
+
+def _turn_audio() -> MagicMock:
+    """Audio con 20 frames de silencio que llegan tras el drain de RECORDING."""
+    audio = MagicMock(spec=AudioBackend)
+    q: asyncio.Queue[bytes] = asyncio.Queue()
+
+    def _preroll() -> bytes:
+        for _ in range(20):
+            q.put_nowait(bytes(2048))
+        return b""
+
+    audio.get_queue.return_value = q
+    audio.get_preroll.side_effect = _preroll
+    audio.is_silence.return_value = True
+    return audio
+
+
+def _turn_cfg() -> Config:
+    cfg = _cfg()
+    cfg.audio = AudioConfig(silence_timeout_s=0.05, recording_timeout_s=5.0)
+    return cfg
+
+
+async def _run_one_turn(bus, gateway, cancel_event, *, on_idle=None) -> list[VoiceEvent]:
+    """Arranca run(), publica la wake word en el primer IDLE (llamando antes a
+    ``on_idle``) y devuelve los eventos hasta el segundo IDLE."""
+    events = bus.subscribe()
+    got: list[VoiceEvent] = []
+    sm = asyncio.create_task(state_machine.run(
+        _turn_cfg(), bus, _turn_audio(), gateway, MagicMock(spec=PlaybackEngine), cancel_event,
+    ))
+    idles = 0
+    try:
+        async with asyncio.timeout(5.0):
+            async for ev in events:
+                got.append(ev)
+                if ev.type == "state_changed" and ev.data.get("state") == "idle":
+                    idles += 1
+                    if idles == 2:
+                        break
+                    if on_idle is not None:
+                        on_idle()
+                    bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
+    finally:
+        await events.aclose()
+        sm.cancel()
+        await asyncio.wait([sm])
+    return got
+
+
+def _respuesta_completa() -> list[GatewayEvent]:
+    return [
+        GatewayEvent(type="transcription", data={"text": "hola"}),
+        GatewayEvent(type="tts_chunk", data={"audio": b"\x01\x00"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_entre_recording_y_responding_cancela_el_turno() -> None:
+    """Antes RESPONDING hacía cancel_event.clear() al entrar: un /cancel que
+    llegaba mientras se enviaba `end` (o sonaba el beep) se perdía y la
+    respuesta se reproducía igualmente."""
+    bus = EventBus()
+    cancel_event = asyncio.Event()
+    gateway = MagicMock(spec=GatewayClient)
+
+    async def _receive():
+        for ev in _respuesta_completa():
+            yield ev
+
+    gateway.receive = _receive
+    gateway.send_end.side_effect = lambda: cancel_event.set()
+
+    got = await _run_one_turn(bus, gateway, cancel_event)
+    types = [e.type for e in got]
+    assert {"type": "cancelled", "state": "RESPONDING"} in [
+        {"type": e.type, **e.data} for e in got if e.type == "cancelled"
+    ], types
+    assert "playback_ended" not in types
+    gateway.send_cancel.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancel_de_antes_de_la_wake_word_no_aborta_el_turno() -> None:
+    bus = EventBus()
+    cancel_event = asyncio.Event()
+    gateway = MagicMock(spec=GatewayClient)
+
+    async def _receive():
+        for ev in _respuesta_completa():
+            yield ev
+
+    gateway.receive = _receive
+    got = await _run_one_turn(bus, gateway, cancel_event, on_idle=cancel_event.set)
+    types = [e.type for e in got]
+    assert "cancelled" not in types, types
+    assert "playback_ended" in types, types
+    gateway.send_cancel.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_recording_y_responding_no_descartan_un_cancel_ya_activo() -> None:
+    bus = EventBus()
+    cancel_event = asyncio.Event()
+    cancel_event.set()
+    gateway, _ = _blocking_gateway()
+    with pytest.raises(state_machine._TurnCancelled):
+        await asyncio.wait_for(
+            state_machine._responding(bus, gateway, MagicMock(spec=PlaybackEngine), cancel_event),
+            1.0,
+        )
+    with pytest.raises(state_machine._TurnCancelled):
+        await asyncio.wait_for(
+            state_machine._recording(
+                "ok_nabu", bus, _turn_audio(), gateway, MagicMock(spec=PlaybackEngine),
+                _turn_cfg(), cancel_event,
+            ),
+            1.0,
+        )
 
 
 # ---------------------------------------------------------------------------
