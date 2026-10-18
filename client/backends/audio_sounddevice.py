@@ -62,21 +62,37 @@ async def _call_off_loop(fn, timeout: float):
     return await asyncio.wait_for(fut, timeout)
 
 
-async def _close_stream(stream, label: str) -> None:
-    """stop() + close() de un stream fuera del loop, cada uno con su try:
-    si stop() falla (dispositivo desaparecido) close() se intenta igual.
+# Streams abandonados porque el driver no respondió a stop()/abort()/close()
+# (M1). Su hilo sigue dentro de PortAudio, y al salir del proceso el atexit
+# de sounddevice (_exit_handler: stop()/close() del último stream con
+# callback y Pa_Terminate) volvería a tocar PortAudio en paralelo: justo la
+# llamada concurrente que se evita aquí. Se guardan para que el apagado
+# pueda saberlo (abandoned_streams()) y, si quiere, salir sin ese atexit.
+_ABANDONED_STREAMS: list = []
 
-    Si stop() no vuelve a tiempo, su hilo sigue dentro de PortAudio y el
-    stream se abandona sin close(): PortAudio no admite llamadas concurrentes
-    sobre el mismo stream y cerrarlo desde otro hilo podría tumbar el
-    proceso en vez de dejar un aviso en el log."""
-    for step in ("stop", "close"):
+
+def abandoned_streams() -> list:
+    """Streams de PortAudio abandonados por un driver colgado (ver M1)."""
+    return list(_ABANDONED_STREAMS)
+
+
+async def _close_stream(stream, label: str, *, first: str = "stop") -> None:
+    """``first`` (stop() o abort()) + close() de un stream fuera del loop,
+    cada uno con su try: si el primero falla (dispositivo desaparecido)
+    close() se intenta igual.
+
+    Si una llamada no vuelve a tiempo, su hilo sigue dentro de PortAudio y
+    el stream se abandona sin más llamadas: PortAudio no admite llamadas
+    concurrentes sobre el mismo stream y cerrarlo desde otro hilo podría
+    tumbar el proceso en vez de dejar un aviso en el log."""
+    for step in (first, "close"):
         try:
             await _call_off_loop(getattr(stream, step), _STREAM_CLOSE_TIMEOUT_S)
         except (TimeoutError, asyncio.TimeoutError):
-            log.warning(
+            _ABANDONED_STREAMS.append(stream)
+            log.error(
                 "SounddeviceBackend.%s %s: timeout (%.1fs), el driver no responde; "
-                "se abandona el stream",
+                "se abandona el stream (el atexit de sounddevice podría colgarse al salir)",
                 label, step, _STREAM_CLOSE_TIMEOUT_S,
             )
             return
@@ -228,10 +244,14 @@ class SounddeviceBackend:
         input_stream, self._input_stream = self._input_stream, None
         output_stream, self._output_stream = self._output_stream, None
         self._out_gen += 1
+        # abort() y no stop() en el apagado (M1): no espera a que se vacíen
+        # los buffers del driver, así que es menos probable que se cuelgue y
+        # deje un stream abandonado. drain() sí usa stop() para no cortar el
+        # final de la respuesta.
         if input_stream is not None:
-            await _close_stream(input_stream, "stop input")
+            await _close_stream(input_stream, "stop input", first="abort")
         if output_stream is not None:
-            await _close_stream(output_stream, "stop output")
+            await _close_stream(output_stream, "stop output", first="abort")
         self._clear_playback()
 
     def _clear_playback(self) -> None:

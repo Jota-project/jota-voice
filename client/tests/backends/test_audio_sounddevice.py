@@ -425,7 +425,7 @@ def test_stop_cierra_los_streams_fuera_del_hilo_del_loop() -> None:
     inp = _stream_mock()
     out = _stream_mock(sd.OutputStream)
     for s in (inp, out):
-        s.stop.side_effect = lambda: threads.append(threading.current_thread())
+        s.abort.side_effect = lambda: threads.append(threading.current_thread())
         s.close.side_effect = lambda: threads.append(threading.current_thread())
     be._input_stream = inp
     be._output_stream = out
@@ -437,7 +437,9 @@ def test_stop_cierra_los_streams_fuera_del_hilo_del_loop() -> None:
     loop_thread = asyncio.run(_run())
 
     for s in (inp, out):
-        s.stop.assert_called_once_with()
+        # M1: en el apagado, abort() (no espera a vaciar buffers) y no stop().
+        s.abort.assert_called_once_with()
+        s.stop.assert_not_called()
         s.close.assert_called_once_with()
     assert len(threads) == 4
     assert all(t is not loop_thread for t in threads)
@@ -448,9 +450,9 @@ def test_stop_cierra_aunque_stop_del_stream_falle() -> None:
     """Antes, si input.stop() lanzaba, input.close() no se llamaba nunca."""
     be = SounddeviceBackend(_cfg())
     inp = _stream_mock()
-    inp.stop.side_effect = sd.PortAudioError("device gone")
+    inp.abort.side_effect = sd.PortAudioError("device gone")
     out = _stream_mock(sd.OutputStream)
-    out.stop.side_effect = sd.PortAudioError("device gone")
+    out.abort.side_effect = sd.PortAudioError("device gone")
     be._input_stream = inp
     be._output_stream = out
 
@@ -467,10 +469,11 @@ def test_stop_no_se_cuelga_si_el_driver_no_vuelve(monkeypatch, caplog) -> None:
     import backends.audio_sounddevice as mod
 
     monkeypatch.setattr(mod, "_STREAM_CLOSE_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(mod, "_ABANDONED_STREAMS", [])  # estado global aislado
     be = SounddeviceBackend(_cfg())
     release = threading.Event()
     inp = _stream_mock()
-    inp.stop.side_effect = lambda: release.wait(5.0)
+    inp.abort.side_effect = lambda: release.wait(5.0)
     out = _stream_mock(sd.OutputStream)
     be._input_stream = inp
     be._output_stream = out
@@ -485,9 +488,11 @@ def test_stop_no_se_cuelga_si_el_driver_no_vuelve(monkeypatch, caplog) -> None:
     # El stream colgado se abandona: su hilo sigue dentro de PortAudio y un
     # close() concurrente sobre el mismo stream no es seguro.
     inp.close.assert_not_called()
-    out.stop.assert_called_once_with()
+    out.abort.assert_called_once_with()
     out.close.assert_called_once_with()
     assert be._play_q.empty()
+    # M1: el stream colgado queda marcado (choca con el atexit de sounddevice).
+    assert inp in mod.abandoned_streams()
     assert any("timeout" in r.getMessage().lower() for r in caplog.records)
 
 
@@ -678,3 +683,15 @@ def test_callback_de_stream_antiguo_emite_silencio_y_no_consume(fake_sounddevice
 
     new_cb(out, 4, None, None)
     assert list(out.ravel()) == [1, 2, 3, 4]
+
+
+def test_drain_sigue_usando_stop_para_no_cortar_el_final() -> None:
+    """drain() quiere que suene lo que queda en el buffer: stop(), no abort()."""
+    be = SounddeviceBackend(_cfg())
+    out = _stream_mock(sd.OutputStream)
+    be._output_stream = out
+
+    asyncio.run(be.drain())
+
+    out.stop.assert_called_once_with()
+    out.abort.assert_not_called()
