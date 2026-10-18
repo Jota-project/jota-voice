@@ -405,3 +405,163 @@ def test_out_callback_no_usa_el_lock_del_preroll() -> None:
         be._out_callback(outdata, frames, None, None)
 
     assert list(outdata.ravel()) == [1, 2, 3, 4]
+
+
+# --- issue #87: stop() no debe bloquear el loop de asyncio ---------------
+#
+# Y, de paso, fallos parciales: ningún camino de error deja un stream de
+# PortAudio abierto.
+
+
+def _stream_mock(cls=None):
+    return create_autospec(cls or sd.InputStream, instance=True)
+
+
+def test_stop_cierra_los_streams_fuera_del_hilo_del_loop() -> None:
+    """Issue #87: stop()/close() de PortAudio pueden colgarse (Bluetooth que
+    se desconecta a media reproducción); no pueden correr en el hilo del loop."""
+    be = SounddeviceBackend(_cfg())
+    threads: list[threading.Thread] = []
+    inp = _stream_mock()
+    out = _stream_mock(sd.OutputStream)
+    for s in (inp, out):
+        s.stop.side_effect = lambda: threads.append(threading.current_thread())
+        s.close.side_effect = lambda: threads.append(threading.current_thread())
+    be._input_stream = inp
+    be._output_stream = out
+
+    async def _run() -> threading.Thread:
+        await be.stop()
+        return threading.current_thread()
+
+    loop_thread = asyncio.run(_run())
+
+    for s in (inp, out):
+        s.stop.assert_called_once_with()
+        s.close.assert_called_once_with()
+    assert len(threads) == 4
+    assert all(t is not loop_thread for t in threads)
+    assert be._input_stream is None and be._output_stream is None
+
+
+def test_stop_cierra_aunque_stop_del_stream_falle() -> None:
+    """Antes, si input.stop() lanzaba, input.close() no se llamaba nunca."""
+    be = SounddeviceBackend(_cfg())
+    inp = _stream_mock()
+    inp.stop.side_effect = sd.PortAudioError("device gone")
+    out = _stream_mock(sd.OutputStream)
+    out.stop.side_effect = sd.PortAudioError("device gone")
+    be._input_stream = inp
+    be._output_stream = out
+
+    asyncio.run(be.stop())
+
+    inp.close.assert_called_once_with()
+    out.close.assert_called_once_with()
+    assert be._input_stream is None and be._output_stream is None
+
+
+def test_stop_no_se_cuelga_si_el_driver_no_vuelve(monkeypatch, caplog) -> None:
+    """Un driver colgado no debe impedir el apagado: stop() se rinde tras un
+    timeout acotado, lo loguea y sigue con el resto."""
+    import backends.audio_sounddevice as mod
+
+    monkeypatch.setattr(mod, "_STREAM_CLOSE_TIMEOUT_S", 0.01)
+    be = SounddeviceBackend(_cfg())
+    release = threading.Event()
+    inp = _stream_mock()
+    inp.stop.side_effect = lambda: release.wait(5.0)
+    out = _stream_mock(sd.OutputStream)
+    be._input_stream = inp
+    be._output_stream = out
+    be._play_q.put(b"\x00\x00")
+
+    try:
+        with caplog.at_level("WARNING", logger=mod.__name__):
+            asyncio.run(asyncio.wait_for(be.stop(), timeout=5.0))
+    finally:
+        release.set()
+
+    # El stream colgado se abandona: su hilo sigue dentro de PortAudio y un
+    # close() concurrente sobre el mismo stream no es seguro.
+    inp.close.assert_not_called()
+    out.stop.assert_called_once_with()
+    out.close.assert_called_once_with()
+    assert be._play_q.empty()
+    assert any("timeout" in r.getMessage().lower() for r in caplog.records)
+
+
+def test_drain_soporta_stop_concurrente() -> None:
+    """drain() leía self._output_stream tras cada await: un stop() concurrente
+    lo ponía a None entre medias (AttributeError sobre None)."""
+    be = SounddeviceBackend(_cfg())
+    out = _stream_mock(sd.OutputStream)
+    be._output_stream = out
+
+    async def _run() -> None:
+        await asyncio.gather(be.drain(), be.stop())
+
+    asyncio.run(_run())
+
+    out.stop.assert_called_once_with()
+    out.close.assert_called_once_with()
+    assert be._output_stream is None
+
+
+def test_start_cierra_el_stream_si_start_del_stream_falla(monkeypatch, fake_sounddevice) -> None:
+    """Fallo parcial: InputStream() se crea pero .start() lanza. Cada reintento
+    dejaba un stream de PortAudio abierto (el dispositivo seguía ocupado)."""
+    streams: list = []
+
+    def make_input_stream(**_kwargs):
+        s = _stream_mock()
+        if len(streams) < 2:
+            s.start.side_effect = sd.PortAudioError("busy")
+        streams.append(s)
+        return s
+
+    fake_sounddevice.InputStream.side_effect = make_input_stream
+    _no_wait_sleep(monkeypatch)
+
+    be = SounddeviceBackend(_cfg())
+    asyncio.run(be.start())
+
+    assert len(streams) == 3
+    for failed in streams[:2]:
+        failed.close.assert_called_once_with()
+    streams[2].close.assert_not_called()
+    assert be._input_stream is streams[2]
+
+
+def test_start_sin_backoff_cierra_el_stream_si_start_falla(fake_sounddevice) -> None:
+    s = _stream_mock()
+    s.start.side_effect = sd.PortAudioError("busy")
+    fake_sounddevice.InputStream.return_value = s
+
+    be = SounddeviceBackend(_cfg(start_retry_backoff_s=[]))
+    with pytest.raises(sd.PortAudioError):
+        asyncio.run(be.start())
+
+    s.close.assert_called_once_with()
+    assert be._input_stream is None
+
+
+def test_ensure_output_stream_no_guarda_un_stream_que_no_arranco(fake_sounddevice) -> None:
+    """Fallo parcial en la salida: se asignaba self._output_stream antes de
+    .start(); si start fallaba, las llamadas siguientes veían "ya hay stream"
+    y la reproducción quedaba en silencio para siempre."""
+    broken = _stream_mock(sd.OutputStream)
+    broken.start.side_effect = sd.PortAudioError("no output device")
+    good = _stream_mock(sd.OutputStream)
+    fake_sounddevice.OutputStream.side_effect = [broken, good]
+
+    be = SounddeviceBackend(_cfg())
+    with pytest.raises(sd.PortAudioError):
+        be._ensure_output_stream()
+
+    broken.close.assert_called_once_with()
+    assert be._output_stream is None
+
+    be._ensure_output_stream()
+    assert be._output_stream is good
+    good.start.assert_called_once_with()

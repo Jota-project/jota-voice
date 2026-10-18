@@ -21,6 +21,83 @@ log = logging.getLogger(__name__)
 
 _TTS_SAMPLE_RATE = 24000  # PCM16 mono del gateway
 
+# Tope de espera por cada stop()/close() de un stream de PortAudio (issue
+# #87). Un driver colgado (Bluetooth desconectado a media reproducción) no
+# debe bloquear el loop ni impedir el apagado: pasado este tiempo se loguea
+# y se sigue. Constante de módulo, no clave de config.
+_STREAM_CLOSE_TIMEOUT_S = 2.0
+
+
+async def _call_off_loop(fn, timeout: float):
+    """Ejecuta ``fn()`` en un hilo daemon propio y espera como mucho ``timeout``.
+
+    No se usa el executor por defecto a propósito: un hilo colgado en el
+    driver se quedaría en ese pool y ``asyncio.run`` lo espera al salir
+    (``shutdown_default_executor``), así que el apagado se colgaría igual.
+    Un hilo daemon no retiene la salida del proceso. Lanza TimeoutError si
+    ``fn`` no vuelve a tiempo, o la excepción de ``fn``."""
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future = loop.create_future()
+
+    def _resolve(exc: BaseException | None, result) -> None:
+        if fut.done():
+            return
+        if exc is not None:
+            fut.set_exception(exc)
+        else:
+            fut.set_result(result)
+
+    def _runner() -> None:
+        try:
+            result, exc = fn(), None
+        except BaseException as e:  # noqa: BLE001 - se reenvía al loop
+            result, exc = None, e
+        try:
+            loop.call_soon_threadsafe(_resolve, exc, result)
+        except RuntimeError:
+            pass  # el loop ya cerró: nadie espera el resultado
+
+    threading.Thread(target=_runner, daemon=True, name="sounddevice-close").start()
+    return await asyncio.wait_for(fut, timeout)
+
+
+async def _close_stream(stream, label: str) -> None:
+    """stop() + close() de un stream fuera del loop, cada uno con su try:
+    si stop() falla (dispositivo desaparecido) close() se intenta igual.
+
+    Si stop() no vuelve a tiempo, su hilo sigue dentro de PortAudio y el
+    stream se abandona sin close(): PortAudio no admite llamadas concurrentes
+    sobre el mismo stream y cerrarlo desde otro hilo podría tumbar el
+    proceso en vez de dejar un aviso en el log."""
+    for step in ("stop", "close"):
+        try:
+            await _call_off_loop(getattr(stream, step), _STREAM_CLOSE_TIMEOUT_S)
+        except (TimeoutError, asyncio.TimeoutError):
+            log.warning(
+                "SounddeviceBackend.%s %s: timeout (%.1fs), el driver no responde; "
+                "se abandona el stream",
+                label, step, _STREAM_CLOSE_TIMEOUT_S,
+            )
+            return
+        except Exception as exc:
+            log.warning("SounddeviceBackend.%s %s: %s", label, step, exc)
+
+
+def _open_and_start(factory, **kwargs):
+    """Crea un stream y lo arranca. Si .start() falla, cierra el stream
+    antes de relanzar: si no, cada intento fallido deja el dispositivo
+    ocupado por un stream de PortAudio huérfano."""
+    stream = factory(**kwargs)
+    try:
+        stream.start()
+    except BaseException:
+        try:
+            stream.close()
+        except Exception as exc:
+            log.warning("SounddeviceBackend: error cerrando stream que no arrancó: %s", exc)
+        raise
+    return stream
+
 
 class SounddeviceBackend:
     """AudioBackend multiplataforma basado en sounddevice.
@@ -102,16 +179,12 @@ class SounddeviceBackend:
         Tras agotar los reintentos se relanza la última excepción."""
         backoff = list(self._cfg.start_retry_backoff_s)
         if not backoff:
-            stream = sd.InputStream(**kwargs)
-            stream.start()
-            return stream
+            return _open_and_start(sd.InputStream, **kwargs)
 
         last_exc: Exception | None = None
         for idx, delay in enumerate(backoff):
             try:
-                stream = sd.InputStream(**kwargs)
-                stream.start()
-                return stream
+                return _open_and_start(sd.InputStream, **kwargs)
             except sd.PortAudioError as exc:
                 last_exc = exc
                 if idx == len(backoff) - 1:
@@ -127,20 +200,15 @@ class SounddeviceBackend:
 
     async def stop(self) -> None:
         self._capture_stop.set()
-        if self._input_stream is not None:
-            try:
-                self._input_stream.stop()
-                self._input_stream.close()
-            except Exception as exc:
-                log.warning("SounddeviceBackend.stop input: %s", exc)
-            self._input_stream = None
-        if self._output_stream is not None:
-            try:
-                self._output_stream.stop()
-                self._output_stream.close()
-            except Exception as exc:
-                log.warning("SounddeviceBackend.stop output: %s", exc)
-            self._output_stream = None
+        # Se sueltan las referencias ANTES de esperar: así un drain()/stop()
+        # concurrente no vuelve a cerrar el mismo stream ni lee un None a
+        # mitad de camino. El cierre va fuera del loop (issue #87).
+        input_stream, self._input_stream = self._input_stream, None
+        output_stream, self._output_stream = self._output_stream, None
+        if input_stream is not None:
+            await _close_stream(input_stream, "stop input")
+        if output_stream is not None:
+            await _close_stream(output_stream, "stop output")
         self._clear_playback()
 
     def _clear_playback(self) -> None:
@@ -205,8 +273,12 @@ class SounddeviceBackend:
         if self._cfg.output_device is not None:
             out_kwargs["device"] = self._cfg.output_device
 
-        self._output_stream = sd.OutputStream(**out_kwargs, callback=self._out_callback)
-        self._output_stream.start()
+        # Solo se guarda si arrancó: antes se asignaba antes de .start() y, si
+        # start fallaba, las llamadas siguientes veían "ya hay stream" y la
+        # reproducción quedaba en silencio para siempre.
+        self._output_stream = _open_and_start(
+            sd.OutputStream, **out_kwargs, callback=self._out_callback
+        )
 
     def _out_callback(self, outdata, frames, time, status) -> None:  # noqa: ARG002
         # IMPORTANTE: este callback corre en el hilo realtime de PortAudio,
@@ -291,18 +363,9 @@ class SounddeviceBackend:
         await asyncio.sleep(duration)
 
     async def drain(self) -> None:
-        if self._output_stream is not None:
-            try:
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, self._output_stream.stop)
-            except Exception as exc:
-                log.warning("SounddeviceBackend.drain stop: %s", exc)
-            try:
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, self._output_stream.close)
-            except Exception as exc:
-                log.warning("SounddeviceBackend.drain close: %s", exc)
-            self._output_stream = None
+        output_stream, self._output_stream = self._output_stream, None
+        if output_stream is not None:
+            await _close_stream(output_stream, "drain")
         self._clear_playback()
 
     def reset(self) -> None:
