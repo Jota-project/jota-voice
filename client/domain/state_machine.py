@@ -38,7 +38,8 @@ import logging
 
 from app.playback_engine import PlaybackEngine
 from backends.audio_base import AudioBackend
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 from backends.gateway_client import (
     GatewayClient,
@@ -114,6 +115,12 @@ class _ResponseDeadline:
 
 class _TurnCancelled(Exception):
     """Lanzada cuando cancel_event gana la race en RECORDING o RESPONDING."""
+
+
+def _str_or_empty(value: object) -> str:
+    """str() de un campo del gateway, con JSON null → "" (issue #113: antes
+    un ``"code": null`` llegaba a logs y UI como el texto 'None')."""
+    return "" if value is None else str(value)
 
 
 class _GatewayError(Exception):
@@ -197,7 +204,7 @@ async def _idle(
     bus: EventBus,
     audio: AudioBackend,
     cancel_event: asyncio.Event,
-    background: Callable[[], Awaitable[None]] | None = None,
+    background: Callable[[], Coroutine[Any, Any, None]] | None = None,
 ) -> str:
     """Envuelve ``_wait_idle`` con una tarea de fondo que solo vive en IDLE.
 
@@ -428,9 +435,9 @@ async def _recording(
             raise _TurnCancelled()
 
         if not capture_task.cancelled():
-            exc = capture_task.exception()
-            if exc is not None:
-                raise exc
+            capture_exc = capture_task.exception()
+            if capture_exc is not None:
+                raise capture_exc
     finally:
         # Issue #21: si la tarea externa fue cancelada durante el wait
         # (SIGTERM durante shutdown), el código de arriba no se ejecuta
@@ -448,7 +455,9 @@ async def _recording(
         await playback.play_notification()
     except Exception as exc:
         log.warning("RECORDING: fallo al reproducir notificación (no crítico): %s", exc)
-        bus.publish(VoiceEvent(type="error", data={"message": f"Notificación de audio falló: {exc}"}))
+        bus.publish(VoiceEvent(type="error", data={
+            "code": None, "message": f"Notificación de audio falló: {exc}", "fatal": False,
+        }))
 
     await gateway.send_end()
     bus.publish(VoiceEvent(type="recording_ended", data={}))
@@ -520,7 +529,8 @@ async def _responding(
 
         while True:
             in_grace = grace_deadline is not None
-            if in_grace:
+            remaining: float | None
+            if grace_deadline is not None:
                 remaining = grace_deadline - clock()
                 if remaining <= 0:
                     return
@@ -659,8 +669,8 @@ async def _responding(
                 # No publicamos playback_ended ni playback.drain() — el
                 # turno termina con error, no con éxito.
                 raise _GatewayError(
-                    code=str(gw_event.data.get("code", "")),
-                    message=str(gw_event.data.get("message", "")),
+                    code=_str_or_empty(gw_event.data.get("code")),
+                    message=_str_or_empty(gw_event.data.get("message")),
                     fatal=gw_event.data.get("fatal", False),
                 )
 
@@ -693,9 +703,10 @@ async def _responding(
             if exc is not None and not isinstance(exc, _TurnCancelled):
                 real_exc = exc
 
-        woke = wake_task in done and wake_task.exception() is None
-        if wake_task in done and not woke:
-            raise wake_task.exception()  # el bus se cerró: no hay turno que seguir
+        wake_exc = wake_task.exception() if wake_task in done else None
+        if wake_exc is not None:
+            raise wake_exc  # el bus se cerró: no hay turno que seguir
+        woke = wake_task in done
 
         if real_exc is not None:
             if cancel_task in done or woke:
@@ -771,7 +782,11 @@ def _log_error(state: str, exc: Exception, bus: EventBus) -> None:
     log.error("Error en estado %s: %r", state, exc)
     # str() de algunas excepciones (TimeoutError()) es "": que la UI no
     # muestre un error vacío.
-    bus.publish(VoiceEvent(type="error", data={"message": str(exc) or type(exc).__name__}))
+    # Mismo shape {code, message, fatal} que los errores del gateway (issue
+    # #113); code=None marca un error local (docs/display-protocol.md).
+    bus.publish(VoiceEvent(type="error", data={
+        "code": None, "message": str(exc) or type(exc).__name__, "fatal": False,
+    }))
 
 
 def _log_cancelled(state: str, bus: EventBus) -> None:
@@ -810,7 +825,7 @@ async def run(
     playback: PlaybackEngine,
     cancel_event: asyncio.Event | None = None,
     *,
-    idle_background: Callable[[], Awaitable[None]] | None = None,
+    idle_background: Callable[[], Coroutine[Any, Any, None]] | None = None,
 ) -> None:
     """Bucle principal IDLE → RECORDING → RESPONDING.
 

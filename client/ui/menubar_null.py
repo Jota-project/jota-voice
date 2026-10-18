@@ -28,3 +28,6 @@ class NullMenubarBackend:
 
     def set_health(self, level: str, text: str) -> None:
         log.debug("NullMenubarBackend: health=%s %r", level, text)
+
+    def set_agent(self, agent: str) -> None:
+        log.debug("NullMenubarBackend: agent=%r", agent)

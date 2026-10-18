@@ -12,10 +12,11 @@ class WyomingBackend:
 
     Funciona con cualquier wyoming-openwakeword (Docker en Mac, venv en Termux).
 
-    Nota: `on_wake_word` se pasa al constructor por compatibilidad con `make_oww`
-    en el registry, pero el callback real se recibe en `run_forever(audio, on_wake_word)`
-    para que el llamador pueda cambiarlo entre invocaciones. Si se construye sin
-    callback, el usuario debe pasarlo en `run_forever`.
+    El callback de wake word se recibe solo en `run_forever(audio, on_wake_word)`
+    (obligatorio, igual que en el Protocol `OwWBackend`). Antes también se
+    aceptaba en el constructor como opcional y se validaba en runtime, pero el
+    único llamador real (voice_client.oww_loop) siempre lo pasa a run_forever:
+    era una rama muerta (issue #90).
 
     `audio_cfg` (issue #14) es la AudioConfig del backend de audio para que el
     OWWClient subyacente declare el rate/channels REALES del micrófono en los
@@ -26,12 +27,10 @@ class WyomingBackend:
     def __init__(
         self,
         cfg: OWWConfig,
-        on_wake_word: Callable[[str], Awaitable[None]] | None = None,
         audio_cfg: Optional[AudioConfig] = None,
         bus=None,
     ) -> None:
         self._cfg = cfg
-        self._default_on_wake = on_wake_word
         # bus: para que OWWClient publique oww_degraded/oww_recovered.
         self._client = OWWClient(cfg, audio_cfg=audio_cfg, bus=bus)
 
@@ -47,8 +46,5 @@ class WyomingBackend:
     async def wait_for_detection(self) -> str:
         return await self._client.wait_for_detection()
 
-    async def run_forever(self, audio, on_wake_word: Callable[[str], Awaitable[None]] | None = None) -> None:
-        cb = on_wake_word if on_wake_word is not None else self._default_on_wake
-        if cb is None:
-            raise ValueError("WyomingBackend.run_forever: on_wake_word es obligatorio")
-        await self._client.run_forever(audio, cb)
+    async def run_forever(self, audio, on_wake_word: Callable[[str], Awaitable[None]]) -> None:
+        await self._client.run_forever(audio, on_wake_word)

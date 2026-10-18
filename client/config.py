@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from collections.abc import MutableMapping
-from typing import Any
+from typing import Any, TypedDict
 
 import yaml
 
@@ -40,7 +40,17 @@ AUDIO_BACKENDS = ("sounddevice", "termux")
 DISPLAY_BACKENDS = ("ws", "http", "null")
 OWW_BACKENDS = ("wyoming",)
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
-_PORT = {"min": 1, "max": 65535}
+
+
+class _Range(TypedDict, total=False):
+    """Límites que aceptan get_int/get_float/_check_range (tipado para mypy:
+    un dict[str, int] desempaquetado podía casar con ``optional: bool``)."""
+    min: float
+    max: float
+    gt: float
+
+
+_PORT: _Range = {"min": 1, "max": 65535}
 # Placeholders de config.example.yaml / .env.local.example sin rellenar
 # (issue #50). Los dos primeros son los que comprueba install.sh en Termux;
 # load_config los aplica en todas las plataformas (p. ej. macOS arrancado por
@@ -366,8 +376,10 @@ class AudioConfig:
     silence_timeout_s: float = 1.5
     recording_timeout_s: float = 15.0
     vad_rms_threshold: float = 200.0
-    input_device: int | None = None
-    output_device: int | None = None
+    # Índice o nombre del dispositivo (sounddevice acepta ambos; ver
+    # _device_index). None = el dispositivo por defecto.
+    input_device: int | str | None = None
+    output_device: int | str | None = None
     backend: str | None = None
     # Reintentos al abrir el stream de captura. PortAudio puede fallar
     # transientemente al abrir un InputStream (device busy, host API no

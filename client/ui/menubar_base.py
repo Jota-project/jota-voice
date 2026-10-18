@@ -20,6 +20,10 @@ class MenubarBackend(Protocol):
         wake word). ``level`` es uno de los ``HEALTH_*``; con
         ``HEALTH_OK`` el texto es "" y el aviso se oculta."""
         ...
+    def set_agent(self, agent: str) -> None:
+        """Agente OpenClaw activo de la sesión (``ready.agent``, issue
+        #111). "" = desconocido (aún sin ``ready``)."""
+        ...
 
 
 # Niveles de set_health(), de menos a más grave.
@@ -95,6 +99,7 @@ class _SharedState:
     listening_paused: bool = False
     health_level: str = HEALTH_OK
     health_text: str = ""
+    agent: str = ""
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def read(self) -> tuple[str, str, int, bool]:
@@ -109,6 +114,14 @@ class _SharedState:
         with self._lock:
             self.health_level = level
             self.health_text = text
+
+    def read_agent(self) -> str:
+        with self._lock:
+            return self.agent
+
+    def set_agent(self, agent: str) -> None:
+        with self._lock:
+            self.agent = agent
 
     def update(
         self,

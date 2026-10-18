@@ -130,8 +130,10 @@ class OWWClient:
             "data": {"rate": self._rate, "width": _DEFAULT_OWW_WIDTH, "channels": self._channels, "timestamp": 0},
             "payload_length": len(pcm_int16),
         }
-        await self._send_json(header)
-        self._writer.write(pcm_int16)
+        # Cabecera + payload en un único write()+drain() (issue #85): el bucle
+        # corre cada ~32 ms y dos drains por chunk serializaban sin motivo.
+        line = json.dumps(header, separators=(",", ":")).encode() + b"\n"
+        self._writer.write(line + pcm_int16)
         await self._writer.drain()
 
     async def wait_for_detection(self) -> str:
@@ -148,9 +150,12 @@ class OWWClient:
         interrumpir RESPONDING. Se ignoran repeticiones de la misma wake
         word dentro de ``cfg.debounce_s`` desde la última aceptada.
         """
+        reader = self._reader
+        if reader is None:
+            raise ConnectionError("OWWClient: no conectado")
         try:
             while True:
-                line = await self._reader.readline()
+                line = await reader.readline()
                 if not line:
                     raise ConnectionError("OWW cerró la conexión")
                 try:
@@ -158,13 +163,13 @@ class OWWClient:
                 except json.JSONDecodeError:
                     continue
                 if msg.get("data_length", 0) > 0:
-                    data_bytes = await self._reader.readexactly(msg["data_length"])
+                    data_bytes = await reader.readexactly(msg["data_length"])
                     try:
                         msg.setdefault("data", {}).update(json.loads(data_bytes))
                     except json.JSONDecodeError:
                         pass
                 if msg.get("payload_length", 0) > 0:
-                    await self._reader.readexactly(msg["payload_length"])
+                    await reader.readexactly(msg["payload_length"])
                 if msg.get("type") == "detection":
                     name = msg.get("data", {}).get("name", "")
                     # OWW envía el path completo del modelo, e.g.
@@ -248,8 +253,6 @@ class OWWClient:
         Diseñado para correr como task background. Si OWW se cae, reconecta
         con backoff y sigue. Termina solo cuando la task es cancelada.
         """
-        import numpy as np  # local import: numpy puede no estar en import path
-
         backoff = list(self._cfg.reconnect_backoff_s)
         consecutive_drops = 0
 
@@ -334,6 +337,8 @@ class OWWClient:
         return asyncio.get_running_loop().time()
 
     async def _send_json(self, obj: dict) -> None:
+        if self._writer is None:
+            raise ConnectionError("OWWClient: no conectado")
         line = json.dumps(obj, separators=(",", ":")) + "\n"
         self._writer.write(line.encode())
         await self._writer.drain()

@@ -3,13 +3,12 @@ import json
 import logging
 import os
 import time
-import warnings
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
-    from domain.event_bus import EventBus
+    from domain.event_bus import EventBus, EventType
 
 import websockets
 import websockets.exceptions
@@ -211,8 +210,11 @@ class GatewayClient:
         cfg: GatewayConfig,
         *,
         bus: Optional["EventBus"] = None,
-        device_id: str | None = None,
     ) -> None:
+        # Sin device_id (issue #83): el handshake documentado en
+        # jota-gateway/docs/client-protocol.md §1 solo admite client_key,
+        # input_mode, output_mode y agent; la identidad del device la da la
+        # client_key. El parámetro estuvo deprecado e ignorado desde #24.
         self._cfg = cfg
         self._bus = bus
         # Atributos poblados tras handshake exitoso (issue #24).
@@ -237,21 +239,6 @@ class GatewayClient:
         self.reported_fatal: GatewayHandshakeError | None = None
         self._last_send_at: float = time.monotonic()
         self._connect_lock = asyncio.Lock()
-        # device_id se mantiene por compat con voice_client.main; se ignora
-        # porque el handshake del gateway no lo contempla (ver
-        # jota-gateway/docs/client-protocol.md §1). Remoción total en una
-        # versión futura cuando todos los call sites estén actualizados.
-        if device_id is not None:
-            warnings.warn(
-                "GatewayClient: device_id se ignora y se eliminará en una "
-                "versión futura (issue #24). El handshake del gateway no "
-                "lo contempla.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            self._legacy_device_id: str | None = device_id
-        else:
-            self._legacy_device_id = None
 
     # ------------------------------------------------------------------
     # Estado de la sesión
@@ -441,9 +428,12 @@ class GatewayClient:
                 self._publish("gateway_status", msg)
                 continue
             if msg_type == "error":
-                err = GatewayHandshakeError(
-                    "error_message", None, str(msg.get("message", msg))
-                )
+                # El `code` del gateway (AUTH_FAILED…) va en el reason: el
+                # atributo .code es el close code WS (issue #113).
+                reason = str(msg.get("message", msg))
+                if msg.get("code"):
+                    reason = f"{msg['code']}: {reason}"
+                err = GatewayHandshakeError("error_message", None, reason)
                 if msg.get("fatal") is True:
                     err.fatal = True
                 raise err
@@ -471,7 +461,7 @@ class GatewayClient:
             "capabilities": self._capabilities,
         })
 
-    def _publish(self, type_: str, data: dict) -> None:
+    def _publish(self, type_: "EventType", data: dict) -> None:
         if self._bus is None:
             return
         from domain.event_bus import VoiceEvent

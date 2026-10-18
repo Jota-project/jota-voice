@@ -1,0 +1,39 @@
+name: typecheck
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: typecheck-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mypy:
+    # Issue #74. ubuntu basta: client/mypy.ini fija platform=darwin, así que
+    # las ramas sys.platform se comprueban igual que en macOS, y pyobjc,
+    # pyaudio y sounddevice (sin stubs) se tratan como Any.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: client/requirements-dev.txt
+
+      - name: Instalar dependencias del typecheck
+        # Solo lo que aporta tipos: mypy + types-PyYAML (requirements-dev) y
+        # las dependencias con tipos propios que importa el cliente
+        # (mismos mínimos que client/requirements.txt y requirements-macos.txt).
+        # pyaudio/sounddevice/pyobjc no hacen falta (ignore_missing_imports).
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r client/requirements-dev.txt "websockets>=14.1" "numpy>=1.26"
+
+      - name: mypy
+        working-directory: client
+        # Config (módulos, exclusiones y pendientes) en client/mypy.ini.
+        run: python -m mypy

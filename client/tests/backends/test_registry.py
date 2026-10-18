@@ -136,7 +136,7 @@ def test_make_display_unknown_backend() -> None:
 
 
 def test_make_oww_wyoming_default() -> None:
-    inst = registry.make_oww(_cfg(), on_wake_word=None)
+    inst = registry.make_oww(_cfg())
     assert inst.__class__.__name__ == "WyomingBackend"
 
 
@@ -147,7 +147,7 @@ def test_make_oww_unknown_backend() -> None:
         oww=OWWConfig(backend="mqtt"),
     )
     with pytest.raises(ConfigError, match="oww backend desconocido"):
-        registry.make_oww(cfg, on_wake_word=None)
+        registry.make_oww(cfg)
 
 
 def test_make_oww_propagate_audio_config_al_owwclient() -> None:
@@ -165,7 +165,7 @@ def test_make_oww_propagate_audio_config_al_owwclient() -> None:
         device=DeviceConfig(id="test"),
         audio=AudioConfig(sample_rate=48000, channels=2),
     )
-    inst = registry.make_oww(cfg, on_wake_word=None)
+    inst = registry.make_oww(cfg)
     assert isinstance(inst, WyomingBackend)
     # WyomingBackend.forwarda a OWWClient en __init__ — lo que el runtime usa
     # es inst._client._rate / inst._client._channels (los valores serializados
@@ -177,6 +177,27 @@ def test_make_oww_propagate_audio_config_al_owwclient() -> None:
     assert inst._client._channels == 2, (
         f"OWWClient._channels esperaba 2 (de cfg.audio), obtuve {inst._client._channels}"
     )
+
+
+def test_wyoming_run_forever_reenvia_el_callback_al_owwclient(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #90: el callback solo entra por run_forever (ya no hay rama de
+    'callback del constructor' validada en runtime) y llega tal cual a OWWClient."""
+    import asyncio
+
+    inst = registry.make_oww(_cfg())
+    seen: list = []
+
+    async def _fake_run_forever(audio, cb) -> None:
+        seen.append((audio, cb))
+
+    monkeypatch.setattr(inst._client, "run_forever", _fake_run_forever)
+
+    async def _on_wake(name: str) -> None:
+        pass
+
+    audio = object()
+    asyncio.run(inst.run_forever(audio, _on_wake))
+    assert seen == [(audio, _on_wake)]
 
 
 def _cfg_with_menubar(enabled: bool = True) -> Config:

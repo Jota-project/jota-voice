@@ -36,6 +36,9 @@ class FakeBackend:
     def set_health(self, level: str, text: str) -> None:
         self.calls.append(("set_health", (level, text)))
 
+    def set_agent(self, agent: str) -> None:
+        self.calls.append(("set_agent", (agent,)))
+
 
 def _run(coro):
     return asyncio.run(coro)
@@ -726,6 +729,19 @@ def test_other_fatal_gateway_error_is_shown():
         "code": "TURN_ERROR", "message": "agente caído", "fatal": True,
     }))
     assert health == [("fatal", "Error grave: agente caído")]
+
+
+def test_gateway_ready_publica_el_agente_activo():
+    """Issue #111: el agente efectivo (ready.agent, resuelto por la cascada
+    del gateway) llega al backend; solo se repinta si cambia."""
+    backend, _ = _health_after(
+        VoiceEvent(type="gateway_ready", data={"session_id": "s", "agent": "jarvis", "capabilities": {}}),
+        VoiceEvent(type="gateway_ready", data={"session_id": "s2", "agent": "jarvis", "capabilities": {}}),
+        VoiceEvent(type="gateway_ready", data={"session_id": "s3", "agent": "main", "capabilities": {}}),
+        VoiceEvent(type="gateway_ready", data={"session_id": "s4", "agent": None, "capabilities": {}}),
+    )
+    agents = [args[0] for name, args in backend.calls if name == "set_agent"]
+    assert agents == ["jarvis", "main", ""]
 
 
 def test_non_fatal_error_does_not_touch_health():

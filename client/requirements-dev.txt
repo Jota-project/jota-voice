@@ -9,3 +9,8 @@ pytest-timeout>=2.0
 # se pisan en silencio (pytest no avisa); F401, imports muertos.
 #   ruff check --select F811,F401 tests/
 ruff>=0.5
+# Typecheck (issue #74). Config en client/mypy.ini; desde client/:
+#   python -m mypy
+# types-PyYAML: stubs de yaml (pyyaml no trae tipos propios).
+mypy>=1.10
+types-PyYAML>=6.0

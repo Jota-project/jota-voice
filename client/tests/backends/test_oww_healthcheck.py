@@ -307,5 +307,5 @@ def test_registry_make_oww_wires_bus_to_oww_client() -> None:
     from backends import registry
 
     bus = EventBus()
-    backend = registry.make_oww(_cfg(), on_wake_word=None, bus=bus)
+    backend = registry.make_oww(_cfg(), bus=bus)
     assert backend._client._bus is bus

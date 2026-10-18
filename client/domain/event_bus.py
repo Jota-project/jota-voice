@@ -18,43 +18,48 @@ from typing import Literal
 log = logging.getLogger(__name__)
 
 
+# Tipos de evento del bus (alias para que los publicadores, p. ej.
+# GatewayClient._publish, puedan tiparse sin repetir la lista).
+EventType = Literal[
+    # Ciclo de vida
+    "wake_word_detected",
+    "recording_started",
+    "recording_ended",
+    # Pipeline de respuesta
+    "transcription_partial",
+    "transcription",
+    "llm_token",
+    "tts_chunk",
+    # Reproducción
+    "playback_started",
+    "playback_ended",
+    # Sistema
+    "state_changed",
+    # Emitido por PlaybackEngine, uno por chunk de TTS: chunk_text,
+    # cumulative_text, duration_s. Consumido por DisplayClient.
+    "display_text_update",
+    # Emitido por el gateway mid-turno (degradación de
+    # orchestrator/transcriber/tts). Estado informativo, el turno
+    # continúa — ver issue #18.
+    "gateway_status",
+    # Issue #24: sesión persistente — gateway_ready se publica al
+    # arrancar, los tres siguientes durante IDLE por el listener.
+    "gateway_ready",
+    "interrupted",
+    "turn_start",
+    "tool_call",
+    "error",
+    "cancelled",
+    # Issue #22: salud del wake word (OWWClient). DisplayClient los
+    # reenvía al display como `health` (parte display de #7).
+    "oww_degraded",
+    "oww_recovered",
+]
+
+
 @dataclass(frozen=True)
 class VoiceEvent:
-    type: Literal[
-        # Ciclo de vida
-        "wake_word_detected",
-        "recording_started",
-        "recording_ended",
-        # Pipeline de respuesta
-        "transcription_partial",
-        "transcription",
-        "llm_token",
-        "tts_chunk",
-        # Reproducción
-        "playback_started",
-        "playback_ended",
-        # Sistema
-        "state_changed",
-        # Emitido por PlaybackEngine, uno por chunk de TTS: chunk_text,
-        # cumulative_text, duration_s. Consumido por DisplayClient.
-        "display_text_update",
-        # Emitido por el gateway mid-turno (degradación de
-        # orchestrator/transcriber/tts). Estado informativo, el turno
-        # continúa — ver issue #18.
-        "gateway_status",
-        # Issue #24: sesión persistente — gateway_ready se publica al
-        # arrancar, los tres siguientes durante IDLE por el listener.
-        "gateway_ready",
-        "interrupted",
-        "turn_start",
-        "tool_call",
-        "error",
-        "cancelled",
-        # Issue #22: salud del wake word (OWWClient). DisplayClient los
-        # reenvía al display como `health` (parte display de #7).
-        "oww_degraded",
-        "oww_recovered",
-    ]
+    type: EventType
     data: dict
     ts: float = field(default_factory=time.monotonic)
 
