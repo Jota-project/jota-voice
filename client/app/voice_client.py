@@ -13,6 +13,7 @@ Uso: python client/app/voice_client.py config.yaml
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import os
 import queue
@@ -21,8 +22,6 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-
-from websockets.exceptions import ConnectionClosedError
 
 _HERE = Path(__file__).resolve().parent.parent  # .../client (voice_client.py ahora vive en client/app/)
 if str(_HERE) not in sys.path:
@@ -84,9 +83,11 @@ def _apply_termux_hosts() -> None:
 _apply_termux_hosts()
 
 from backends import registry
-from backends.gateway_client import GatewayClient
+from backends.gateway_client import GatewayClient, GatewayHandshakeError
 from config import Config, load_config
+from core.aio import cancel_and_wait
 from domain.event_bus import EventBus, VoiceEvent
+from domain.gateway_session import gateway_idle_listener, idle_supervisor
 from domain.state_machine import run as sm_run
 from ui.menubar_base import MenubarCommands
 from ui.menubar_client import MenubarClient
@@ -122,61 +123,45 @@ def _setup_logging(level: str) -> None:
     logging.getLogger("websockets").setLevel(logging.INFO)
 
 
-async def gateway_idle_listener(
-    bus: EventBus,
-    gateway: GatewayClient,
-) -> None:
-    """Issue #24: consume gateway.receive() durante el estado IDLE.
+# gateway_idle_listener vive ahora en domain.gateway_session (se reexporta
+# aquí por compatibilidad). El antiguo _idle_coordinator de main() se ha
+# eliminado: ver domain/gateway_session.py (issue #118).
+__all__ = ["gateway_idle_listener", "main", "oww_loop"]
 
-    Publica al bus los eventos que llegan del gateway mientras el usuario no
-    está hablando. Dispatch:
-      - 'status' → bus.publish(VoiceEvent('gateway_status', data=...))
-      - 'interrupted' / 'turn_start' / 'tool_call' → log + descartar
-        (issue #24 no acciona barge-in sobre push turns — issue separada)
-      - 'ConnectionClosedError' → publica 'gateway_status' extendido con
-        state:'disconnected', marca gateway._ws = None, termina (la
-        reconexión perezosa se hace en el próximo _recording).
-      - otras excepciones no-CancelledError → log.exception + bus.publish
-        'error', termina (patrón #63 para este task específicamente).
 
-    Termina en silencio al recibir 'turn_end' (turno terminó antes de que
-    empezara RESPONDING) o 'ConnectionClosedOK'.
+_OWW_RESTART_DELAY_S = 0.5
+
+
+async def oww_loop(oww, audio, on_wake, pause_event: asyncio.Event) -> None:
+    """Task permanente de OWW, pausable desde el menubar.
+
+    Usa ``cancel_and_wait`` para drenar los hijos: el patrón anterior
+    (``cancel(); try: await t except CancelledError: pass``) se tragaba la
+    cancelación de ESTA tarea si llegaba durante el await, y como el cuerpo
+    es un ``while True`` el apagado se quedaba colgado (cuelgue intermitente
+    de ``test_main_*``, con un ``run_forever`` que retorna al instante).
+    Si ``run_forever`` retorna (no debería: reconecta por dentro), se espera
+    un mínimo antes de relanzarlo para no girar en caliente.
     """
     log = logging.getLogger(__name__)
-    log.info("Gateway: idle_listener arrancado (session=%s)", gateway._session_id)
-    try:
-        gen = gateway.receive()
-        while True:
-            try:
-                ev = await gen.__anext__()
-            except StopAsyncIteration:
-                return
-            except ConnectionClosedError as exc:
-                log.warning("Gateway: idle_listener ve WS cerrado: %s", exc)
-                gateway._ws = None  # marca desconectado para reconexión perezosa
-                bus.publish(VoiceEvent(type="gateway_status", data={"state": "disconnected"}))
-                return
-            if ev.type == "status":
-                # #18 preexistente; el listener solo lo retransmite al bus.
-                bus.publish(VoiceEvent(type="gateway_status", data=ev.data))
-                log.info("IDLE: gateway status → %r", ev.data)
-            elif ev.type in ("interrupted", "turn_start", "tool_call"):
-                # issue #24 scope recortado — log + descartar.
-                log.warning(
-                    "IDLE: gateway evento %r recibido y descartado "
-                    "(fuera de scope #24 — issue separada)", ev.type,
-                )
-            elif ev.type == "turn_end":
-                log.debug("IDLE: turn_end antes de empezar RESPONDING; idle_listener termina")
-                return
-            else:
-                log.debug("IDLE: gateway evento ignorado %r", ev.type)
-    except asyncio.CancelledError:
-        log.debug("Gateway: idle_listener cancelado")
-        raise
-    except Exception as exc:
-        log.exception("Gateway: idle_listener terminó con excepción")
-        bus.publish(VoiceEvent(type="error", data={"message": str(exc)}))
+    while True:
+        if pause_event.is_set():
+            await asyncio.sleep(0.2)
+            continue
+        t = asyncio.create_task(oww.run_forever(audio, on_wake))
+        pause_wait = asyncio.create_task(pause_event.wait())
+        try:
+            await asyncio.wait([t, pause_wait], return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            # Issue #21: drenar siempre los hijos, también si nos cancelan.
+            await cancel_and_wait(t, pause_wait)
+        if t.done() and not t.cancelled():
+            exc = t.exception()
+            log.warning(
+                "OWW run_forever terminó inesperadamente (%s); relanzando en %.1fs",
+                exc or "sin error", _OWW_RESTART_DELAY_S,
+            )
+            await asyncio.sleep(_OWW_RESTART_DELAY_S)
 
 
 async def main(
@@ -197,64 +182,35 @@ async def main(
     audio = registry.make_audio(cfg)
     oww = registry.make_oww(cfg, on_wake_word=_oww_on_wake)
     display_backend = registry.make_display(cfg)
-    gateway = GatewayClient(cfg.gateway, device_id=cfg.device.id)
+    # bus=bus: sin él gateway_ready (session_id, capabilities, #110) y los
+    # status previos a ready nunca llegaban al bus en producción.
+    gateway = GatewayClient(cfg.gateway, bus=bus)
 
-    # --- Issue #24: eager connect en modo persistente ---
-    idle_task_holder: list[asyncio.Task | None] = []
-    coordinator_task: asyncio.Task | None = None
+    # --- Issue #24/#118: sesión persistente ---
+    # Conexión eager al arrancar. Si falla NO se aborta (antes sí): con la
+    # red aún no lista al iniciar sesión, launchd/Termux relanzaban el
+    # proceso en bucle. El supervisor de IDLE reintenta con backoff; un
+    # rechazo fatal (1008, HTTP 401/403) se muestra y no se reintenta solo.
+    idle_background = None
     if cfg.gateway.persistent_session:
         try:
             await gateway.connect()
-        except Exception:
-            log.exception("Eager connect falló al arrancar; abortando")
+        except GatewayHandshakeError as exc:
+            log.error("Gateway: conexión inicial rechazada: %s", exc)
             try:
                 menubar_backend.set_state("error")
-                menubar_backend.set_status_text(
-                    "Error: no se pudo conectar al gateway al arrancar"
-                )
+                menubar_backend.set_status_text(f"Error: {exc}")
             except Exception:
                 log.exception("No se pudo reflejar el error en el menubar")
-            bus.close()
-            return
-        idle_task_holder.append(
-            asyncio.create_task(
-                gateway_idle_listener(bus, gateway),
-                name="gateway_idle",
+        except Exception as exc:
+            log.warning(
+                "Gateway: conexión inicial fallida (%s); se reintentará en segundo plano",
+                exc or type(exc).__name__,
             )
-        )
 
-        # --- Task 9: coordinador que pausa/re-arranca idle_task según estado ---
-        async def _idle_coordinator() -> None:
-            """Sincroniza idle_task con el ciclo de turno usando eventos reales.
-
-            state_machine.py SOLO publica state_changed("idle") — nunca
-            state_changed("recording") ni state_changed("responding").
-            Por eso este coordinator escucha los eventos que SÍ se publican:
-              - recording_started / playback_started → cancel idle_task
-              - playback_ended / cancelled / error       → re-arm idle_task
-            """
-            nonlocal coordinator_task
-            async for ev in bus.subscribe():
-                if ev.type in ("recording_started", "playback_started"):
-                    # Pausar idle_task: cancellarlo (no consume WS durante un turno).
-                    if idle_task_holder[0] is not None and not idle_task_holder[0].done():
-                        idle_task_holder[0].cancel()
-                        try:
-                            await idle_task_holder[0]
-                        except asyncio.CancelledError:
-                            pass
-                        idle_task_holder[0] = None
-                elif ev.type in ("playback_ended", "cancelled", "error"):
-                    # Re-arrancar idle_task si está cancelado o terminado.
-                    if idle_task_holder[0] is None or idle_task_holder[0].done():
-                        idle_task_holder[0] = asyncio.create_task(
-                            gateway_idle_listener(bus, gateway),
-                            name="gateway_idle",
-                        )
-
-        coordinator_task = asyncio.create_task(
-            _idle_coordinator(), name="idle_coordinator"
-        )
+        # Supervisor de la sesión: solo corre en IDLE (lo arranca y lo
+        # cancela state_machine._idle), único lector del socket ahí.
+        idle_background = functools.partial(idle_supervisor, cfg.gateway, bus, gateway)
 
     playback = PlaybackEngine(bus, audio)
     display = DisplayClient(display_backend)
@@ -292,6 +248,10 @@ async def main(
             )
         except Exception:
             log.exception("No se pudo reflejar el error en el menubar")
+        try:
+            await gateway.disconnect()  # no dejar la sesión eager abierta
+        except Exception:
+            pass
         return
     log.info("AudioCapture iniciado")
 
@@ -352,43 +312,9 @@ async def main(
     )
 
     # --- Task background permanente: OWW (pausable) ---
-    async def _oww_loop() -> None:
-        while True:
-            if pause_event.is_set():
-                await asyncio.sleep(0.2)
-                continue
-            t = asyncio.create_task(oww.run_forever(audio, _oww_on_wake))
-            pause_wait = asyncio.create_task(pause_event.wait())
-            try:
-                done, pending = await asyncio.wait(
-                    [t, pause_wait],
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for p in pending:
-                    p.cancel()
-                    try:
-                        await p
-                    except asyncio.CancelledError:
-                        pass
-                t.cancel()
-                try:
-                    await t
-                except asyncio.CancelledError:
-                    pass
-            finally:
-                # Issue #21: si el shutdown cancela _oww_loop desde fuera
-                # (SIGTERM), el código de arriba no se ejecuta pero los tasks
-                # hijos sí. Drenarlos siempre, replicando el patrón del
-                # state_machine (fix _recording/_responding).
-                for task in (t, pause_wait):
-                    if not task.done():
-                        task.cancel()
-                        try:
-                            await task
-                        except asyncio.CancelledError:
-                            pass
-
-    oww_task = asyncio.create_task(_oww_loop(), name="oww_listener")
+    oww_task = asyncio.create_task(
+        oww_loop(oww, audio, _oww_on_wake, pause_event), name="oww_listener"
+    )
 
     # --- Task background permanente: DisplayClient ---
     display_task = asyncio.create_task(display.run(bus), name="display")
@@ -400,7 +326,11 @@ async def main(
 
     # --- Task principal: StateMachine ---
     sm_task = asyncio.create_task(
-        sm_run(cfg, bus, audio, gateway, playback, cancel_event), name="state_machine"
+        sm_run(
+            cfg, bus, audio, gateway, playback, cancel_event,
+            idle_background=idle_background,
+        ),
+        name="state_machine",
     )
 
     stop_task = asyncio.create_task(stop_event.wait(), name="stop_signal")
@@ -415,44 +345,11 @@ async def main(
     finally:
         log.info("Apagando jota-voice…")
 
-        # Task 9: coordinator_task drain ANTES del gather (como idle_task).
-        if coordinator_task is not None:
-            coordinator_task.cancel()
-            try:
-                await coordinator_task
-            except asyncio.CancelledError:
-                pass
-
-        menubar_task.cancel()
-        try:
-            await menubar_task
-        except asyncio.CancelledError:
-            pass
-
-        sm_task.cancel()
-        oww_task.cancel()
-        display_task.cancel()
-        control_task.cancel()
-        stop_task.cancel()
-
-        # return_exceptions no suppresses CancelledError (not a subclass of
-        # Exception in py38+), así que envolvemos en try/except.
-        try:
-            await asyncio.gather(
-                sm_task, oww_task, display_task, control_task, stop_task,
-                return_exceptions=True,
-            )
-        except asyncio.CancelledError:
-            pass
-
-        # idle_task must be drained AFTER gather so gather's CancelledError
-        # doesn't propagate out of the finally before we get to drain it.
-        if idle_task_holder[0] is not None:
-            idle_task_holder[0].cancel()
-            try:
-                await idle_task_holder[0]
-            except asyncio.CancelledError:
-                pass
+        # cancel_and_wait espera a los hijos sin tragarse una cancelación de
+        # main() que llegue durante el apagado (el patrón anterior
+        # `cancel(); try: await t except CancelledError: pass` sí lo hacía).
+        await cancel_and_wait(menubar_task)
+        await cancel_and_wait(sm_task, oww_task, display_task, control_task, stop_task)
 
         await audio.stop()
 
