@@ -30,7 +30,9 @@ class VoiceEvent:
         "playback_ended",
         # Sistema
         "state_changed",
-        "display_text_update",  # emitido por PlaybackEngine, consumido por DisplayClient
+        # Emitido por PlaybackEngine, uno por chunk de TTS: chunk_text,
+        # cumulative_text, duration_s. Consumido por DisplayClient.
+        "display_text_update",
         # Emitido por el gateway mid-turno (degradación de
         # orchestrator/transcriber/tts). Estado informativo, el turno
         # continúa — ver issue #18.
@@ -43,6 +45,10 @@ class VoiceEvent:
         "tool_call",
         "error",
         "cancelled",
+        # Issue #22: salud del wake word (OWWClient). DisplayClient los
+        # reenvía al display como `health` (parte display de #7).
+        "oww_degraded",
+        "oww_recovered",
     ]
     data: dict
     ts: float = field(default_factory=time.monotonic)
