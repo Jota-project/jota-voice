@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import create_autospec
+
+from backends.audio_base import AudioBackend
 
 from domain.event_bus import EventBus, VoiceEvent
 from app.playback_engine import PlaybackEngine
@@ -37,12 +39,9 @@ def _make_engine() -> tuple[PlaybackEngine, EventBus, list[VoiceEvent]]:
 
     bus.publish = capturing_publish  # type: ignore[method-assign]
 
-    # Mock AudioBackend con métodos async
-    audio = MagicMock()
-    audio.play_chunk = AsyncMock()
-    audio.play_notification = AsyncMock()
-    audio.drain = AsyncMock()
-    audio.reset = MagicMock()
+    # AudioBackend con autospec (issue #38): los métodos async son AsyncMock
+    # y una llamada fuera de la interfaz hace fallar el test.
+    audio = create_autospec(AudioBackend, instance=True)
 
     engine = PlaybackEngine(bus=bus, audio=audio)
     return engine, bus, captured

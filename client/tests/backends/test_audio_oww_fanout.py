@@ -17,7 +17,7 @@ de captura.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import create_autospec
 
 from config import AudioConfig, OWWConfig
 from backends.audio_sounddevice import SounddeviceBackend
@@ -63,7 +63,9 @@ async def _test_oww_and_recording_consumers_reciben_todos_los_frames() -> None:
     # envío TCP (send_audio), que no es lo que este test verifica.
     client = OWWClient(OWWConfig())
     sent_to_oww: list[bytes] = []
-    client.send_audio = AsyncMock(side_effect=lambda pcm: sent_to_oww.append(pcm))
+    client.send_audio = create_autospec(  # firma real de send_audio (issue #38)
+        client.send_audio, side_effect=lambda pcm: sent_to_oww.append(pcm)
+    )
 
     send_task = asyncio.create_task(client._send_audio_loop(be))
     try:

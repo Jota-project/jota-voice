@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import warnings
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, create_autospec
 
 import pytest
 
@@ -16,6 +16,8 @@ import pytest
 # sustituye solo durante cada test con el fixture ws_connect (conftest.py).
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 from websockets.frames import Close
+
+from tests.fakes.gateway import FakeWS, FakeWSRaiseAfter, make_ws
 
 
 def _closed_error(code: int | None = None, reason: str = "") -> ConnectionClosedError:
@@ -46,21 +48,6 @@ from backends.gateway_client import (
 )
 
 
-class _FakeWS:
-    """Async-iterable mínimo que simula los mensajes de un websocket real."""
-
-    def __init__(self, messages: list) -> None:
-        self._messages = list(messages)
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        if not self._messages:
-            raise StopAsyncIteration
-        return self._messages.pop(0)
-
-
 async def _test_receive_separa_header_de_audio_binario() -> None:
     """Los frames binarios de jota-gateway llevan [0xA1][turn_seq uint16 BE]
     antes del PCM (protocolo documentado en jota-gateway/docs/client-protocol.md,
@@ -71,7 +58,7 @@ async def _test_receive_separa_header_de_audio_binario() -> None:
     client = GatewayClient(cfg)
     pcm = b"\x01\x02\x03\x04\x05\x06"
     frame = bytes([0xA1, 0x00, 0x01]) + pcm  # turn_seq=1
-    client._ws = _FakeWS([frame])
+    client._ws = FakeWS([frame])
 
     events = [ev async for ev in client.receive()]
 
@@ -86,8 +73,7 @@ async def _test_receive_separa_header_de_audio_binario() -> None:
 async def _test_send_cancel_envia_mensaje() -> None:
     cfg = GatewayConfig(host="127.0.0.1", client_key="test")
     client = GatewayClient(cfg)
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
+    ws_mock = make_ws()
     client._ws = ws_mock
 
     await client.send_cancel()
@@ -166,7 +152,7 @@ async def _test_receive_termina_en_turn_end_sin_esperar_done() -> None:
     al ver turn_end, igual que hace con done."""
     cfg = GatewayConfig(host="127.0.0.1", client_key="test")
     client = GatewayClient(cfg)
-    client._ws = _FakeWS([
+    client._ws = FakeWS([
         json.dumps({"type": "pipeline_event", "stage": "tts_done"}),
         json.dumps({"type": "turn_end", "turn_id": "t-1"}),
         json.dumps({"type": "pipeline_event", "stage": "nunca_deberia_llegar"}),
@@ -196,9 +182,8 @@ def test_receive_termina_en_turn_end_sin_esperar_done() -> None:
 
 async def _test_connect_espera_mensaje_ready_antes_de_retornar(ws_connect) -> None:
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
-    ws_mock.recv = AsyncMock(return_value=json.dumps({"type": "ready"}))
+    ws_mock = make_ws()
+    ws_mock.recv.return_value = json.dumps({"type": "ready"})
     ws_connect(AsyncMock(return_value=ws_mock))
 
     client = GatewayClient(cfg)
@@ -210,9 +195,8 @@ async def _test_connect_espera_mensaje_ready_antes_de_retornar(ws_connect) -> No
 
 async def _test_connect_levanta_si_primer_mensaje_es_error(ws_connect) -> None:
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
-    ws_mock.recv = AsyncMock(return_value=json.dumps({"type": "error", "message": "bad key"}))
+    ws_mock = make_ws()
+    ws_mock.recv.return_value = json.dumps({"type": "error", "message": "bad key"})
     ws_connect(AsyncMock(return_value=ws_mock))
 
     client = GatewayClient(cfg)
@@ -226,9 +210,8 @@ async def _test_connect_levanta_si_primer_mensaje_es_error(ws_connect) -> None:
 
 async def _test_connect_levanta_si_primer_mensaje_tipo_inesperado(ws_connect) -> None:
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
-    ws_mock.recv = AsyncMock(return_value=json.dumps({"type": "transcription"}))
+    ws_mock = make_ws()
+    ws_mock.recv.return_value = json.dumps({"type": "transcription"})
     ws_connect(AsyncMock(return_value=ws_mock))
 
     client = GatewayClient(cfg)
@@ -242,10 +225,8 @@ async def _test_connect_levanta_si_primer_mensaje_tipo_inesperado(ws_connect) ->
 
 async def _test_connect_propagar_connection_closed_si_server_cierra_antes_de_ready(ws_connect) -> None:
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
-    ws_mock.recv = AsyncMock(side_effect=_closed_error(1008, "Clave de cliente invalida o inactiva"))
-    ws_mock.close = AsyncMock()
+    ws_mock = make_ws()
+    ws_mock.recv.side_effect = _closed_error(1008, "Clave de cliente invalida o inactiva")
     ws_connect(AsyncMock(return_value=ws_mock))
 
     client = GatewayClient(cfg)
@@ -274,9 +255,8 @@ async def _test_connect_levanta_timeout_si_server_no_responde_ready(ws_connect) 
         await asyncio.sleep(1.0)
         return json.dumps({"type": "ready"})
 
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
-    ws_mock.recv = _slow_recv
+    ws_mock = make_ws()
+    ws_mock.recv.side_effect = _slow_recv
     ws_connect(AsyncMock(return_value=ws_mock))
 
     client = GatewayClient(cfg)
@@ -295,9 +275,8 @@ async def _test_connect_propagar_json_invalido_en_respuesta_handshake(ws_connect
     'tolerant skip' de receive() — un cambio accidental aquí debe romper este
     test, no degradar silenciosamente."""
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
-    ws_mock.recv = AsyncMock(return_value="<html>502 Bad Gateway</html>")
+    ws_mock = make_ws()
+    ws_mock.recv.return_value = "<html>502 Bad Gateway</html>"
     ws_connect(AsyncMock(return_value=ws_mock))
 
     client = GatewayClient(cfg)
@@ -392,26 +371,6 @@ def test_gateway_client_sin_device_id_sin_warning() -> None:
 # ---------------------------------------------------------------------------
 
 
-class _FakeWSRaiseAfter:
-    """Async-iterable que emite `messages` y luego lanza `exc`.
-
-    Suficiente para probar que receive() distingue ConnectionClosedOK de
-    ConnectionClosedError: el primero debe terminar en silencio, el segundo
-    debe propagar."""
-
-    def __init__(self, messages: list, exc: BaseException) -> None:
-        self._messages = list(messages)
-        self._exc = exc
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        if self._messages:
-            return self._messages.pop(0)
-        raise self._exc
-
-
 async def _test_receive_propagates_connection_closed_error() -> None:
     """Si el servidor cae a mitad de turno (ej. 1006 abnormal closure, 1009
     mensaje >max_size, 1011 internal error), websockets lanza
@@ -425,7 +384,7 @@ async def _test_receive_propagates_connection_closed_error() -> None:
     client = GatewayClient(cfg)
     pcm = b"\x00\x01" * 100
     frame = bytes([0xA1, 0x00, 0x01]) + pcm  # turn_seq=1 + PCM
-    client._ws = _FakeWSRaiseAfter([frame], _closed_error())  # 1006, sin close frame
+    client._ws = FakeWSRaiseAfter([frame], _closed_error())  # 1006, sin close frame
 
     try:
         events = [ev async for ev in client.receive()]
@@ -452,7 +411,7 @@ async def _test_receive_propagates_clean_close_as_disconnected() -> None:
     client = GatewayClient(cfg)
     pcm = b"\x00\x01" * 100
     frame = bytes([0xA1, 0x00, 0x01]) + pcm
-    client._ws = _FakeWSRaiseAfter([frame], _closed_ok(1001, "going away"))
+    client._ws = FakeWSRaiseAfter([frame], _closed_ok(1001, "going away"))
 
     events = []
     with pytest.raises(GatewayDisconnected) as info:
@@ -526,9 +485,8 @@ async def test_connect_parsea_session_id_y_agent_de_ready(ws_connect):
     """Issue #24: connect() extrae session_id, agent y capabilities de ready."""
     from config import GatewayConfig
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
-    ws_mock.recv = AsyncMock(return_value=json.dumps({
+    ws_mock = make_ws()
+    ws_mock.recv.return_value = json.dumps({
         "type": "ready",
         "session_id": "hab_sito:1751289600000",
         "agent": "main",
@@ -536,7 +494,7 @@ async def test_connect_parsea_session_id_y_agent_de_ready(ws_connect):
         "output_mode": ["audio", "text", "status"],
         "requested_capabilities": {"barge_in": True, "tts": True, "transcriber": True},
         "live_capabilities": {"barge_in": True, "tts": False, "transcriber": True},
-    }))
+    })
     ws_connect(AsyncMock(return_value=ws_mock))
 
     client = GatewayClient(cfg)
@@ -554,12 +512,11 @@ async def test_connect_publica_gateway_ready_al_bus(ws_connect):
     from config import GatewayConfig
     from domain.event_bus import EventBus
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
-    ws_mock.recv = AsyncMock(return_value=json.dumps({
+    ws_mock = make_ws()
+    ws_mock.recv.return_value = json.dumps({
         "type": "ready", "session_id": "s-1", "agent": "main",
         "requested_capabilities": {}, "live_capabilities": {},
-    }))
+    })
     ws_connect(AsyncMock(return_value=ws_mock))
 
     bus = EventBus()
@@ -586,12 +543,11 @@ async def test_connect_no_publica_sin_bus(ws_connect):
     """Issue #24: sin bus inyectado, connect() no intenta publicar."""
     from config import GatewayConfig
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
-    ws_mock.recv = AsyncMock(return_value=json.dumps({
+    ws_mock = make_ws()
+    ws_mock.recv.return_value = json.dumps({
         "type": "ready", "session_id": "s-1", "agent": "main",
         "requested_capabilities": {}, "live_capabilities": {},
-    }))
+    })
     ws_connect(AsyncMock(return_value=ws_mock))
 
     client = GatewayClient(cfg)  # bus=None
@@ -602,12 +558,11 @@ def test_connect_handshake_sin_device_id(ws_connect):
     """Issue #24: handshake NO incluye device_id (el gateway lo ignora)."""
     from config import GatewayConfig
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
-    ws_mock.recv = AsyncMock(return_value=json.dumps({
+    ws_mock = make_ws()
+    ws_mock.recv.return_value = json.dumps({
         "type": "ready", "session_id": "s-1", "agent": "main",
         "requested_capabilities": {}, "live_capabilities": {},
-    }))
+    })
     captured_send = []
     ws_mock.send.side_effect = lambda x: captured_send.append(json.loads(x))
     ws_connect(AsyncMock(return_value=ws_mock))
@@ -634,7 +589,7 @@ async def test_receive_rinde_turn_start():
     from config import GatewayConfig
     cfg = GatewayConfig(host="127.0.0.1", client_key="test")
     client = GatewayClient(cfg)
-    client._ws = _FakeWS([json.dumps({
+    client._ws = FakeWS([json.dumps({
         "type": "turn_start", "turn_id": "t-1", "turn_seq": 42,
     })])
 
@@ -652,7 +607,7 @@ async def test_receive_rinde_interrupted():
     from config import GatewayConfig
     cfg = GatewayConfig(host="127.0.0.1", client_key="test")
     client = GatewayClient(cfg)
-    client._ws = _FakeWS([json.dumps({"type": "interrupted"})])
+    client._ws = FakeWS([json.dumps({"type": "interrupted"})])
 
     events = [ev async for ev in client.receive()]
 
@@ -666,7 +621,7 @@ async def test_receive_rinde_tool_call_start_y_result():
     from config import GatewayConfig
     cfg = GatewayConfig(host="127.0.0.1", client_key="test")
     client = GatewayClient(cfg)
-    client._ws = _FakeWS([
+    client._ws = FakeWS([
         json.dumps({
             "type": "tool_call", "turn_id": "t-1", "phase": "start",
             "name": "exec", "tool_call_id": "call-1",
@@ -695,7 +650,7 @@ async def test_current_turn_seq_se_actualiza_con_turn_start_mayor():
     cfg = GatewayConfig(host="127.0.0.1", client_key="test")
     client = GatewayClient(cfg)
     assert client._current_turn_seq == 0
-    client._ws = _FakeWS([json.dumps({
+    client._ws = FakeWS([json.dumps({
         "type": "turn_start", "turn_id": "t-1", "turn_seq": 5,
     })])
 
@@ -712,7 +667,7 @@ async def test_current_turn_seq_ignora_turn_start_menor_o_igual(caplog):
     cfg = GatewayConfig(host="127.0.0.1", client_key="test")
     client = GatewayClient(cfg)
     client._current_turn_seq = 10
-    client._ws = _FakeWS([json.dumps({
+    client._ws = FakeWS([json.dumps({
         "type": "turn_start", "turn_id": "t-2", "turn_seq": 10,
     })])
 
@@ -735,7 +690,7 @@ async def test_tts_chunk_se_descarta_si_turn_seq_menor():
     pcm = b"\x00\x01" * 50
     frame_old = bytes([0xA1, 0x00, 0x05]) + pcm  # turn_seq=5 (anterior)
     frame_new = bytes([0xA1, 0x00, 0x0A]) + pcm  # turn_seq=10 (igual)
-    client._ws = _FakeWS([frame_old, frame_new])
+    client._ws = FakeWS([frame_old, frame_new])
 
     events = [ev async for ev in client.receive()]
 
@@ -752,11 +707,8 @@ async def test_tts_chunk_se_descarta_si_turn_seq_menor():
 
 
 def _ws_with_recv(messages):
-    ws = MagicMock()
-    ws.send = AsyncMock()
-    ws.close = AsyncMock()
-    ws.recv = AsyncMock(side_effect=list(messages))
-    return ws
+    """Socket abierto cuyo recv() entrega `messages` en orden."""
+    return make_ws(recv=messages)
 
 
 _READY = json.dumps({
@@ -870,7 +822,9 @@ def test_handshake_1008_distingue_causa(code, reason, kind, fatal, ws_connect):
 async def test_connect_http_403_es_fatal(ws_connect):
     """Cloudflare Access sin credenciales válidas → HTTP 403 en el upgrade."""
     from websockets.exceptions import InvalidStatus
-    resp = MagicMock(status_code=403)
+    from websockets.http11 import Response
+    resp = create_autospec(Response, instance=True)
+    resp.status_code = 403
     ws_connect(AsyncMock(side_effect=InvalidStatus(resp)))
     with pytest.raises(GatewayHandshakeError) as info:
         await GatewayClient(GatewayConfig(host="h", client_key="k")).connect()
@@ -902,14 +856,12 @@ async def test_ensure_connected_comparte_un_unico_intento(ws_connect):
 @pytest.mark.asyncio
 async def test_connect_cancelado_no_deja_socket_medio_abierto(ws_connect):
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=5.0)
-    ws = MagicMock()
-    ws.send = AsyncMock()
-    ws.close = AsyncMock()
+    ws = make_ws()
 
     async def _never():
         await asyncio.Event().wait()
 
-    ws.recv = _never
+    ws.recv.side_effect = _never
     ws_connect(AsyncMock(return_value=ws))
     client = GatewayClient(cfg)
     t = asyncio.create_task(client.connect())
@@ -924,8 +876,8 @@ async def test_connect_cancelado_no_deja_socket_medio_abierto(ws_connect):
 @pytest.mark.asyncio
 async def test_send_tras_cierre_lanza_gateway_disconnected():
     client = GatewayClient(GatewayConfig(host="h", client_key="k"))
-    ws = MagicMock()
-    ws.send = AsyncMock(side_effect=_closed_error(1013, "client too slow"))
+    ws = make_ws()
+    ws.send.side_effect = _closed_error(1013, "client too slow")
     client._ws = ws
     with pytest.raises(GatewayDisconnected) as info:
         await client.send_audio(b"x")
@@ -940,8 +892,7 @@ async def test_send_tras_cierre_lanza_gateway_disconnected():
 @pytest.mark.asyncio
 async def test_send_keepalive_es_json_ignorado_por_el_gateway():
     client = GatewayClient(GatewayConfig(host="h", client_key="k"))
-    ws = MagicMock()
-    ws.send = AsyncMock()
+    ws = make_ws()
     client._ws = ws
     await client.send_keepalive()
     assert json.loads(ws.send.call_args[0][0]) == {"type": "keepalive"}
@@ -965,7 +916,7 @@ async def test_receive_token_expone_el_texto_como_content():
     pero _receive_loop lee data["content"] (formato antiguo): los tokens
     llegaban vacíos a playback y al bus."""
     client = GatewayClient(GatewayConfig(host="h", client_key="k"))
-    client._ws = _FakeWS([json.dumps({"type": "token", "turn_id": "t-1", "text": "Hola"})])
+    client._ws = FakeWS([json.dumps({"type": "token", "turn_id": "t-1", "text": "Hola"})])
     events = [ev async for ev in client.receive()]
     assert events[0].type == "llm_token"
     assert events[0].data["content"] == "Hola"
@@ -975,8 +926,8 @@ async def test_receive_token_expone_el_texto_como_content():
 @pytest.mark.asyncio
 async def test_cierre_1008_a_mitad_de_sesion_marca_fatal_y_connect_lo_limpia(ws_connect):
     client = GatewayClient(GatewayConfig(host="h", client_key="k", connect_timeout_s=1.0))
-    ws = MagicMock()
-    ws.send = AsyncMock(side_effect=_closed_error(1008, "Agent 'x' not permitted for this client."))
+    ws = make_ws()
+    ws.send.side_effect = _closed_error(1008, "Agent 'x' not permitted for this client.")
     client._ws = ws
     with pytest.raises(GatewayDisconnected):
         await client.send_end()
@@ -993,13 +944,12 @@ async def test_tras_cancel_se_descarta_el_audio_del_turno_cancelado():
     """Revisión Fase R, punto 3: tras cancelar el turno N, sus frames en
     tránsito tienen seq == current y se colaban al principio de N+1."""
     client = GatewayClient(GatewayConfig(host="h", client_key="k"))
-    ws = MagicMock()
-    ws.send = AsyncMock()
+    ws = make_ws()
     client._ws = ws
     client._current_turn_seq = 3
     await client.send_cancel()
     pcm = b"\x00\x01"
-    client._ws = _FakeWS([
+    client._ws = FakeWS([
         bytes([0xA1, 0x00, 0x03]) + pcm,   # turno 3 cancelado, en tránsito
         json.dumps({"type": "turn_start", "turn_id": "t-4", "turn_seq": 4}),
         bytes([0xA1, 0x00, 0x04]) + pcm,
@@ -1028,14 +978,12 @@ async def test_connect_un_unico_deadline_para_abrir_y_handshake(ws_connect):
 
     async def _slow_open(*a, **kw):
         await asyncio.sleep(0.2)
-        ws = MagicMock()
-        ws.send = AsyncMock()
-        ws.close = AsyncMock()
+        ws = make_ws()
 
         async def _never():
             await asyncio.Event().wait()
 
-        ws.recv = _never
+        ws.recv.side_effect = _never
         return ws
 
     ws_connect(_slow_open)
@@ -1052,10 +1000,9 @@ async def test_cancelar_handshake_no_espera_el_close_lento(ws_connect):
     """Revisión Fase R, punto 5: cancelar un handshake hacía await ws.close()
     con el close_timeout por defecto (10 s) y retrasaba RECORDING."""
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=5.0)
-    ws = MagicMock()
-    ws.send = AsyncMock()
+    ws = make_ws()
     aborted = []
-    ws.transport = MagicMock(abort=lambda: aborted.append(True))
+    ws.transport.abort.side_effect = lambda: aborted.append(True)
 
     async def _slow_close():
         await asyncio.sleep(10)
@@ -1063,8 +1010,8 @@ async def test_cancelar_handshake_no_espera_el_close_lento(ws_connect):
     async def _never():
         await asyncio.Event().wait()
 
-    ws.close = _slow_close
-    ws.recv = _never
+    ws.close.side_effect = _slow_close
+    ws.recv.side_effect = _never
     ws_connect(AsyncMock(return_value=ws))
     client = GatewayClient(cfg)
     t = asyncio.create_task(client.connect())

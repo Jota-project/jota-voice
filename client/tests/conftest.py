@@ -9,6 +9,7 @@ Reglas, porque este conftest se carga para TODOS los tests:
 """
 from __future__ import annotations
 
+import inspect
 import sys
 from typing import Any, Callable
 from unittest.mock import MagicMock, create_autospec
@@ -22,11 +23,28 @@ from tests.fakes.audio_modules import FakePyAudio, make_fake_pyaudio
 def ws_connect(monkeypatch: pytest.MonkeyPatch) -> Callable[[Any], Any]:
     """Sustituye ``websockets.connect`` (lo que llama GatewayClient) solo
     durante el test. Uso: ``ws_connect(AsyncMock(return_value=ws))``;
-    devuelve el mismo objeto para poder inspeccionar sus llamadas."""
+    devuelve el mismo objeto para poder inspeccionar sus llamadas.
+
+    Cada llamada se valida contra la firma del ``websockets.connect`` real
+    (issue #38): un kwarg que la librería no conoce acabaría en
+    ``loop.create_connection`` y fallaría en producción, así que aquí
+    también falla."""
     import websockets
 
+    real_sig = inspect.signature(websockets.connect)
+    known = {
+        name for name, p in real_sig.parameters.items()
+        if p.kind is not inspect.Parameter.VAR_KEYWORD
+    }
+
     def _install(connect: Any) -> Any:
-        monkeypatch.setattr(websockets, "connect", connect)
+        async def _checked(*args: Any, **kwargs: Any) -> Any:
+            unknown = set(kwargs) - known
+            assert not unknown, f"websockets.connect() no acepta {sorted(unknown)}"
+            real_sig.bind(*args, **kwargs)
+            return await connect(*args, **kwargs)
+
+        monkeypatch.setattr(websockets, "connect", _checked)
         return connect
 
     return _install

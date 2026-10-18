@@ -6,7 +6,7 @@ is_silence() y get_preroll() con frames sintéticos.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import create_autospec
 
 import numpy as np
 import pytest
@@ -220,8 +220,7 @@ def test_start_retries_on_portaudio_error_then_succeeds(monkeypatch, fake_soundd
     desconectado), start() debe reintentar hasta tener éxito y NO dejar al
     cliente sin captura."""
     attempts = {"n": 0}
-    successful_stream = MagicMock()
-    successful_stream.start = MagicMock(return_value=None)
+    successful_stream = create_autospec(sd.InputStream, instance=True)
 
     def make_input_stream(**_kwargs):
         attempts["n"] += 1
@@ -265,8 +264,7 @@ def test_start_succeeds_on_first_try_normal(monkeypatch, fake_sounddevice) -> No
     """No regresión: si NO hay error, start() debe abrir el stream en el
     primer intento sin reintentos espurios."""
     attempts = {"n": 0}
-    successful_stream = MagicMock()
-    successful_stream.start = MagicMock(return_value=None)
+    successful_stream = create_autospec(sd.InputStream, instance=True)
 
     def make_input_stream(**_kwargs):
         attempts["n"] += 1
