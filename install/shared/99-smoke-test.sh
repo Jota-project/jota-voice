@@ -66,6 +66,13 @@ fi
 # de asumir un host privado del despliegue del usuario.
 OWW_HOST="${OWW_HOST:-127.0.0.1}"
 OWW_PORT="${OWW_PORT:-10401}"
+# Overrides del gateway por entorno, capturados ANTES de inicializar las
+# variables internas (issue #53: antes se hacía GW_HOST="$GW_HOST" después
+# de vaciarlas, un no-op). Nombres: GATEWAY_URL, GATEWAY_HOST, GATEWAY_PORT
+# (GW_HOST/GW_PORT se aceptan por compatibilidad).
+ENV_GW_URL="${GATEWAY_URL:-}"
+ENV_GW_HOST="${GATEWAY_HOST:-${GW_HOST:-}}"
+ENV_GW_PORT="${GATEWAY_PORT:-${GW_PORT:-}}"
 GW_HOST=""
 GW_PORT=""
 GW_URL=""
@@ -128,9 +135,21 @@ fi
 
 # Las variables de entorno tienen prioridad sobre el config (útil para CI o
 # para apuntar el smoke test a otro despliegue sin tocar el config).
-[ -n "${GATEWAY_URL:-}" ]   && GW_URL="$GATEWAY_URL"
-[ -n "${GW_HOST:-}" ]       && GW_HOST="$GW_HOST"
-[ -n "${GW_PORT:-}" ]       && GW_PORT="$GW_PORT"
+# GATEWAY_URL gana a todo; GATEWAY_HOST sustituye también a un gateway.url
+# del config (si no, el override de host nunca se usaría).
+if [ -n "$ENV_GW_URL" ]; then
+    GW_URL="$ENV_GW_URL"
+elif [ -n "$ENV_GW_HOST" ]; then
+    GW_URL=""
+    GW_HOST="$ENV_GW_HOST"
+fi
+[ -n "$ENV_GW_PORT" ] && GW_PORT="$ENV_GW_PORT"
+
+# Modo diagnóstico/test: imprime lo resuelto y sale sin comprobar nada.
+if [ "${JOTA_SMOKE_RESOLVE_ONLY:-0}" = "1" ]; then
+    echo "url=$GW_URL host=$GW_HOST port=$GW_PORT oww=$OWW_HOST:$OWW_PORT"
+    exit 0
+fi
 
 # Si no tenemos ni url ni host+port, fallamos con un mensaje claro
 # indicando dónde se configura — NUNCA asumimos un host privado por defecto.
@@ -273,7 +292,7 @@ fi
 if [ "$GW_OK" = "1" ]; then
     PASSED=$((PASSED+1))
 else
-    _fail "gateway NO reachable en ${GW_HOST}:${GW_PORT}. Comprueba DNS/red/VPN."
+    _fail "gateway NO reachable en ${HTTP_URL}. Comprueba DNS/red/VPN."
 fi
 echo ""
 
@@ -316,7 +335,7 @@ else
     echo "  Revisa los ✗ arriba. Comunes:"
     echo "    - Servicio no cargado → bash install/macos/07-launchd.sh"
     echo "    - Wyoming no responde → sh install/macos/04-oww.sh"
-    echo "    - gateway unreachable → ping ${GW_HOST} o revisa /etc/hosts"
+    echo "    - gateway unreachable → curl -sI ${HTTP_URL} o revisa DNS//etc/hosts"
     echo "════════════════════════════════════════════════════════════"
     exit 1
 fi
