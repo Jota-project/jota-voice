@@ -22,8 +22,11 @@ class PlaybackEngine:
     def __init__(self, bus: EventBus, audio) -> None:
         self._bus = bus
         self._audio = audio
+        # Tokens recibidos desde el último chunk publicado, y texto completo
+        # del turno ya publicado (issue #95: antes se hacía "".join() de
+        # todos los tokens del turno en cada chunk).
         self._text_buffer: list[str] = []
-        self._text_cursor = 0
+        self._full_text = ""
         self._play_lock = asyncio.Lock()
         # Época de reproducción (issue #89). reset() tiene que ser síncrono
         # (state_machine lo llama sin await), así que no puede tomar
@@ -47,12 +50,16 @@ class PlaybackEngine:
         # (docs/display-protocol.md). Se publica ANTES de reproducir para que
         # el reveal empiece cuando empieza a sonar el chunk.
         audio_duration = max(len(audio) / (24000 * 2), 0.001)
-        full_text = "".join(self._text_buffer)
-        chunk_text = full_text[self._text_cursor:]
-        self._text_cursor = len(full_text)
+        # Solo se unen los tokens nuevos. cumulative_text sigue costando
+        # O(longitud del turno) por evento porque el protocolo del display
+        # manda el texto completo en cada uno (docs/display-protocol.md):
+        # ese coste es del protocolo, no de este bucle.
+        chunk_text = "".join(self._text_buffer)
+        self._text_buffer.clear()
+        self._full_text += chunk_text
         self._bus.publish(VoiceEvent(type="display_text_update", data={
             "chunk_text": chunk_text,
-            "cumulative_text": full_text,
+            "cumulative_text": self._full_text,
             "duration_s": audio_duration,
         }))
 
@@ -82,7 +89,7 @@ class PlaybackEngine:
         # sin await entre lectura y escritura, así que no necesita más.
         self._epoch += 1
         self._text_buffer.clear()
-        self._text_cursor = 0
+        self._full_text = ""
         self._audio.reset()
 
     def close(self) -> None:
