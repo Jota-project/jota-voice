@@ -1,0 +1,10 @@
+# Hooks de pre-commit (issue #57). Activación, una vez por clon:
+#   pip install pre-commit && pre-commit install
+# El hook de gitleaks escanea solo lo que está en stage, con .gitleaks.toml.
+# Si ya tienes gitleaks instalado (brew install gitleaks) y no quieres que
+# pre-commit compile el binario con Go, cambia el id a `gitleaks-system`.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks

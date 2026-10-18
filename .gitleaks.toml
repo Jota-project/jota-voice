@@ -1,0 +1,45 @@
+# Configuración de gitleaks (issue #57). Se usa en el hook de pre-commit
+# (.pre-commit-config.yaml) y en el job `secrets` de CI.
+#
+# Reglas por defecto de gitleaks + reglas para los secretos propios de
+# jota-voice que el set por defecto no detecta. Son patrones de FORMA
+# (clave UUID, contraseña con valor), nunca una lista de valores reales:
+# esa lista sería en sí misma la filtración.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "jota-client-key"
+description = "client_key del gateway con valor real (UUID)"
+regex = '''(?i)client_key["']?\s*[:=]\s*["']?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'''
+secretGroup = 1
+keywords = ["client_key"]
+
+[[rules]]
+id = "jota-phone-pass"
+description = "Contraseña SSH del teléfono (devices/*.env) con valor"
+regex = '''PHONE_PASS\s*=\s*["']?([^"'\s$]{4,})'''
+secretGroup = 1
+keywords = ["phone_pass"]
+  [rules.allowlist]
+  regexes = ['''^(CAMBIAR|REDACTED|RELLENAR)$''']
+
+[[rules]]
+id = "jota-cf-access-secret"
+description = "Service Token de Cloudflare Access con valor"
+regex = '''CF_ACCESS_CLIENT_SECRET\s*=\s*["']?([A-Za-z0-9]{20,})'''
+secretGroup = 1
+keywords = ["cf_access_client_secret"]
+
+[allowlist]
+description = "Plantillas y fixtures sin secretos reales"
+regexes = [
+    '''RELLENAR''',
+    '''CHANGE-ME''',
+    '''YOUR_[A-Z_]+''',
+    '''REDACTED''',
+]
+paths = [
+    '''(^|/)\.gitleaks\.toml$''',
+]
