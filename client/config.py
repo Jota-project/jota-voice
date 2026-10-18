@@ -567,7 +567,8 @@ def _oww_from_dict(d: Any, problems: list[str] | None = None) -> OWWConfig:
         ),
         debounce_s=s.get_float("debounce_s", default.debounce_s, min=0),
         oww_healthcheck_threshold=s.get_int(
-            "oww_healthcheck_threshold", default.oww_healthcheck_threshold, min=1
+            # 0 = avisar en el primer fallo
+            "oww_healthcheck_threshold", default.oww_healthcheck_threshold, min=0
         ),
         connect_timeout_s=s.get_float("connect_timeout_s", default.connect_timeout_s, gt=0),
     )
@@ -581,6 +582,10 @@ def _device_index(s: _Section, key: str) -> int | str | None:
     value = s.data.get(key)
     if value is None or isinstance(value, str):
         return value
+    if isinstance(value, int) and not isinstance(value, bool) and value < 0:
+        # -1 no es "el de por defecto" en sounddevice: query_devices(-1) falla.
+        s._bad(key, value, "debe ser un índice >= 0 o un nombre; usa null para el dispositivo por defecto")
+        return None
     return s.get_int(key, None, optional=True, min=0)
 
 
@@ -594,7 +599,8 @@ def _audio_from_dict(d: Any, problems: list[str] | None = None) -> AudioConfig:
         channels=s.get_int("channels", default.channels, min=1),
         frames_per_buffer=s.get_int("frames_per_buffer", default.frames_per_buffer, min=1),
         preroll_seconds=s.get_float("preroll_seconds", default.preroll_seconds, min=0),
-        silence_timeout_s=s.get_float("silence_timeout_s", default.silence_timeout_s, gt=0),
+        # 0 = cortar en el primer frame de silencio (state_machine usa max(1, ...))
+        silence_timeout_s=s.get_float("silence_timeout_s", default.silence_timeout_s, min=0),
         recording_timeout_s=s.get_float(
             "recording_timeout_s", default.recording_timeout_s, gt=0
         ),
@@ -621,12 +627,14 @@ def _display_from_dict(d: Any, problems: list[str] | None = None) -> DisplayConf
         port=s.get_int("port", default.port, **_PORT),
         token_path=s.get_str("token_path", None, optional=True),
         rate_limit_max_requests=s.get_int(
-            "rate_limit_max_requests", default.rate_limit_max_requests, min=1
+            # 0 = 429 al primer token inválido (los válidos no gastan cuota)
+            "rate_limit_max_requests", default.rate_limit_max_requests, min=0
         ),
         rate_limit_window_s=s.get_float(
             "rate_limit_window_s", default.rate_limit_window_s, gt=0
         ),
-        max_clients=s.get_int("max_clients", default.max_clients, min=1),
+        # 0 = rechazar todos los displays (503); para quitarlos, backend "null"
+        max_clients=s.get_int("max_clients", default.max_clients, min=0),
     )
     s.warn_unknown(_field_names(DisplayConfig))
     _finish(problems, own)

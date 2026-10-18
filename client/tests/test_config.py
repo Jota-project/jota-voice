@@ -478,7 +478,6 @@ _OUT_OF_RANGE = [
     ("oww", "backend", "porcupine"),
     ("oww", "debounce_s", -0.5),
     ("oww", "idle_detection_timeout_s", -1),
-    ("oww", "oww_healthcheck_threshold", 0),
     ("oww", "reconnect_backoff_s", []),
     ("oww", "wake_words", []),
     ("oww", "host", ""),
@@ -487,7 +486,6 @@ _OUT_OF_RANGE = [
     ("audio", "channels", 0),
     ("audio", "frames_per_buffer", 0),
     ("audio", "preroll_seconds", -1),
-    ("audio", "silence_timeout_s", 0),
     ("audio", "recording_timeout_s", 0),
     ("audio", "vad_rms_threshold", -50),
     ("audio", "input_device", -1),
@@ -495,9 +493,7 @@ _OUT_OF_RANGE = [
     ("display", "backend", "kiosk"),
     ("display", "timeout_s", 0),
     ("display", "port", 65536),
-    ("display", "rate_limit_max_requests", 0),
     ("display", "rate_limit_window_s", 0),
-    ("display", "max_clients", 0),
     ("logging", "level", "VERBOSE"),
     ("device", "id", ""),
 ]
@@ -509,6 +505,29 @@ def test_valor_fuera_de_rango_da_config_error_con_la_clave(tmp_path, section, ke
     with pytest.raises(ConfigError) as info:
         _load_tmp(tmp_path, _with(section, {key: value}))
     assert f"{section}.{key}" in str(info.value)
+
+
+@pytest.mark.parametrize("section,key,expected", [
+    ("audio", "silence_timeout_s", 0.0),         # corta en el primer frame de silencio
+    ("oww", "oww_healthcheck_threshold", 0),     # avisa en el primer fallo
+    ("display", "max_clients", 0),               # rechaza todos los displays (503)
+    ("display", "rate_limit_max_requests", 0),   # 429 al primer token inválido
+])
+def test_ceros_que_ya_funcionaban_se_siguen_aceptando(tmp_path, section, key, expected) -> None:
+    """Revisión: estos 0 funcionaban (con un significado razonable) antes de
+    la validación y no deben impedir arrancar."""
+    cfg = _load_tmp(tmp_path, _with(section, {key: 0}))
+    assert getattr(getattr(cfg, section), key) == expected
+
+
+@pytest.mark.parametrize("key", ["input_device", "output_device"])
+def test_device_negativo_explica_que_usar(tmp_path, key) -> None:
+    """-1 no es "el de por defecto" en sounddevice (query_devices(-1) falla
+    en PortAudio): el error debe decir que se use null."""
+    from config import ConfigError
+    with pytest.raises(ConfigError) as info:
+        _load_tmp(tmp_path, _with("audio", {key: -1}))
+    assert f"audio.{key}" in str(info.value) and "null" in str(info.value)
 
 
 @pytest.mark.parametrize("value", ["", "   ", None])
