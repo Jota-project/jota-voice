@@ -651,3 +651,30 @@ def test_callback_de_captura_no_escribe_en_el_log(monkeypatch, fake_sounddevice)
 
     be._flush_callback_diagnostics()
     assert any("overflow" in m for _, _, m in spy.calls)
+
+
+# --- M2: el callback de un stream abandonado no compite por la cola -------
+
+
+def test_callback_de_stream_antiguo_emite_silencio_y_no_consume(fake_sounddevice) -> None:
+    """Un stream abandonado en drain()/stop() (driver colgado que revive)
+    seguía leyendo _play_q y competía con el stream nuevo por el audio."""
+    old_stream = _stream_mock(sd.OutputStream)
+    new_stream = _stream_mock(sd.OutputStream)
+    fake_sounddevice.OutputStream.side_effect = [old_stream, new_stream]
+    be = SounddeviceBackend(_cfg())
+
+    be._ensure_output_stream()
+    old_cb = fake_sounddevice.OutputStream.call_args.kwargs["callback"]
+    asyncio.run(be.drain())
+    be._ensure_output_stream()
+    new_cb = fake_sounddevice.OutputStream.call_args.kwargs["callback"]
+
+    be._play_q.put(np.arange(1, 5, dtype=np.int16).tobytes())
+    out = np.ones((4, 1), dtype=np.int16)
+    old_cb(out, 4, None, None)
+    assert np.all(out == 0)
+    assert be._play_q.qsize() == 1, "el stream viejo se comió audio del nuevo"
+
+    new_cb(out, 4, None, None)
+    assert list(out.ravel()) == [1, 2, 3, 4]

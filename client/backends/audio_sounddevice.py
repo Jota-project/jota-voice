@@ -6,6 +6,7 @@ Plataformas: macOS (CoreAudio), Linux (ALSA/PulseAudio). No funciona en Termux
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import queue as queue_mod
 import threading
@@ -145,6 +146,12 @@ class SounddeviceBackend:
         self._out_last_error: BaseException | None = None
         self._in_status_count = 0
         self._in_last_status = None
+        # Generación del stream de salida actual (M2). Cada stream nuevo
+        # recibe su número en el callback; drain()/stop() la incrementan al
+        # soltar el stream. Si un stream abandonado (driver colgado que
+        # revive) sigue llamando a su callback, emite silencio y no toca
+        # _play_q, que ya pertenece al stream nuevo.
+        self._out_gen = 0
 
     # --- captura ---
 
@@ -220,6 +227,7 @@ class SounddeviceBackend:
         # mitad de camino. El cierre va fuera del loop (issue #87).
         input_stream, self._input_stream = self._input_stream, None
         output_stream, self._output_stream = self._output_stream, None
+        self._out_gen += 1
         if input_stream is not None:
             await _close_stream(input_stream, "stop input")
         if output_stream is not None:
@@ -291,11 +299,13 @@ class SounddeviceBackend:
         # Solo se guarda si arrancó: antes se asignaba antes de .start() y, si
         # start fallaba, las llamadas siguientes veían "ya hay stream" y la
         # reproducción quedaba en silencio para siempre.
+        self._out_gen += 1
         self._output_stream = _open_and_start(
-            sd.OutputStream, **out_kwargs, callback=self._out_callback
+            sd.OutputStream, **out_kwargs,
+            callback=functools.partial(self._out_callback, gen=self._out_gen),
         )
 
-    def _out_callback(self, outdata, frames, time, status) -> None:  # noqa: ARG002
+    def _out_callback(self, outdata, frames, time, status, *, gen: int | None = None) -> None:  # noqa: ARG002
         # IMPORTANTE: este callback corre en el hilo realtime de PortAudio,
         # registrado por sounddevice con error=paAbort — cualquier excepción
         # sin capturar que escape de aquí aborta el OutputStream ENTERO
@@ -305,6 +315,10 @@ class SounddeviceBackend:
         # Nunca esperar el lock en el hilo realtime: si el hilo de asyncio
         # está vaciando la cola (reset/drain/stop), este bloque sale en
         # silencio y el siguiente ya ve el estado limpio (issue #88).
+        # gen=None: llamada directa (tests); si no, solo el stream actual lee.
+        if gen is not None and gen != self._out_gen:
+            outdata[:, 0] = 0
+            return
         if not self._play_lock.acquire(blocking=False):
             outdata[:, 0] = 0
             return
@@ -401,6 +415,7 @@ class SounddeviceBackend:
     async def drain(self) -> None:
         self._flush_callback_diagnostics()
         output_stream, self._output_stream = self._output_stream, None
+        self._out_gen += 1
         if output_stream is not None:
             await _close_stream(output_stream, "drain")
         self._clear_playback()
