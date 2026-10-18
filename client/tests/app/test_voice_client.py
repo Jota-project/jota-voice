@@ -831,3 +831,44 @@ def test_on_wakeup_fd_data_handler_logs_and_does_not_raise(caplog) -> None:
 
     assert "señal recibida" in caplog.text
     assert "cancelando run loop" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Cuelgue intermitente de test_main_*: _oww_loop se tragaba la cancelación
+# exterior (patrón `cancel(); try: await t except CancelledError: pass`) y,
+# con un run_forever que retorna al instante, giraba para siempre durante el
+# apagado. Ahora es una función de módulo testeable.
+# ---------------------------------------------------------------------------
+
+
+def test_oww_loop_termina_al_cancelar_aunque_run_forever_retorne_al_instante() -> None:
+    async def _t() -> None:
+        oww = MagicMock(run_forever=AsyncMock())
+        task = asyncio.create_task(
+            voice_client.oww_loop(oww, MagicMock(), AsyncMock(), asyncio.Event())
+        )
+        await asyncio.sleep(0.1)
+        for _ in range(20):  # cancelar en distintos puntos del bucle
+            task.cancel()
+            done, _ = await asyncio.wait([task], timeout=0.05)
+            if done:
+                break
+        assert task.done() and task.cancelled(), "oww_loop no respeta la cancelación"
+
+    asyncio.run(_t())
+
+
+def test_oww_loop_no_gira_en_caliente_si_run_forever_retorna() -> None:
+    async def _t() -> None:
+        oww = MagicMock(run_forever=AsyncMock())
+        task = asyncio.create_task(
+            voice_client.oww_loop(oww, MagicMock(), AsyncMock(), asyncio.Event())
+        )
+        await asyncio.sleep(0.3)
+        task.cancel()
+        await asyncio.wait([task], timeout=1.0)
+        assert oww.run_forever.await_count <= 5, (
+            f"run_forever relanzado {oww.run_forever.await_count} veces en 0.3s"
+        )
+
+    asyncio.run(_t())

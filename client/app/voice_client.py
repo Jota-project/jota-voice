@@ -86,6 +86,7 @@ _apply_termux_hosts()
 from backends import registry
 from backends.gateway_client import GatewayClient
 from config import Config, load_config
+from core.aio import cancel_and_wait
 from domain.event_bus import EventBus, VoiceEvent
 from domain.state_machine import run as sm_run
 from ui.menubar_base import MenubarCommands
@@ -177,6 +178,41 @@ async def gateway_idle_listener(
     except Exception as exc:
         log.exception("Gateway: idle_listener terminó con excepción")
         bus.publish(VoiceEvent(type="error", data={"message": str(exc)}))
+
+
+_OWW_RESTART_DELAY_S = 0.5
+
+
+async def oww_loop(oww, audio, on_wake, pause_event: asyncio.Event) -> None:
+    """Task permanente de OWW, pausable desde el menubar.
+
+    Usa ``cancel_and_wait`` para drenar los hijos: el patrón anterior
+    (``cancel(); try: await t except CancelledError: pass``) se tragaba la
+    cancelación de ESTA tarea si llegaba durante el await, y como el cuerpo
+    es un ``while True`` el apagado se quedaba colgado (cuelgue intermitente
+    de ``test_main_*``, con un ``run_forever`` que retorna al instante).
+    Si ``run_forever`` retorna (no debería: reconecta por dentro), se espera
+    un mínimo antes de relanzarlo para no girar en caliente.
+    """
+    log = logging.getLogger(__name__)
+    while True:
+        if pause_event.is_set():
+            await asyncio.sleep(0.2)
+            continue
+        t = asyncio.create_task(oww.run_forever(audio, on_wake))
+        pause_wait = asyncio.create_task(pause_event.wait())
+        try:
+            await asyncio.wait([t, pause_wait], return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            # Issue #21: drenar siempre los hijos, también si nos cancelan.
+            await cancel_and_wait(t, pause_wait)
+        if t.done() and not t.cancelled():
+            exc = t.exception()
+            log.warning(
+                "OWW run_forever terminó inesperadamente (%s); relanzando en %.1fs",
+                exc or "sin error", _OWW_RESTART_DELAY_S,
+            )
+            await asyncio.sleep(_OWW_RESTART_DELAY_S)
 
 
 async def main(
@@ -352,43 +388,9 @@ async def main(
     )
 
     # --- Task background permanente: OWW (pausable) ---
-    async def _oww_loop() -> None:
-        while True:
-            if pause_event.is_set():
-                await asyncio.sleep(0.2)
-                continue
-            t = asyncio.create_task(oww.run_forever(audio, _oww_on_wake))
-            pause_wait = asyncio.create_task(pause_event.wait())
-            try:
-                done, pending = await asyncio.wait(
-                    [t, pause_wait],
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for p in pending:
-                    p.cancel()
-                    try:
-                        await p
-                    except asyncio.CancelledError:
-                        pass
-                t.cancel()
-                try:
-                    await t
-                except asyncio.CancelledError:
-                    pass
-            finally:
-                # Issue #21: si el shutdown cancela _oww_loop desde fuera
-                # (SIGTERM), el código de arriba no se ejecuta pero los tasks
-                # hijos sí. Drenarlos siempre, replicando el patrón del
-                # state_machine (fix _recording/_responding).
-                for task in (t, pause_wait):
-                    if not task.done():
-                        task.cancel()
-                        try:
-                            await task
-                        except asyncio.CancelledError:
-                            pass
-
-    oww_task = asyncio.create_task(_oww_loop(), name="oww_listener")
+    oww_task = asyncio.create_task(
+        oww_loop(oww, audio, _oww_on_wake, pause_event), name="oww_listener"
+    )
 
     # --- Task background permanente: DisplayClient ---
     display_task = asyncio.create_task(display.run(bus), name="display")
