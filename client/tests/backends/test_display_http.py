@@ -224,6 +224,44 @@ async def test_post_colgado_no_bloquea_el_executor_por_defecto_ni_el_sender() ->
 
 
 @pytest.mark.asyncio
+async def test_post_real_contra_un_servidor_como_el_kiosk() -> None:
+    """Camino real (urllib en el executor propio) contra un servidor HTTP
+    local que imita POST /state de jota-display/server/server.py."""
+    import json
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    received: list[dict] = []
+
+    class _Kiosk(BaseHTTPRequestHandler):
+        def log_message(self, *a) -> None:
+            pass
+
+        def do_POST(self) -> None:
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            received.append({"path": self.path, "ctype": self.headers.get("Content-Type"),
+                             "body": json.loads(body)})
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Kiosk)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    backend = HttpDisplayBackend(DisplayConfig(url=f"http://127.0.0.1:{srv.server_address[1]}"))
+    await backend.start()
+    try:
+        backend.send("state", {"value": "thinking", "text": "hola"})
+        await wait_until(lambda: len(received) == 1, message="POST recibido")
+    finally:
+        await backend.stop()
+        srv.shutdown()
+        srv.server_close()
+    assert received == [{"path": "/state", "ctype": "application/json",
+                         "body": {"state": "thinking", "text": "hola"}}]
+
+
+@pytest.mark.asyncio
 async def test_error_de_red_no_propaga() -> None:
     def _boom(payload: dict) -> None:
         raise OSError("connection refused")

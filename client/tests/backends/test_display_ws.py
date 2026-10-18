@@ -654,3 +654,42 @@ async def test_seq_monotono_y_sync_tras_hueco(tmp_path: Path) -> None:
         assert msgs[0]["type"] == "sync"  # el hueco siempre lo tapa un sync
     finally:
         await backend._unregister(client)
+
+
+# ---------------------------------------------------------------------------
+# Extremo a extremo: EventBus -> DisplayClient -> WsDisplayBackend -> display
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_e2e_bus_display_client_y_cancel(tmp_path: Path) -> None:
+    from app.display_client import DisplayClient
+    from domain.event_bus import EventBus, VoiceEvent
+
+    cancel_event = asyncio.Event()
+    backend = WsDisplayBackend(_cfg(tmp_path), on_cancel=cancel_event.set)
+    await backend.start()
+    bus = EventBus()
+    task = asyncio.create_task(DisplayClient(backend).run(bus))
+    try:
+        ws = await _connect(backend, (tmp_path / "token").read_text().strip())
+        try:
+            assert (await _recv(ws))["type"] == "sync"
+            bus.publish(VoiceEvent(type="recording_started", data={}))
+            bus.publish(VoiceEvent(type="turn_start", data={"turn_id": "t-9", "turn_seq": 9}))
+            bus.publish(VoiceEvent(type="display_text_update", data={
+                "chunk_text": "Hola", "cumulative_text": "Hola", "duration_s": 0.2}))
+            got = [await _recv(ws) for _ in range(3)]
+            assert [m["type"] for m in got] == ["state", "turn_start", "text_update"]
+            assert got[2]["turn_id"] == "t-9"
+            await ws.send(json.dumps({"type": "cancel", "turn_id": "t-9"}))
+            await asyncio.wait_for(cancel_event.wait(), 2.0)
+        finally:
+            await ws.close()
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        await backend.stop()
