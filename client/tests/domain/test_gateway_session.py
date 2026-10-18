@@ -538,3 +538,35 @@ async def test_cancel_sin_error_sigue_siendo_cancel():
     with pytest.raises(_TurnCancelled):
         await asyncio.wait_for(t, 1.0)
     assert ("cancel",) in gw.sent
+
+
+
+# ---------------------------------------------------------------------------
+# Drenaje de hijos que no se traga la cancelación exterior (mismo bug que
+# _oww_loop / oww_client.run_forever): determinista con un hijo que tarda en
+# procesar su cancel.
+# ---------------------------------------------------------------------------
+
+
+async def _slow_to_cancel(*_a, **_kw):
+    try:
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        await asyncio.sleep(0.2)  # limpieza lenta: ventana para el cancel exterior
+        raise
+
+
+@pytest.mark.asyncio
+async def test_wait_wake_or_cancel_no_se_traga_la_cancelacion_exterior(monkeypatch):
+    from domain import state_machine
+
+    monkeypatch.setattr(state_machine, "_consume_wake", _slow_to_cancel)
+    cancel_event = asyncio.Event()
+    t = asyncio.create_task(state_machine._wait_wake_or_cancel(EventBus(), cancel_event, "X"))
+    await asyncio.sleep(0.01)
+    cancel_event.set()        # cancel_task gana → se empieza a drenar wake_task (lento)
+    await asyncio.sleep(0.05)
+    t.cancel()                # llega el cancel exterior durante el drenaje
+    await asyncio.wait([t], timeout=1.0)
+    assert t.done() and t.cancelled(), "la cancelación exterior se perdió"
+

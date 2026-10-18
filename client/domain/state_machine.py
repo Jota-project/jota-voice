@@ -194,24 +194,16 @@ async def _wait_wake_or_cancel(
             [cancel_task, wake_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
-        for t in pending:
-            t.cancel()
-            try:
-                await t
-            except asyncio.CancelledError:
-                pass
+        # cancel_and_wait: el viejo `cancel(); try: await t except
+        # CancelledError: pass` se tragaba el cancel de ESTA tarea si llegaba
+        # durante el drenaje.
+        await cancel_and_wait(*pending)
 
         if wake_task in done and not wake_task.cancelled():
             log.info("%s: wake_word detectado durante el estado, interrumpiendo", current_state)
             cancel_event.set()  # para que el state_machine vea _TurnCancelled
     finally:
-        for t in (cancel_task, wake_task):
-            if not t.done():
-                t.cancel()
-                try:
-                    await t
-                except asyncio.CancelledError:
-                    pass
+        await cancel_and_wait(cancel_task, wake_task)
 
 
 async def _consume_wake(bus: EventBus) -> str:
@@ -350,12 +342,7 @@ async def _recording(
             [capture_task, cancel_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
-        for t in pending:
-            t.cancel()
-            try:
-                await t
-            except asyncio.CancelledError:
-                pass
+        await cancel_and_wait(*pending)
 
         if cancel_task in done:
             await _safe_send_cancel(gateway)
@@ -369,14 +356,8 @@ async def _recording(
         # Issue #21: si la tarea externa fue cancelada durante el wait
         # (SIGTERM durante shutdown), el código de arriba no se ejecuta
         # pero los tasks hijos sí. Drenarlos siempre, replicando el patrón
-        # de _wait_wake_or_cancel (líneas 175-181).
-        for t in (capture_task, cancel_task):
-            if not t.done():
-                t.cancel()
-                try:
-                    await t
-                except asyncio.CancelledError:
-                    pass
+        # de _wait_wake_or_cancel.
+        await cancel_and_wait(capture_task, cancel_task)
 
     # play_notification() es un beep puramente cosmético (confirma al
     # usuario que se dejó de grabar). Un fallo de audio de salida (visto en

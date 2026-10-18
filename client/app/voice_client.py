@@ -345,27 +345,11 @@ async def main(
     finally:
         log.info("Apagando jota-voice…")
 
-        menubar_task.cancel()
-        try:
-            await menubar_task
-        except asyncio.CancelledError:
-            pass
-
-        sm_task.cancel()
-        oww_task.cancel()
-        display_task.cancel()
-        control_task.cancel()
-        stop_task.cancel()
-
-        # return_exceptions no suppresses CancelledError (not a subclass of
-        # Exception in py38+), así que envolvemos en try/except.
-        try:
-            await asyncio.gather(
-                sm_task, oww_task, display_task, control_task, stop_task,
-                return_exceptions=True,
-            )
-        except asyncio.CancelledError:
-            pass
+        # cancel_and_wait espera a los hijos sin tragarse una cancelación de
+        # main() que llegue durante el apagado (el patrón anterior
+        # `cancel(); try: await t except CancelledError: pass` sí lo hacía).
+        await cancel_and_wait(menubar_task)
+        await cancel_and_wait(sm_task, oww_task, display_task, control_task, stop_task)
 
         await audio.stop()
 
