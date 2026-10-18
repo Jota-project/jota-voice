@@ -62,10 +62,13 @@ if [ "$CMD" = "uninstall" ]; then
 fi
 
 # ------------------------------------------------------------------- install
-_info "Asegurando venv en $OWW_VENV_DIR…"
+# Mismo intérprete explícito que el venv del cliente (issue #45): el pin de
+# wyoming-openwakeword/ai-edge-litert es frágil ante cambios de versión.
+PY="$(jota_find_python)" || exit 1
+_info "Asegurando venv en $OWW_VENV_DIR (Python $(jota_python_version "$PY"))…"
 mkdir -p "$(dirname "$OWW_VENV_DIR")"
 if [ ! -d "$OWW_VENV_DIR" ]; then
-    python3 -m venv "$OWW_VENV_DIR"
+    "$PY" -m venv "$OWW_VENV_DIR"
     _ok "venv creado"
 else
     _ok "venv ya existe"
