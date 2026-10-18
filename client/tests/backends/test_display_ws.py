@@ -223,6 +223,30 @@ async def test_handshake_sin_token_valido_es_401(server, token) -> None:
 
 
 @pytest.mark.asyncio
+async def test_cabecera_de_token_duplicada_es_401_y_cuenta_en_el_limiter(tmp_path: Path, caplog) -> None:
+    """Revisión Fase D: dos X-Jota-Display-Token daban 500 con traceback
+    (MultipleValuesError) y no pasaban por el rate limit."""
+    import logging
+
+    backend = WsDisplayBackend(_cfg(tmp_path, rate_limit_max_requests=1))
+    await backend.start()
+    try:
+        token = (tmp_path / "token").read_text().strip()
+        headers = [(TOKEN_HEADER, token), (TOKEN_HEADER, token)]
+        codes = []
+        with caplog.at_level(logging.ERROR):
+            for _ in range(2):
+                with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
+                    await websockets.connect(f"ws://127.0.0.1:{backend.port}",
+                                             additional_headers=headers, open_timeout=2.0)
+                codes.append(exc.value.response.status_code)
+        assert codes == [401, 429]
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    finally:
+        await backend.stop()
+
+
+@pytest.mark.asyncio
 async def test_rate_limit_solo_cuenta_tokens_invalidos(tmp_path: Path) -> None:
     """Issue #106: una riada de tokens inválidos (escaneo desde otra pestaña
     o proceso) recibe 429, pero el cliente legítimo sigue conectando."""

@@ -310,8 +310,13 @@ class WsDisplayBackend:
     async def _process_request(
         self, connection: ServerConnection, request: Request
     ) -> Response | None:
-        presented = request.headers.get(TOKEN_HEADER, "")
-        if self._token and hmac.compare_digest(presented.encode(), self._token.encode()):
+        # Exactamente un valor: headers.get() lanza MultipleValuesError con
+        # la cabecera repetida (antes: 500 con traceback, sin rate limit).
+        values = request.headers.get_all(TOKEN_HEADER)
+        presented = values[0] if len(values) == 1 else ""
+        if self._token and presented and hmac.compare_digest(
+            presented.encode(), self._token.encode()
+        ):
             if len(self._clients) >= self._cfg.max_clients:
                 return connection.respond(503, "too many displays\n")
             return None  # seguir con el upgrade
