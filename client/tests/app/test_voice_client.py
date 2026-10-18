@@ -102,6 +102,25 @@ def test_audio_start_failure_is_visible_and_shuts_down_cleanly(monkeypatch) -> N
     asyncio.run(_test_audio_start_failure_is_visible_and_shuts_down_cleanly(monkeypatch))
 
 
+def test_main_passes_bus_to_oww_backend(monkeypatch) -> None:
+    """Sin bus, OWWClient nunca publica oww_degraded/oww_recovered y el
+    menubar no puede avisar de "Wake word no disponible"."""
+    captured: dict = {}
+
+    def _make_oww(cfg, **kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(registry, "make_audio", lambda cfg: _FailingAudioBackend())
+    monkeypatch.setattr(registry, "make_oww", _make_oww)
+
+    asyncio.run(
+        voice_client.main(_make_cfg(), _SpyMenubarBackend(), external_stop_event=asyncio.Event())
+    )
+
+    assert isinstance(captured.get("bus"), voice_client.EventBus)
+
+
 class _ExplodingMenubarBackend(_SpyMenubarBackend):
     def set_state(self, state: str) -> None:
         raise RuntimeError("menubar backend roto")
@@ -279,7 +298,7 @@ async def _test_menubar_stops_after_async_cleanup(monkeypatch) -> None:
         pass
 
     monkeypatch.setattr(registry, "make_audio", lambda cfg: _AudioBackend())
-    monkeypatch.setattr(registry, "make_oww", lambda cfg, on_wake_word: _OwwBackend())
+    monkeypatch.setattr(registry, "make_oww", lambda cfg, on_wake_word, **kw: _OwwBackend())
     monkeypatch.setattr(registry, "make_display", lambda cfg: object())
     monkeypatch.setattr(voice_client, "GatewayClient", _GatewayClient)
     monkeypatch.setattr(voice_client, "DisplayClient", _IdleClient)

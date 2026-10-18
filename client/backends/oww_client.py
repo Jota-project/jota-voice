@@ -203,11 +203,31 @@ class OWWClient:
                 return
             except OSError as exc:
                 delay = backoff[min(idx, len(backoff) - 1)]
+                idx += 1
+                # Los fallos de conexión también cuentan para el umbral de
+                # oww_degraded: con el servidor caído desde el arranque no
+                # hay ninguna caída "post-conexión" que contar.
+                self._maybe_publish_degraded(idx, delay)
                 log.warning(
                     "OWW no disponible (%s), reintentando en %.0fs", exc, delay
                 )
                 await asyncio.sleep(delay)
-                idx += 1
+
+    def _maybe_publish_degraded(self, consecutive_failures: int, delay: float) -> None:
+        """Publica UNA vez oww_degraded al alcanzar el umbral (issue #22)."""
+        if (
+            self._bus is not None
+            and not self._degraded_published
+            and consecutive_failures >= self._cfg.oww_healthcheck_threshold
+        ):
+            self._bus.publish(VoiceEvent(
+                type="oww_degraded",
+                data={
+                    "consecutive_failures": consecutive_failures,
+                    "backoff_s": delay,
+                },
+            ))
+            self._degraded_published = True
 
     # ------------------------------------------------------------------
     # Modo persistente: run_forever (task background durante toda la vida)
@@ -284,19 +304,7 @@ class OWWClient:
                 consecutive_drops += 1
                 # Issue #22: tras N reintentos consecutivos fallidos,
                 # publicar UNA vez oww_degraded al EventBus.
-                if (
-                    self._bus is not None
-                    and not self._degraded_published
-                    and consecutive_drops >= self._cfg.oww_healthcheck_threshold
-                ):
-                    self._bus.publish(VoiceEvent(
-                        type="oww_degraded",
-                        data={
-                            "consecutive_failures": consecutive_drops,
-                            "backoff_s": delay,
-                        },
-                    ))
-                    self._degraded_published = True
+                self._maybe_publish_degraded(consecutive_drops, delay)
                 log.warning("OWW run_forever: esperando %.1fs antes de reconectar", delay)
                 await asyncio.sleep(delay)
                 continue
