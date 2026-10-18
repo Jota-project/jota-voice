@@ -6,5 +6,8 @@
 # aporta pkg y en escritorio (numpy + sounddevice) va en requirements-macos.txt
 # de la raíz. Dependencias de test: client/requirements-dev.txt.
 pyaudio>=0.2.14
-websockets>=12.0
+# >=14.1: websockets.connect es la implementación asyncio nueva desde 14.0
+# (additional_headers, websockets.asyncio.server) y max_queue=None (cola sin
+# límite, issue #118) se acepta desde 14.1.
+websockets>=14.1
 pyyaml>=6.0
