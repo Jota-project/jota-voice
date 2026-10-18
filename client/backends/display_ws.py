@@ -64,6 +64,12 @@ PROTOCOL_VERSION = 1
 # unas decenas de bytes).
 MAX_INCOMING_BYTES = 4096
 
+# Apagado: espera del cierre ordenado de cada conexión (websockets) y del
+# servidor completo antes de abortar transportes. stop() queda acotado a
+# unos 2 s aunque un display no lea.
+CLOSE_TIMEOUT_S = 1.0
+STOP_TIMEOUT_S = 1.0
+
 # Token: cuánto esperar a que otro proceso termine de escribir un fichero que
 # encontramos vacío (ruta de fallback O_EXCL, #115) y cuántas vueltas dar.
 _EMPTY_TOKEN_WAIT_S = 0.2
@@ -261,6 +267,7 @@ class WsDisplayBackend:
                 self._cfg.port,
                 process_request=self._process_request,
                 max_size=MAX_INCOMING_BYTES,
+                close_timeout=CLOSE_TIMEOUT_S,
             )
         except OSError as exc:
             log.warning(
@@ -277,11 +284,26 @@ class WsDisplayBackend:
             handle.cancel()
         self._health_timers.clear()
         server, self._server = self._server, None
-        if server is not None:
-            server.close()
-            await server.wait_closed()
+        # Primero los writers: uno bloqueado en send() hacia un display que
+        # no lee retrasaría el cierre.
         for client in list(self._clients):
             await self._unregister(client)
+        if server is None:
+            return
+        # Apagado acotado (launchd mata a los 20 s y aún quedan audio, gateway
+        # y OWW por cerrar): cierre ordenado con close_timeout corto y, si un
+        # display no colabora, abort del transporte.
+        server.close()
+        try:
+            await asyncio.wait_for(server.wait_closed(), STOP_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            log.warning("WsDisplayBackend: displays sin cerrar a tiempo; abortando conexiones")
+            for conn in list(server.connections):
+                conn.transport.abort()
+            try:
+                await asyncio.wait_for(server.wait_closed(), STOP_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                log.warning("WsDisplayBackend: el servidor no terminó de cerrar")
 
     # --- handshake ------------------------------------------------------------
 

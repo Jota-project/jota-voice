@@ -278,7 +278,11 @@ async def _test_menubar_stops_after_async_cleanup(monkeypatch) -> None:
 
     monkeypatch.setattr(registry, "make_audio", lambda cfg: _AudioBackend())
     monkeypatch.setattr(registry, "make_oww", lambda cfg, on_wake_word: _OwwBackend())
-    monkeypatch.setattr(registry, "make_display", lambda cfg, **kw: NullDisplayBackend())
+    class _Display(NullDisplayBackend):
+        async def stop(self) -> None:
+            cleanup_order.append("display.stop")
+
+    monkeypatch.setattr(registry, "make_display", lambda cfg, **kw: _Display())
     monkeypatch.setattr(voice_client, "GatewayClient", _GatewayClient)
     monkeypatch.setattr(voice_client, "DisplayClient", _IdleClient)
     monkeypatch.setattr(voice_client, "MenubarClient", _IdleClient)
@@ -288,10 +292,13 @@ async def _test_menubar_stops_after_async_cleanup(monkeypatch) -> None:
         _make_cfg(), _MenubarBackend(), external_stop_event=asyncio.Event()
     )
 
+    # El display va detrás de audio/gateway/OWW: su stop() puede tardar
+    # hasta ~2 s con un display que no lee, y launchd mata a los 20 s.
     assert cleanup_order == [
         "audio.stop",
         "gateway.disconnect",
         "oww.disconnect",
+        "display.stop",
         "menubar.stop",
     ]
 

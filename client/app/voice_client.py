@@ -354,13 +354,6 @@ async def main(
         await cancel_and_wait(menubar_task)
         await cancel_and_wait(sm_task, oww_task, display_task, stop_task)
 
-        # Cierra el servidor de displays (libera el puerto y desconecta a los
-        # displays) y el sender http.
-        try:
-            await display_backend.stop()
-        except Exception:
-            log.exception("Error al parar el backend de display (no crítico)")
-
         await audio.stop()
 
         if gateway._ws is not None:
@@ -373,6 +366,13 @@ async def main(
             await oww.disconnect()
         except Exception:
             pass
+
+        # El display al final: su stop() está acotado (~2 s con un display
+        # que no lee) pero no debe retrasar el cierre de audio/gateway/OWW.
+        try:
+            await display_backend.stop()
+        except Exception:
+            log.exception("Error al parar el backend de display (no crítico)")
 
         bus.close()
         log.info("jota-voice apagado limpiamente")

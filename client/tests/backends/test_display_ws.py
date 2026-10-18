@@ -657,6 +657,41 @@ async def test_seq_monotono_y_sync_tras_hueco(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_stop_es_rapido_con_un_display_que_no_lee(tmp_path: Path) -> None:
+    """Revisión Fase D: un display que deja de leer tras el handshake hacía
+    que stop() tardara ~20 s (close_timeout 10 s + wait_closed), más de lo
+    que launchd espera antes de matar el proceso."""
+    import time
+
+    backend = WsDisplayBackend(_cfg(tmp_path))
+    await backend.start()
+    token = (tmp_path / "token").read_text().strip().encode()
+    r, w = await asyncio.open_connection("127.0.0.1", backend.port, limit=1024)
+    try:
+        w.transport.set_write_buffer_limits(0)
+        w.write(
+            b"GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"
+            b"X-Jota-Display-Token: " + token + b"\r\n\r\n"
+        )
+        await asyncio.wait_for(r.readuntil(b"\r\n\r\n"), 2.0)
+        w.transport.pause_reading()  # no vuelve a leer nunca
+        big = "x" * 20000
+        for i in range(3000):
+            backend.send("text_update", {"chunk_text": "a", "cumulative_text": big + str(i),
+                                         "duration_s": 0.1})
+            if i % 100 == 0:
+                await asyncio.sleep(0)
+        await asyncio.sleep(0.1)
+        t0 = time.monotonic()
+        await asyncio.wait_for(backend.stop(), 10.0)
+        assert time.monotonic() - t0 < 2.5
+        assert backend._clients == set()
+    finally:
+        w.close()
+
+
+@pytest.mark.asyncio
 async def test_writer_que_falla_cierra_la_conexion_para_forzar_reconexion(tmp_path: Path) -> None:
     class _Broken:
         def __init__(self) -> None:
