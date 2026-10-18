@@ -6,19 +6,18 @@ connect_with_backoff, wait_for_detection y disconnect con side_effects
 programables. EventBus real (no mock) — nos suscribimos a su async
 generator para que las queues internas existan y los eventos se entreguen
 (sin suscriptores, publish() es no-op porque EventBus._queues está vacío).
-run_forever se envuelve en asyncio.wait_for para forzar terminación.
 
-Simplificación documentada: en lugar de hacer mocks independientes por
-cada test, helper _Collector suscribe al bus y captura todos los eventos
-en una lista. Filtramos por tipo al final. Es coverage parcial porque
-depende de que el bucle del test llegue al punto donde se publica el
-evento — pero como patcheamos wait_for_detection/connect_with_backoff
-para controlar el flujo, es fiable.
+Terminación (issue #76): run_forever corre como task y el test la cancela
+cuando wait_for_detection se ha llamado un número concreto de veces, no
+tras un ``asyncio.wait_for`` con timeout de pared. Con un timeout fijo el
+número de vueltas del bucle dependía de la carga de la máquina, y además
+destapaba un bug real (run_forever se tragaba la cancelación si llegaba
+durante la limpieza de send_task — ver test_oww_client.py).
 """
 from __future__ import annotations
 
 import asyncio
-from typing import Any, List
+from typing import Any, Awaitable, Callable, List
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -26,6 +25,10 @@ import pytest
 from config import AudioConfig, Config, DeviceConfig, GatewayConfig, OWWConfig
 from domain.event_bus import EventBus, VoiceEvent
 from backends.oww_client import OWWClient
+
+# Red de seguridad: ningún test debería acercarse a esto; si lo alcanza es
+# que el bucle no avanza (o no termina al cancelarlo).
+_SAFETY_TIMEOUT_S = 5.0
 
 
 def _cfg(**oww_overrides: Any) -> Config:
@@ -48,13 +51,20 @@ def _cfg(**oww_overrides: Any) -> Config:
     )
 
 
+class _EmptyAudio:
+    """AudioBackend fake: la cola nunca produce frames."""
+
+    def get_oww_queue(self) -> asyncio.Queue:
+        return asyncio.Queue()
+
+
 class _Collector:
     """Context manager async: suscribe al bus y captura eventos en una lista.
 
     Como EventBus.publish() solo entrega a las queues que existan en
     self._queues, necesitamos un suscriptor vivo ANTES de que run_forever
     publique. Esta clase arranca un task que hace async for sobre
-    bus.subscribe() — al iterar por primera vez, la queue se registra.
+    bus.subscribe() y espera a que la queue quede registrada.
     """
 
     def __init__(self, bus: EventBus) -> None:
@@ -67,9 +77,8 @@ class _Collector:
             async for ev in self.bus.subscribe():
                 self.events.append(ev)
         self._task = asyncio.create_task(_run())
-        # Ceder control una vez para que la task arranque y self._queues
-        # se rellene con la queue del suscriptor.
-        await asyncio.sleep(0)
+        while not self.bus._queues:
+            await asyncio.sleep(0)
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
@@ -81,34 +90,92 @@ class _Collector:
                 pass
             self._task = None
 
+    async def drain(self) -> None:
+        """Deja que el collector consuma lo que ya está publicado."""
+        for q in self.bus._queues:
+            while not q.empty():
+                await asyncio.sleep(0)
+
     def of_type(self, event_type: str) -> List[VoiceEvent]:
         return [e for e in self.events if e.type == event_type]
+
+
+class _AbortLoop(Exception):
+    """La lanza el wait_for_detection fake para sacar a run_forever de su
+    bucle si no respondió a la cancelación (evita colgar el teardown)."""
+
+
+class _CountingWFD:
+    """wait_for_detection fake: delega en ``behaviour(n)`` y marca
+    ``reached`` cuando se alcanza la llamada número ``stop_after``."""
+
+    def __init__(self, stop_after: int, behaviour: Callable[[int], Awaitable[str]]) -> None:
+        self.stop_after = stop_after
+        self.behaviour = behaviour
+        self.reached = asyncio.Event()
+        self.abort = False
+        self.calls = 0
+
+    async def __call__(self) -> str:
+        if self.abort:
+            raise _AbortLoop()
+        self.calls += 1
+        if self.calls >= self.stop_after:
+            self.reached.set()
+        return await self.behaviour(self.calls)
+
+
+async def _run_until(client: OWWClient, wfd: _CountingWFD) -> None:
+    """Arranca run_forever, espera a ``wfd.reached`` y cancela. Falla si
+    run_forever no termina cancelada (p.ej. si se traga la cancelación)."""
+    task = asyncio.create_task(
+        client.run_forever(audio=_EmptyAudio(), on_wake_word=AsyncMock())
+    )
+    try:
+        await asyncio.wait_for(wfd.reached.wait(), timeout=_SAFETY_TIMEOUT_S)
+    finally:
+        task.cancel()
+        done, _ = await asyncio.wait([task], timeout=_SAFETY_TIMEOUT_S)
+        if task not in done:
+            wfd.abort = True
+            await asyncio.wait([task], timeout=_SAFETY_TIMEOUT_S)
+    assert task in done, "run_forever no terminó tras cancelarla (se tragó la cancelación)"
+    assert task.cancelled(), f"run_forever terminó sin cancelarse: {task!r}"
+
+
+def _patches(wfd: _CountingWFD):
+    """Parchea la E/S de OWWClient; wait_for_detection lo controla el test."""
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    stack.enter_context(patch.object(OWWClient, "connect", new=AsyncMock(return_value=None)))
+    stack.enter_context(
+        patch.object(OWWClient, "connect_with_backoff", new=AsyncMock(return_value=None))
+    )
+    stack.enter_context(patch.object(OWWClient, "wait_for_detection", side_effect=wfd.__call__))
+    stack.enter_context(patch.object(OWWClient, "disconnect", new=AsyncMock(return_value=None)))
+    return stack
 
 
 @pytest.mark.asyncio
 async def test_run_forever_publishes_oww_degraded_after_threshold_failures() -> None:
     """Tras oww_healthcheck_threshold (default 3) reintentos consecutivos
-    fallidos, run_forever publica UN evento oww_degraded."""
-    cfg = _cfg(reconnect_backoff_s=[0.001])  # backoffs mínimos para que el test quepa en 0.3s
+    fallidos, run_forever publica UN evento oww_degraded (y no lo repite en
+    los fallos siguientes)."""
+    cfg = _cfg(reconnect_backoff_s=[0.0])
     bus = EventBus()
     client = OWWClient(cfg.oww, audio_cfg=cfg.audio, bus=bus)
 
-    async with _Collector(bus) as col:
-        with patch.object(OWWClient, "connect", new=AsyncMock(return_value=None)), \
-             patch.object(OWWClient, "connect_with_backoff", new=AsyncMock(return_value=None)), \
-             patch.object(OWWClient, "wait_for_detection",
-                          new=AsyncMock(side_effect=ConnectionError("disconnect"))), \
-             patch.object(OWWClient, "disconnect", new=AsyncMock(return_value=None)):
-            try:
-                await asyncio.wait_for(
-                    client.run_forever(audio=None, on_wake_word=lambda n: asyncio.sleep(0)),
-                    timeout=0.3,
-                )
-            except asyncio.TimeoutError:
-                pass  # esperado: el loop solo termina por timeout externo
+    async def _always_drop(n: int) -> str:
+        raise ConnectionError(f"disconnect #{n}")
 
-        # Dejar que el collector drene cualquier evento en vuelo antes de cancelar.
-        await asyncio.sleep(0)
+    # 6 fallos: el doble del umbral, para comprobar que no hay spam.
+    wfd = _CountingWFD(6, _always_drop)
+
+    async with _Collector(bus) as col:
+        with _patches(wfd):
+            await _run_until(client, wfd)
+        await col.drain()
 
     degraded = col.of_type("oww_degraded")
     assert len(degraded) == 1, (
@@ -121,38 +188,27 @@ async def test_run_forever_publishes_oww_degraded_after_threshold_failures() -> 
 @pytest.mark.asyncio
 async def test_run_forever_publishes_oww_recovered_after_successful_reconnect() -> None:
     """Tras 2 fallos, una reconexión exitosa, publicar oww_recovered (1 vez)."""
-    cfg = _cfg(oww_healthcheck_threshold=2, reconnect_backoff_s=[0.001])
+    cfg = _cfg(oww_healthcheck_threshold=2, reconnect_backoff_s=[0.0])
     bus = EventBus()
     client = OWWClient(cfg.oww, audio_cfg=cfg.audio, bus=bus)
 
-    call_idx = {"n": 0}
-
-    async def fake_wfd() -> str:
-        call_idx["n"] += 1
-        n = call_idx["n"]
+    async def _behaviour(n: int) -> str:
         if n <= 2:
             raise ConnectionError(f"fail #{n}")
         if n == 3:
             return "ok_nabu"  # éxito → activa oww_recovered
-        # Tras el éxito, bloqueamos para que el test termine por timeout
-        # y no se acumulen más fallos que disparen otro oww_degraded.
+        # Tras el éxito, bloqueamos hasta que el test cancele.
         await asyncio.Event().wait()
         return "unreachable"  # pragma: no cover
 
-    async with _Collector(bus) as col:
-        with patch.object(OWWClient, "connect", new=AsyncMock(return_value=None)), \
-             patch.object(OWWClient, "connect_with_backoff", new=AsyncMock(return_value=None)), \
-             patch.object(OWWClient, "wait_for_detection", side_effect=fake_wfd), \
-             patch.object(OWWClient, "disconnect", new=AsyncMock(return_value=None)):
-            try:
-                await asyncio.wait_for(
-                    client.run_forever(audio=None, on_wake_word=lambda n: asyncio.sleep(0)),
-                    timeout=0.3,
-                )
-            except asyncio.TimeoutError:
-                pass
+    # La 4ª llamada solo ocurre después de procesar la detección (y
+    # publicar oww_recovered).
+    wfd = _CountingWFD(4, _behaviour)
 
-        await asyncio.sleep(0)
+    async with _Collector(bus) as col:
+        with _patches(wfd):
+            await _run_until(client, wfd)
+        await col.drain()
 
     degraded = col.of_type("oww_degraded")
     recovered = col.of_type("oww_recovered")
@@ -164,25 +220,19 @@ async def test_run_forever_publishes_oww_recovered_after_successful_reconnect() 
 async def test_run_forever_no_publish_when_bus_is_none() -> None:
     """Sin bus inyectado, run_forever no publica nada y no lanza — comportamiento
     legacy preservado."""
-    cfg = _cfg(reconnect_backoff_s=[0.001])
+    cfg = _cfg(reconnect_backoff_s=[0.0])
     client = OWWClient(cfg.oww, audio_cfg=cfg.audio, bus=None)
 
-    # connect_with_backoff tiene que "tener éxito" para que el código entre
-    # al bucle interno; las excepciones lanzadas por él escapan del try
-    # externo de run_forever. La no-publicación se prueba forzando drops en
-    # wait_for_detection, que sí está cubierto por el catch.
-    with patch.object(OWWClient, "connect", new=AsyncMock(return_value=None)), \
-         patch.object(OWWClient, "connect_with_backoff", new=AsyncMock(return_value=None)), \
-         patch.object(OWWClient, "wait_for_detection",
-                      new=AsyncMock(side_effect=ConnectionError("nope"))), \
-         patch.object(OWWClient, "disconnect", new=AsyncMock(return_value=None)):
-        try:
-            await asyncio.wait_for(
-                client.run_forever(audio=None, on_wake_word=lambda n: asyncio.sleep(0)),
-                timeout=0.2,
-            )
-        except asyncio.TimeoutError:
-            pass  # esperado
+    async def _always_drop(n: int) -> str:
+        raise ConnectionError(f"nope #{n}")
+
+    # Por encima del umbral (3): si el código intentara publicar sin bus,
+    # lanzaría AttributeError y run_forever terminaría con error en vez de
+    # cancelada.
+    wfd = _CountingWFD(5, _always_drop)
+    with _patches(wfd):
+        await _run_until(client, wfd)
+    assert client._degraded_published is False
 
 
 def test_oww_config_has_default_healthcheck_threshold() -> None:

@@ -260,7 +260,14 @@ class OWWClient:
                 try:
                     await send_task
                 except asyncio.CancelledError:
-                    pass
+                    # La CancelledError esperada es la de send_task. Pero si
+                    # la propia task de run_forever fue cancelada mientras
+                    # esperaba aquí (shutdown, wait_for), esa cancelación
+                    # llega por el mismo camino y tragarla dejaría el bucle
+                    # reconectando para siempre (issue #76).
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling():
+                        raise
                 except (ConnectionError, OSError, asyncio.IncompleteReadError) as send_exc:
                     log.warning(
                         "OWW send_task terminó con %s, continuando reconexión",

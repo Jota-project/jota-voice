@@ -432,3 +432,72 @@ def test_wait_for_detection_propaga_unicode_decode_error() -> None:
 
 def test_wait_for_detection_propaga_limit_overrun_error() -> None:
     asyncio.run(_test_wait_for_detection_propaga_limit_overrun_error())
+
+
+# ---------------------------------------------------------------------------
+# Issue #76: run_forever se tragaba la cancelación externa si llegaba
+# mientras esperaba a que send_task terminase de cancelarse. El
+# ``except asyncio.CancelledError: pass`` no distinguía la CancelledError
+# de send_task de la de la propia task de run_forever, así que un
+# ``task.cancel()`` (shutdown) o un ``asyncio.wait_for`` (tests) se perdía y
+# el bucle seguía reconectando para siempre. Era la causa del cuelgue
+# intermitente de test_oww_healthcheck.py.
+# ---------------------------------------------------------------------------
+
+
+async def _test_run_forever_propaga_cancelacion_durante_limpieza_de_send_task() -> None:
+    client = OWWClient(OWWConfig(reconnect_backoff_s=[0.0]))
+    send_started = asyncio.Event()
+    send_cleaning_up = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    calls = {"wfd": 0}
+
+    async def _slow_cancel_send(_audio) -> None:
+        send_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # Limpieza que tarda: run_forever queda suspendido en
+            # ``await send_task`` justo cuando llega la cancelación externa.
+            send_cleaning_up.set()
+            await release_cleanup.wait()
+            raise
+
+    async def _drop_then_block() -> str:
+        calls["wfd"] += 1
+        if calls["wfd"] == 1:
+            await send_started.wait()
+            raise ConnectionError("drop")
+        await asyncio.Event().wait()  # si el bug sigue, el bucle llega aquí
+        return "unreachable"  # pragma: no cover
+
+    client.connect_with_backoff = AsyncMock(return_value=None)
+    client._send_audio_loop = AsyncMock(side_effect=_slow_cancel_send)
+    client.wait_for_detection = AsyncMock(side_effect=_drop_then_block)
+    client.disconnect = AsyncMock()
+
+    async def _on_wake(_name: str) -> None:
+        pass
+
+    task = asyncio.create_task(client.run_forever(_EmptyAudio(), _on_wake))
+    try:
+        await asyncio.wait_for(send_cleaning_up.wait(), timeout=5.0)
+        task.cancel()
+        release_cleanup.set()
+        done, _ = await asyncio.wait([task], timeout=5.0)
+        assert task in done, (
+            "run_forever se tragó la cancelación externa recibida durante la "
+            "limpieza de send_task y siguió reconectando"
+        )
+        assert task.cancelled(), "run_forever debe terminar cancelada"
+        assert client.connect_with_backoff.await_count == 1, (
+            "tras cancelar no debe volver a reconectar"
+        )
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.wait([task], timeout=5.0)
+
+
+def test_run_forever_propaga_cancelacion_durante_limpieza_de_send_task() -> None:
+    asyncio.run(_test_run_forever_propaga_cancelacion_durante_limpieza_de_send_task())
