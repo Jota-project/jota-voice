@@ -7,7 +7,6 @@ señal inválidos, y que el run loop Cocoa se detenga tras el cleanup asíncrono
 from __future__ import annotations
 
 import asyncio
-import sys
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
@@ -16,15 +15,15 @@ from app import voice_client
 from backends import registry
 from backends.display_null import NullDisplayBackend
 
+from config import Config, GatewayConfig
+
+from tests.fakes.cocoa import requires_cocoa
+
 # Los tests que invocan _run_with_cocoa_menubar hacen AppKit/Foundation
 # en runtime (signal.set_wakeup_fd + NSFileHandle watcher, fix de #20).
 # En Linux/Termux, AppKit no existe y el import lazy fallaría — solo se
-# puede ejercitar este path en macOS.
-pytestmark_cocoa = pytest.mark.skipif(
-    sys.platform != "darwin",
-    reason="Cocoa runloop solo instalable con AppKit (macOS)",
-)
-from config import Config, GatewayConfig
+# puede ejercitar este path en macOS con pyobjc: van marcados con
+# @requires_cocoa (misma marca que el resto de tests Cocoa).
 
 
 class _SpyMenubarBackend:
@@ -142,7 +141,7 @@ def test_audio_start_failure_does_not_propagate_if_menubar_reporting_fails(monke
     asyncio.run(_test_audio_start_failure_does_not_propagate_if_menubar_reporting_fails(monkeypatch))
 
 
-@pytestmark_cocoa
+@requires_cocoa
 def test_run_with_cocoa_menubar_survives_early_main_failure(monkeypatch) -> None:
     async def _fake_main(cfg, menubar_backend, *, external_stop_event=None):
         raise RuntimeError("fallo antes de construir nada")
@@ -164,7 +163,7 @@ def test_run_with_cocoa_menubar_survives_early_main_failure(monkeypatch) -> None
     assert "error" in menubar.states
 
 
-@pytestmark_cocoa
+@requires_cocoa
 def test_run_with_cocoa_menubar_installs_noop_signal_handlers(monkeypatch) -> None:
     """En Cocoa mode el NSFileHandle observer es quien procesa las señales,
     pero CPython solo escribe en el wakeup fd si la señal tiene un handler
@@ -203,7 +202,7 @@ def test_run_with_cocoa_menubar_installs_noop_signal_handlers(monkeypatch) -> No
 # ---------------------------------------------------------------------------
 
 
-@pytestmark_cocoa
+@requires_cocoa
 def test_run_with_cocoa_menubar_sets_wakeup_fd(monkeypatch) -> None:
     """CPython solo invoca un handler de signal cuando el hilo principal
     ejecuta bytecode Python — en Cocoa mode el hilo está bloqueado en

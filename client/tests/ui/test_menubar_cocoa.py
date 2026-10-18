@@ -1,23 +1,14 @@
 """Tests Cocoa-only: skipped salvo en macOS con pyobjc disponible."""
 from __future__ import annotations
 
-import sys
-
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    sys.platform != "darwin", reason="Cocoa tests only run on macOS"
-)
+from tests.fakes.cocoa import PYOBJC_AVAILABLE, requires_cocoa
 
-pyobjc_available = False
-try:
-    import AppKit  # noqa: F401
-    pyobjc_available = True
-except ImportError:
-    pass
+pytestmark = requires_cocoa
 
-if not pyobjc_available:
-    pytestmark = pytest.mark.skip(reason="pyobjc not installed")
+if PYOBJC_AVAILABLE:
+    import AppKit
 
 
 @pytest.fixture
