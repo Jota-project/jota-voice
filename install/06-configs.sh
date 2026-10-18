@@ -5,6 +5,7 @@
 set -e
 source "$REPO_DIR"/lib/output.sh
 source "$REPO_DIR"/lib/yaml.sh
+source "$REPO_DIR"/lib/secure.sh
 
 # Detecta si REPO_DIR == HOME/jota-voice (mismo sistema de ficheros, mismo path)
 SAME_TREE=0
@@ -94,6 +95,10 @@ _check() {
 
 _apply() {
     _ensure_device_config_symlink || exit 1
+
+    # Issue #44: config.yaml (client_key) a 600 en cada instalación/update;
+    # antes Termux no aplicaba ningún chmod.
+    jota_secure_perms "$REPO_DIR"
 
     _install_file "$REPO_DIR/boot/supervisord.conf.tpl" "$HOME/supervisord.conf" 0600
     _ok "supervisord.conf generado"

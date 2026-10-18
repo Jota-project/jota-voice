@@ -17,6 +17,10 @@
 set -e
 . "$(dirname "$0")/00-lib.sh"
 
+# Permisos re-verificados en CADA ejecución, también cuando el config ya
+# existe y el wizard no lo toca (issue #44).
+jota_secure_perms "$REPO_DIR"
+
 DEFAULT_CFG="$REPO_DIR/devices/$DEVICE_ID/config.yaml"
 if [ -f "$DEFAULT_CFG" ]; then
     _ok "$DEFAULT_CFG ya existe, no se toca (bórralo a mano si quieres regenerarlo)"

@@ -4,6 +4,7 @@ set -e
 
 _MACOS_LIB_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$_MACOS_LIB_DIR/../../lib/output.sh"
+. "$_MACOS_LIB_DIR/../../lib/secure.sh"
 
 REPO_DIR="${REPO_DIR:-$HOME/Work/jota-voice}"
 VENV_DIR="${VENV_DIR:-$HOME/venvs/jota-voice}"

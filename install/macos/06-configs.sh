@@ -16,3 +16,6 @@ fi
 mkdir -p "$DEST_DIR"
 ln -sf "$SRC" "$DEST"
 _ok "Symlink creado: $DEST → $SRC"
+
+# Issue #44: re-aplicar 600 en cada instalación (no solo al crear).
+jota_secure_perms "$REPO_DIR"
