@@ -695,3 +695,18 @@ def test_drain_sigue_usando_stop_para_no_cortar_el_final() -> None:
 
     out.stop.assert_called_once_with()
     out.abort.assert_not_called()
+
+
+def test_play_chunk_no_deja_audio_en_cola_si_el_stream_no_arranca(fake_sounddevice) -> None:
+    """El put() va antes de arrancar el stream (para no perder el principio
+    del audio); si arrancar falla, ese audio no debe quedarse en la cola y
+    sonar fuera de contexto en el siguiente intento."""
+    broken = _stream_mock(sd.OutputStream)
+    broken.start.side_effect = sd.PortAudioError("no output device")
+    fake_sounddevice.OutputStream.return_value = broken
+    be = SounddeviceBackend(_cfg())
+
+    with pytest.raises(sd.PortAudioError):
+        asyncio.run(be.play_chunk(b"\x01\x00\x02\x00"))
+
+    assert be._play_q.empty()

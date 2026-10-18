@@ -423,7 +423,13 @@ class SounddeviceBackend:
         # justo al arrancar, reproduciendo silencio y perdiendo el principio
         # del audio (click al inicio de cada beep/respuesta).
         self._play_q.put(audio)
-        self._ensure_output_stream()
+        try:
+            self._ensure_output_stream()
+        except BaseException:
+            # Sin stream no hay quien consuma la cola: ese audio sonaría
+            # fuera de contexto en el siguiente intento. Se descarta.
+            self._clear_playback()
+            raise
         # Dormir solo la duración real del chunk: _play_q ya desacopla
         # productor/consumidor, así que no hace falta (ni conviene) un
         # margen extra aquí — dormir de más retrasa la entrega del
