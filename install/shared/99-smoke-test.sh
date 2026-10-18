@@ -194,8 +194,12 @@ TOTAL=$((TOTAL+1))
 _info "Check 1/5 — Servicio launchd cargado"
 if command -v launchctl >/dev/null 2>&1; then
     # macOS: launchctl list muestra una línea por servicio cargado
-    if launchctl list 2>/dev/null | grep -q "com.jota.voice"; then
-        PID=$(launchctl list 2>/dev/null | grep "com.jota.voice" | awk '{print $1}')
+    # Etiqueta exacta: con grep, los "." comodín casaban también con
+    # com.jota-voice.wyoming-oww y com.jota-voice.logrotate, y el check daba
+    # OK aunque el cliente no estuviera cargado.
+    LINE=$(launchctl list 2>/dev/null | awk '$3 == "com.jota.voice"')
+    if [ -n "$LINE" ]; then
+        PID=$(printf '%s\n' "$LINE" | awk '{print $1}')
         _ok "com.jota.voice cargado (pid=${PID:-N/A})"
         PASSED=$((PASSED+1))
     else
