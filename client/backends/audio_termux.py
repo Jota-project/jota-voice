@@ -68,16 +68,19 @@ class TermuxBackend:
         self._enqueue_carry = b""
         async with self._lock:
             await self._capture.stop()
-            if self._stream is not None:
+            # Igual que en drain() y en AudioCapture.stop(): las llamadas a
+            # PortAudio, que pueden bloquear, van al executor y no al loop.
+            loop = asyncio.get_running_loop()
+            stream, self._stream = self._stream, None
+            pa, self._pa = self._pa, None
+            if stream is not None:
                 try:
-                    self._stream.stop_stream()
-                    self._stream.close()
+                    await loop.run_in_executor(None, stream.stop_stream)
+                    await loop.run_in_executor(None, stream.close)
                 except Exception:
                     pass
-                self._stream = None
-            if self._pa is not None:
-                self._pa.terminate()
-                self._pa = None
+            if pa is not None:
+                await loop.run_in_executor(None, pa.terminate)
 
     def get_queue(self) -> asyncio.Queue[bytes]:
         return self._capture.get_queue()

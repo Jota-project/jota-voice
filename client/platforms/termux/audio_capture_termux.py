@@ -75,18 +75,29 @@ class AudioCapture:
         backoff = 1.0
         while not self._stop_event.is_set():
             try:
-                self._proc = subprocess.Popen(
+                proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                     env=env,
                 )
+                self._proc = proc
                 # Verificar que arrancó de verdad (no murió instantáneo)
                 await asyncio.sleep(0.5)
-                if self._proc.poll() is not None:
+                if self._stop_event.is_set():
+                    # stop() llegó durante la espera (ahora cede el loop). Si
+                    # ya se llevó el proceso, él lo mata; si no, lo hacemos
+                    # aquí. En ningún caso se arranca el hilo lector.
+                    if self._proc is proc:
+                        self._proc = None
+                        await asyncio.get_running_loop().run_in_executor(
+                            None, self._terminate_proc, proc
+                        )
+                    return
+                if proc.poll() is not None:
                     logger.warning(
                         "AudioCapture: parec murió al arrancar (rc=%s), reintentando en %.1fs",
-                        self._proc.returncode, backoff,
+                        proc.returncode, backoff,
                     )
                     self._proc = None
                     await asyncio.sleep(backoff)
@@ -110,25 +121,45 @@ class AudioCapture:
                 backoff = min(backoff * 2, 10.0)
 
     async def stop(self) -> None:
-        """Detiene el proceso parec y el hilo lector."""
+        """Detiene el proceso parec y el hilo lector.
+
+        Las esperas (hasta 2 s por wait() de parec y 2 s por el join del
+        hilo, ~6 s en el peor caso) corren en el executor: en el hilo del
+        loop congelaban OWW, gateway y display durante el apagado. El aviso
+        de parada y la suelta de referencias son síncronos, así un start()
+        en curso ve el stop al despertar y no arranca el hilo lector."""
         logger.debug("AudioCapture detenido")
         self._stop_event.set()
-        if self._proc is not None:
+        proc, self._proc = self._proc, None
+        thread, self._read_thread = self._read_thread, None
+        if proc is None and thread is None:
+            return
+        await asyncio.get_running_loop().run_in_executor(
+            None, self._stop_blocking, proc, thread
+        )
+
+    @classmethod
+    def _stop_blocking(
+        cls, proc: Optional[subprocess.Popen], thread: Optional[threading.Thread]
+    ) -> None:
+        if proc is not None:
+            cls._terminate_proc(proc)
+        if thread is not None:
+            thread.join(timeout=2.0)
+
+    @staticmethod
+    def _terminate_proc(proc: subprocess.Popen) -> None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=2.0)
+        except Exception:
+            # Tras kill() hay que volver a hacer wait() para recoger
+            # (reap) el proceso; si no, parec queda zombie (issue #86).
             try:
-                self._proc.terminate()
-                self._proc.wait(timeout=2.0)
-            except Exception:
-                # Tras kill() hay que volver a hacer wait() para recoger
-                # (reap) el proceso; si no, parec queda zombie (issue #86).
-                try:
-                    self._proc.kill()
-                    self._proc.wait(timeout=2.0)
-                except Exception as exc:
-                    logger.warning("AudioCapture: no se pudo recoger parec tras kill(): %s", exc)
-            self._proc = None
-        if self._read_thread is not None:
-            self._read_thread.join(timeout=2.0)
-            self._read_thread = None
+                proc.kill()
+                proc.wait(timeout=2.0)
+            except Exception as exc:
+                logger.warning("AudioCapture: no se pudo recoger parec tras kill(): %s", exc)
 
     # ------------------------------------------------------------------
     # Acceso a datos

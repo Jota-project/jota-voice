@@ -414,6 +414,28 @@ def test_stop_para_captura_cierra_stream_y_termina_pyaudio() -> None:
     assert be._pa is None
 
 
+def test_stop_cierra_portaudio_fuera_del_hilo_del_loop() -> None:
+    """stop_stream()/close()/terminate() de PortAudio pueden bloquear; igual
+    que drain(), stop() los ejecuta en el executor y no en el loop."""
+    be, _ = _backend_with_mock_capture()
+    pa = create_autospec(PyAudioSpec, instance=True)
+    stream = create_autospec(_FakeStream, instance=True)
+    seen: list[threading.Thread] = []
+    for m in (stream.stop_stream, stream.close, pa.terminate):
+        m.side_effect = lambda: seen.append(threading.current_thread())
+    be._pa = pa  # type: ignore[assignment]
+    be._stream = stream  # type: ignore[assignment]
+
+    async def _run() -> threading.Thread:
+        await be.stop()
+        return threading.current_thread()
+
+    loop_thread = asyncio.run(_run())
+
+    assert len(seen) == 3
+    assert all(t is not loop_thread for t in seen)
+
+
 def test_stop_tolera_excepcion_al_cerrar_stream() -> None:
     """Un stream ya roto (p. ej. dispositivo desaparecido) no debe impedir
     terminar PyAudio ni dejar referencias colgando."""

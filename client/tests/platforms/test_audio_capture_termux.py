@@ -21,6 +21,8 @@ from config import AudioConfig
 from platforms.termux import audio_capture_termux as mod
 from platforms.termux.audio_capture_termux import AudioCapture
 
+from tests.fakes.waiting import wait_until
+
 _FRAMES_PER_BUFFER = 4  # 8 bytes int16 por frame: datos de test pequeños
 
 
@@ -341,6 +343,76 @@ def test_stop_no_propaga_si_el_proceso_no_se_deja_recoger() -> None:
     proc.kill.assert_called_once_with()
     thread.join.assert_called_once_with(timeout=2.0)
     assert cap._proc is None
+
+
+def test_stop_espera_a_parec_y_al_hilo_fuera_del_loop() -> None:
+    """Bug de la Fase 4c: stop() es async pero hacía terminate/wait(2.0)/
+    kill/wait(2.0)/join(2.0) en el hilo del loop, congelando asyncio hasta
+    ~6 s (OWW, gateway y display parados). Esas esperas van fuera del loop."""
+    proc = _fake_proc()
+    cap, thread = _capture_running(proc)
+    seen: list[threading.Thread] = []
+    proc.wait.side_effect = lambda **_: seen.append(threading.current_thread())
+    thread.join.side_effect = lambda **_: seen.append(threading.current_thread())
+
+    async def _run() -> threading.Thread:
+        await cap.stop()
+        return threading.current_thread()
+
+    loop_thread = asyncio.run(_run())
+
+    assert len(seen) == 2
+    assert all(t is not loop_thread for t in seen)
+
+
+def test_stop_no_congela_el_loop_mientras_parec_tarda() -> None:
+    """Mientras parec tarda en morir, el loop sigue atendiendo otras tareas."""
+    proc = _fake_proc()
+    cap, _ = _capture_running(proc)
+    release = threading.Event()
+    proc.wait.side_effect = lambda **_: release.wait(5.0)
+
+    async def _run() -> None:
+        stop_task = asyncio.create_task(cap.stop())
+        ticks = 0
+        # El loop sigue vivo mientras el executor espera a parec.
+        await wait_until(lambda: proc.wait.called)
+        for _ in range(3):
+            await asyncio.sleep(0)
+            ticks += 1
+        assert not stop_task.done()
+        assert ticks == 3
+        release.set()
+        await asyncio.wait_for(stop_task, timeout=5.0)
+
+    try:
+        asyncio.run(_run())
+    finally:
+        release.set()
+    assert cap._proc is None
+
+
+def test_start_no_arranca_el_lector_si_paran_durante_el_arranque(monkeypatch) -> None:
+    """stop() ahora cede el loop: si llega mientras start() espera a ver si
+    parec sobrevive, start() no debe lanzar el hilo lector sobre un parec
+    que ya se está matando."""
+    real_sleep = asyncio.sleep
+    cap = AudioCapture(_cfg())
+    proc = _fake_proc()
+    _patch_popen(monkeypatch, proc)
+
+    async def _sleep_con_stop(delay, *args, **kwargs):  # noqa: ARG001
+        if delay == 0.5:  # verificación de arranque: llega un stop()
+            await cap.stop()
+        await real_sleep(0)
+
+    monkeypatch.setattr(mod.asyncio, "sleep", _sleep_con_stop)
+
+    asyncio.run(asyncio.wait_for(cap.start(), timeout=2.0))
+
+    assert cap._read_thread is None
+    assert cap._proc is None
+    proc.terminate.assert_called()
 
 
 def test_stop_sin_start_es_noop() -> None:
