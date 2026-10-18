@@ -324,40 +324,38 @@ class CocoaMenubarBackend:
 
     def stop(self) -> None:
         """Detiene NSApp y libera los recursos Cocoa. Seguro de llamar
-        desde cualquier hilo.
+        desde cualquier hilo y más de una vez.
 
-        El teardown (``NSTimer.invalidate()``, ``removeStatusItem_``) debe
-        correr en el hilo principal, que es donde se instalaron (issue #70):
-        si ya estamos en él se hace en el acto; si no, se programa allí antes
-        que ``stop:``. ``stop:`` hace retornar el run loop; ``terminate:``
-        llamaría a exit() y podría cortar el apagado asíncrono a mitad."""
+        Todo ocurre en UN único callback del hilo principal
+        (:meth:`_stop_on_main`): teardown, ``stop:`` y el NSEvent que
+        despierta al run loop. Antes el teardown se encolaba por separado
+        antes de ``stop:`` y el evento de despertar se consumía antes de
+        procesarse ``stop:``; sin icono ni timer que generasen más eventos,
+        NSApp.run() no retornaba y quedaba un proceso invisible.
+        ``terminate:`` llamaría a exit() y cortaría el apagado asíncrono."""
         if Foundation.NSThread.isMainThread():
-            self._teardown()
+            self._stop_on_main()
         else:
-            self._call_on_main(self._teardown)
-        if self._app is not None:
-            self._app.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "stop:", None, False
-            )
-            # stop: solo se observa al terminar de procesar un NSEvent; el
-            # selector del run loop no genera uno por sí mismo.
-            make_event = getattr(
-                AppKit.NSEvent,
-                "otherEventWithType_location_modifierFlags_timestamp_"
-                "windowNumber_context_subtype_data1_data2_",
-            )
-            wake_event = make_event(
-                AppKit.NSEventTypeApplicationDefined,
-                (0.0, 0.0),
-                0,
-                0.0,
-                0,
-                None,
-                0,
-                0,
-                0,
-            )
-            self._app.postEvent_atStart_(wake_event, True)
+            self._call_on_main(self._stop_on_main)
+
+    def _stop_on_main(self) -> None:
+        """Hilo principal. Libera recursos (issue #68/#70) y para NSApp."""
+        self._teardown()
+        app = self._app
+        if app is None:
+            return
+        app.stop_(None)
+        # stop: solo se observa al terminar de procesar un NSEvent; postear
+        # uno garantiza que el run loop lo compruebe y retorne.
+        make_event = getattr(
+            AppKit.NSEvent,
+            "otherEventWithType_location_modifierFlags_timestamp_"
+            "windowNumber_context_subtype_data1_data2_",
+        )
+        wake_event = make_event(
+            AppKit.NSEventTypeApplicationDefined, (0.0, 0.0), 0, 0.0, 0, None, 0, 0, 0,
+        )
+        app.postEvent_atStart_(wake_event, True)
 
     def _paint_health(self, level: str, text: str) -> None:
         """Muestra u oculta la línea de aviso. Hilo principal."""

@@ -332,8 +332,8 @@ def test_quit_without_commands_stops_app_cleanly(backend):
     posted_events = []
 
     class FakeApp:
-        def performSelectorOnMainThread_withObject_waitUntilDone_(self, sel, obj, wait):
-            selectors.append(sel)
+        def stop_(self, sender):
+            selectors.append("stop:")
 
         def postEvent_atStart_(self, event, at_start):
             posted_events.append((event, at_start))
@@ -396,20 +396,29 @@ class _FakeTimer:
 
 
 class _RecordingApp:
+    """Registra en orden lo que se hace sobre NSApp: ``stop:``, eventos
+    posteados y cualquier performSelectorOnMainThread."""
+
     def __init__(self):
         self.selectors = []
 
     def performSelectorOnMainThread_withObject_waitUntilDone_(self, sel, obj, wait):
         self.selectors.append(sel)
 
+    def stop_(self, sender):
+        self.selectors.append("stop:")
+
     def postEvent_atStart_(self, event, at_start):
-        pass
+        self.selectors.append("postEvent")
 
 
 def test_stop_from_worker_thread_defers_teardown_to_main_thread(backend):
     """Issue #70: NSTimer.invalidate() debe ejecutarse en el hilo que
-    instaló el timer (el principal). Desde el hilo asyncio, stop() solo
-    programa el teardown en el hilo principal."""
+    instaló el timer (el principal). Desde el hilo asyncio, stop() no toca
+    nada: programa UN callback en el hilo principal que hace teardown,
+    stop: y despierta el run loop, en ese orden (en callbacks separados el
+    evento de despertar se consumía antes de stop: y NSApp.run() no
+    retornaba)."""
     import threading
 
     timer = _FakeTimer()
@@ -423,14 +432,15 @@ def test_stop_from_worker_thread_defers_teardown_to_main_thread(backend):
     worker.join(timeout=5.0)
 
     assert timer.invalidated_on == [], "invalidate() no debe correr en el worker"
-    assert [fn for fn, _ in scheduled] == [backend._teardown]
-    assert backend._app.selectors == ["stop:"]
+    assert [fn for fn, _ in scheduled] == [backend._stop_on_main]
+    assert backend._app.selectors == [], "stop: no debe enviarse desde el worker"
 
     # El hilo principal ejecuta lo programado.
     for fn, args in scheduled:
         fn(*args)
     assert timer.invalidated_on == [threading.main_thread()]
     assert backend.status_item is None
+    assert backend._app.selectors == ["stop:", "postEvent"]
 
 
 def test_request_repaint_runs_tick_on_main_thread_not_on_nsapp(backend):
