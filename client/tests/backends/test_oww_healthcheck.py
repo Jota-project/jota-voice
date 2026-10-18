@@ -244,3 +244,60 @@ def test_oww_config_has_default_healthcheck_threshold() -> None:
     assert cfg.oww_healthcheck_threshold == 3, (
         f"default esperaba 3, obtuve {cfg.oww_healthcheck_threshold}"
     )
+
+
+@pytest.mark.asyncio
+async def test_connect_with_backoff_counts_initial_failures_for_degraded() -> None:
+    """Con el servidor OWW caído desde el arranque, connect_with_backoff()
+    reintentaba para siempre sin publicar oww_degraded: consecutive_drops
+    solo contaba caídas tras conectar. Los fallos de conexión iniciales
+    también cuentan para el umbral (una sola publicación)."""
+    cfg = _cfg(reconnect_backoff_s=[0.0])
+    bus = EventBus()
+    client = OWWClient(cfg.oww, audio_cfg=cfg.audio, bus=bus)
+    attempts = {"n": 0}
+
+    async def _connect() -> None:
+        attempts["n"] += 1
+        if attempts["n"] <= 5:
+            raise ConnectionRefusedError("OWW caído")
+
+    async with _Collector(bus) as col:
+        with patch.object(OWWClient, "connect", side_effect=_connect):
+            await asyncio.wait_for(client.connect_with_backoff(), timeout=_SAFETY_TIMEOUT_S)
+        await col.drain()
+
+    degraded = col.of_type("oww_degraded")
+    assert len(degraded) == 1, degraded
+    assert degraded[0].data["consecutive_failures"] == 3
+    assert client._degraded_published is True
+
+
+@pytest.mark.asyncio
+async def test_connect_with_backoff_below_threshold_does_not_publish() -> None:
+    cfg = _cfg(reconnect_backoff_s=[0.0])
+    bus = EventBus()
+    client = OWWClient(cfg.oww, audio_cfg=cfg.audio, bus=bus)
+    attempts = {"n": 0}
+
+    async def _connect() -> None:
+        attempts["n"] += 1
+        if attempts["n"] <= 2:
+            raise ConnectionRefusedError("OWW caído")
+
+    async with _Collector(bus) as col:
+        with patch.object(OWWClient, "connect", side_effect=_connect):
+            await asyncio.wait_for(client.connect_with_backoff(), timeout=_SAFETY_TIMEOUT_S)
+        await col.drain()
+
+    assert col.of_type("oww_degraded") == []
+
+
+def test_registry_make_oww_wires_bus_to_oww_client() -> None:
+    """oww_degraded/oww_recovered nunca llegaban en producción: make_oww →
+    WyomingBackend → OWWClient no pasaban el bus."""
+    from backends import registry
+
+    bus = EventBus()
+    backend = registry.make_oww(_cfg(), on_wake_word=None, bus=bus)
+    assert backend._client._bus is bus

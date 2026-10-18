@@ -77,10 +77,14 @@ Al instalar jota-voice en macOS aparece automáticamente un icono en la barra de
 | `thinking` | `brain` | Esperando respuesta del gateway |
 | `speaking` | `speaker.wave.2` | Reproduciendo TTS |
 | `error` | `exclamationmark.triangle` | Último turno terminó en error |
+| `cancelled` | `xmark.circle` | Turno cancelado |
+
+En reposo el icono también avisa de problemas fuera del turno: `mic.slash` si algo no funciona pero se reintenta solo (gateway reconectando, wake word no disponible, un servicio caído) y `exclamationmark.octagon` si hace falta intervenir (p. ej. `client_key` inválida). Una transcripción degradada no cambia el icono.
 
 El menú incluye:
 
-- Cabecera con el estado actual (no seleccionable).
+- Cabecera con el estado actual (no seleccionable). Hasta que el cliente termina de arrancar dice "Arrancando…" y los items de Servicio, logs y configuración están deshabilitados.
+- Bajo la cabecera, solo si hay algo que avisar, una línea de estado: "Gateway: reconectando…", "Transcripción degradada", "Wake word no disponible", "Gateway: client_key inválida" (en rojo)… Al pulsarla se abren los logs. Se limpia sola cuando el gateway informa `restored`/`connected` o cuando un turno funciona.
 - Submenú **Servicio** → Pausar/Reanudar escucha, Apagar servicio.
 - Abrir logs / Abrir configuración en la app por defecto.
 - Acerca de / Salir.

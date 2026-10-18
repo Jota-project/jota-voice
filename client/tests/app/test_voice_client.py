@@ -103,6 +103,25 @@ def test_audio_start_failure_is_visible_and_shuts_down_cleanly(monkeypatch) -> N
     asyncio.run(_test_audio_start_failure_is_visible_and_shuts_down_cleanly(monkeypatch))
 
 
+def test_main_passes_bus_to_oww_backend(monkeypatch) -> None:
+    """Sin bus, OWWClient nunca publica oww_degraded/oww_recovered y el
+    menubar no puede avisar de "Wake word no disponible"."""
+    captured: dict = {}
+
+    def _make_oww(cfg, **kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(registry, "make_audio", lambda cfg: _FailingAudioBackend())
+    monkeypatch.setattr(registry, "make_oww", _make_oww)
+
+    asyncio.run(
+        voice_client.main(_make_cfg(), _SpyMenubarBackend(), external_stop_event=asyncio.Event())
+    )
+
+    assert isinstance(captured.get("bus"), voice_client.EventBus)
+
+
 class _ExplodingMenubarBackend(_SpyMenubarBackend):
     def set_state(self, state: str) -> None:
         raise RuntimeError("menubar backend roto")
@@ -146,12 +165,13 @@ def test_run_with_cocoa_menubar_survives_early_main_failure(monkeypatch) -> None
 
 
 @pytestmark_cocoa
-def test_run_with_cocoa_menubar_signal_handler_survives_closed_loop(monkeypatch) -> None:
-    """Issue #104 fix: en Cocoa mode NO se registran signal handlers clásicos
-    (signal.signal()). El hilo principal de Cocoa nunca ejecuta bytecode Python,
-    así que CPython nunca invoca los handlers — el NSFileHandle observer es
-    el único mecanismo de entrega de señales. Verificamos que signal.signal()
-    no se llama."""
+def test_run_with_cocoa_menubar_installs_noop_signal_handlers(monkeypatch) -> None:
+    """En Cocoa mode el NSFileHandle observer es quien procesa las señales,
+    pero CPython solo escribe en el wakeup fd si la señal tiene un handler
+    Python. Sin ellos (lo que exigía antes este test, #104) SIGTERM mataba
+    el proceso en seco con exit 143, sin apagado ordenado. Deben instalarse
+    handlers no-op para SIGTERM y SIGINT. La prueba con señales reales está
+    en test_voice_client_cocoa_signals.py."""
     async def _fake_main(cfg, menubar_backend, *, external_stop_event=None):
         raise RuntimeError("fallo antes de construir nada")
 
@@ -168,8 +188,12 @@ def test_run_with_cocoa_menubar_signal_handler_survives_closed_loop(monkeypatch)
 
     voice_client._run_with_cocoa_menubar(cfg, menubar)
 
-    # Cocoa mode usa NSFileHandle observer, no signal.signal()
-    assert len(signal_calls) == 0
+    assert sorted(sig for sig, _ in signal_calls) == sorted(
+        [voice_client.signal.SIGTERM, voice_client.signal.SIGINT]
+    )
+    for _sig, handler in signal_calls:
+        assert callable(handler)
+        handler(_sig, None)  # no-op: no debe lanzar
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +301,8 @@ async def _test_menubar_stops_after_async_cleanup(monkeypatch) -> None:
         pass
 
     monkeypatch.setattr(registry, "make_audio", lambda cfg: _AudioBackend())
-    monkeypatch.setattr(registry, "make_oww", lambda cfg, on_wake_word: _OwwBackend())
+    monkeypatch.setattr(registry, "make_oww", lambda cfg, on_wake_word, **kw: _OwwBackend())
+
     class _Display(NullDisplayBackend):
         async def stop(self) -> None:
             cleanup_order.append("display.stop")

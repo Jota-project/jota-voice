@@ -1,5 +1,14 @@
 # macOS menubar UI for jota-voice
 
+> **Nota posterior (2026-10-18, issue #67): el reparto de hilos de este documento quedó obsoleto.**
+> El código real (y el único que funciona) es:
+> - **Hilo principal real del proceso → Cocoa.** `CocoaMenubarBackend.run_forever()` arranca `NSApp.run()` y bloquea ese hilo hasta `stop()`. No existe `start()` ni ningún hilo daemon para Cocoa: construir el `NSStatusItem` en un hilo y correr `NSApp.run()` en otro **cuelga el proceso** (comprobado).
+> - **Hilo de trabajo → asyncio.** `voice_client._run_with_cocoa_menubar()` lanza `asyncio.run(main(...))` en un hilo y deja el principal para `run_forever()`. Las señales llegan por un observer `NSFileHandle` (issue #104).
+> - El contrato está formalizado en `client/ui/menubar_base.py` (`BlockingMenubarBackend` + `needs_main_thread()`); cualquier backend futuro (GTK, Win32) debe seguirlo.
+> - `stop()` es seguro desde cualquier hilo: el teardown (`NSTimer.invalidate()`, `removeStatusItem_`) va al hilo principal (#68, #70); el repintado inmediato usa `AppHelper.callAfter`.
+> - Por `ui_queue` solo pasan `toggle_pause` y `shutdown_service`, reenviados por un hilo propio sin sondeo (#99, #100); logs, configuración y Salir son callbacks directos.
+> - "Acerca de" usa el panel estándar no modal, no `NSAlert.runModal()` (#98).
+
 **Status:** design — awaiting user approval
 **Date:** 2026-07-09
 **Branch:** feature/universal-client
@@ -115,7 +124,7 @@ The Protocol is `runtime_checkable` so the test in `test_menubar_base.py` can ve
   7. "Acerca de jota-voice" → `NSAlert` showing version (read from `__version__` or `pyproject.toml`).
   8. "Salir" → invokes `on_quit`.
 - `NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(0.2, ...)` reads `_SharedState` and repaints icon, title, and the pause/resume label.
-- The Cocoa thread invokes `NSApplication.sharedApplication().run()` from a `threading.Thread(target=..., daemon=True).start()` started in `voice_client.main()`.
+- ~~The Cocoa thread invokes `NSApplication.sharedApplication().run()` from a `threading.Thread(target=..., daemon=True).start()` started in `voice_client.main()`.~~ **Obsoleto (#67):** `run_forever()` corre `NSApp.run()` en el hilo principal real; asyncio va en el hilo de trabajo (ver nota al principio).
 
 ### `menubar_null.py`
 
@@ -225,7 +234,7 @@ class MenubarConfig(BaseModel):
 1. `_setup_logging`.
 2. Build `EventBus`.
 3. Build audio, oww, display backend, gateway, playback, display client.
-4. **New:** if darwin and pyobjc available, construct `_SharedState`, `CocoaMenubarBackend(shared_state, cfg.menubar)`. Start a daemon thread running `NSApplication.sharedApplication().run()`. Construct `MenubarCommands` closures over `stop_event`, `pause_event`, and the file paths.
+4. **New:** if darwin and pyobjc available, construct `_SharedState`, `CocoaMenubarBackend(shared_state, cfg.menubar)`. ~~Start a daemon thread running `NSApplication.sharedApplication().run()`.~~ (Obsoleto, #67: el hilo principal corre `run_forever()` y `main()` ya va en el hilo de trabajo.) Construct `MenubarCommands` closures over `stop_event`, `pause_event`, and the file paths.
 5. **New:** build `MenubarClient(backend, cfg.menubar)`, register the commands on the backend, then `menubar_task = asyncio.create_task(menubar_client.run(bus, ui_queue, pause_event))`.
 6. Start `audio.start()`.
 7. Replace `oww_task = asyncio.create_task(oww.run_forever(...))` with `oww_task = asyncio.create_task(_oww_loop(pause_event))`.
@@ -236,7 +245,7 @@ class MenubarConfig(BaseModel):
 1. SIGTERM/SIGINT, the menubar "Salir" item, or `launchctl bootout` from "Apagar servicio" sets `stop_event`.
 2. `asyncio.wait` returns. `voice_client.main()` enters `finally`.
 3. **New:** `menubar_task.cancel()` and `await asyncio.gather(..., return_exceptions=True)`.
-4. **New:** `NSApp.sharedApplication().terminate_(None)` via `performSelectorOnMainThread_withObject_waitUntilDone_(False)`.
+4. **New:** `menubar_backend.stop()` (no `terminate:`, que llamaría a `exit()`): programa el teardown y `stop:` en el hilo principal y `run_forever()` retorna.
 5. Continue with the existing teardown: cancel all tasks, `audio.stop()`, `gateway.disconnect()`, `oww.disconnect()`, `bus.close()`.
 
 ## Error handling
@@ -244,7 +253,7 @@ class MenubarConfig(BaseModel):
 | Failure | Effect | Recovery |
 |---|---|---|
 | `pyobjc-framework-Cocoa` not installed on Mac | `ImportError` when constructing `CocoaMenubarBackend` | `make_menubar` returns `NullMenubarBackend`, logs WARNING with the pip install command. Voice client runs normally without UI. |
-| `NSApp.run()` fails (no display server) | Exception in Cocoa thread | Thread is daemon; asyncio continues without UI; WARNING at log. |
+| `NSApp.run()` fails (no display server) | ~~Exception in Cocoa thread~~ | ~~Thread is daemon~~ (obsoleto, #67). `registry.make_menubar` cae a `NullMenubarBackend` si `CocoaMenubarBackend()` falla al construirse (#32). |
 | `launchctl bootout` fails in "Apagar servicio" (e.g. service not loaded) | `CalledProcessError` from subprocess | Both `launchctl disable` and `launchctl bootout` run with `check=False`; the WARNING is logged but `stop_event.set()` still fires so the client always exits. |
 | `open -a Console` fails (Console.app moved) | `OSError` | Log WARNING; the menu item does not block. |
 | Pause toggled mid wake-word | OWW task cancelled before publishing | IDLE state machine discards stale wake-word events because pause is checked on re-entry. No partial state. |

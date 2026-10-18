@@ -90,7 +90,7 @@ from core.aio import cancel_and_wait
 from domain.event_bus import EventBus, VoiceEvent
 from domain.gateway_session import gateway_idle_listener, idle_supervisor
 from domain.state_machine import run as sm_run
-from ui.menubar_base import MenubarCommands
+from ui.menubar_base import MenubarCommands, needs_main_thread
 from ui.menubar_client import MenubarClient
 
 from app.display_client import DisplayClient
@@ -183,7 +183,7 @@ async def main(
         bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": name}))
 
     audio = registry.make_audio(cfg)
-    oww = registry.make_oww(cfg, on_wake_word=_oww_on_wake)
+    oww = registry.make_oww(cfg, on_wake_word=_oww_on_wake, bus=bus)
     display_backend = registry.make_display(cfg, on_cancel=cancel_event.set)
     # bus=bus: sin él gateway_ready (session_id, capabilities, #110) y los
     # status previos a ready nunca llegaban al bus en producción.
@@ -377,7 +377,7 @@ async def main(
         bus.close()
         log.info("jota-voice apagado limpiamente")
 
-        if hasattr(menubar_backend, "stop"):
+        if needs_main_thread(menubar_backend):
             menubar_backend.stop()
 
 
@@ -433,6 +433,15 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
                 )
             except Exception:
                 log.exception("No se pudo reflejar el error en el menubar")
+        finally:
+            # main() llama a stop() al final de su finally; si ese finally
+            # lanzó antes, el run loop de Cocoa no pararía nunca. stop() es
+            # idempotente y seguro desde cualquier hilo.
+            try:
+                if needs_main_thread(menubar_backend):
+                    menubar_backend.stop()
+            except Exception:
+                log.exception("No se pudo parar el menubar")
 
     t = threading.Thread(target=_asyncio_thread, name="jota-asyncio", daemon=False)
     t.start()
@@ -501,12 +510,24 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
     )
     _fh.readInBackgroundAndNotify()
 
-    # En Cocoa mode las señales las gestiona exclusivamente el NSFileHandle
-    # observer — el hilo principal no ejecuta bytecode Python, así que un
-    # signal handler clásico nunca se invocaría. Las llamadas a signal.signal()
-    # fueron eliminadas al convertir _handle_os_signal en dead code (issue #104).
+    # Handlers Python no-op para SIGTERM/SIGINT: el trabajo lo hace el
+    # observer de NSFileHandle, pero CPython solo escribe en el wakeup fd si
+    # la señal tiene un handler Python. Con SIG_DFL el SO mataba el proceso
+    # en seco (exit 143) sin apagado ordenado: ni audio.stop() ni cierre del
+    # gateway en "Apagar servicio" o `launchctl stop`.
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(_sig, lambda _signum, _frame: None)
 
     menubar_backend.run_forever()  # bloquea el hilo principal (NSApp.run)
+
+    # El run loop puede haber parado sin pasar por main() (p.ej. "Salir"
+    # durante "Arrancando…", antes de set_commands()): pedir también el
+    # apagado del lado asyncio, o el hilo (no daemon) mantendría vivo el
+    # proceso. Si main() ya terminó, es un no-op.
+    loop = loop_holder.get("loop")
+    stop_event = stop_holder.get("stop_event")
+    if loop is not None and stop_event is not None:
+        _call_soon_threadsafe_safe(loop, stop_event)
     t.join(timeout=10.0)
 
 
@@ -519,7 +540,7 @@ if __name__ == "__main__":
     _setup_logging(_cfg.logging.level)
     _menubar_backend = registry.make_menubar(_cfg)
 
-    if hasattr(_menubar_backend, "run_forever"):
+    if needs_main_thread(_menubar_backend):
         _run_with_cocoa_menubar(_cfg, _menubar_backend)
     else:
         asyncio.run(main(_cfg, _menubar_backend))

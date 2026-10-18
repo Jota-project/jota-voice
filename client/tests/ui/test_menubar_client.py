@@ -33,6 +33,9 @@ class FakeBackend:
     def set_commands(self, cmds: MenubarCommands) -> None:
         self.calls.append(("set_commands", (id(cmds),)))
 
+    def set_health(self, level: str, text: str) -> None:
+        self.calls.append(("set_health", (level, text)))
+
 
 def _run(coro):
     return asyncio.run(coro)
@@ -460,3 +463,373 @@ def test_shutdown_service_sends_sigterm_to_self():
     assert killed["sig"] == signal.SIGTERM, (
         f"Expected SIGTERM={signal.SIGTERM}, got sig={killed['sig']}"
     )
+
+
+def test_only_queue_commands_are_dispatched(caplog):
+    """Issue #99: por ui_queue solo pasan los comandos que tocan estado de
+    asyncio (toggle_pause y shutdown_service). open_logs, open_config y quit
+    son callbacks directos en voice_client; sus ramas en la cola eran código
+    muerto y ahora caen en "comando UI desconocido"."""
+    import logging
+
+    bus = EventBus()
+    backend = FakeBackend()
+    client = MenubarClient(backend)
+    ui_queue: queue.Queue = queue.Queue()
+    pause = asyncio.Event()
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        stop = asyncio.Event()
+        task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
+        await _subscribed(bus)
+        for cmd in ("open_logs", "open_config", "quit"):
+            ui_queue.put_nowait(cmd)
+        await wait_until(
+            lambda: sum("desconocido" in r.getMessage() for r in caplog.records) == 3,
+            message="tres comandos desconocidos",
+        )
+        bus.close()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    with caplog.at_level(logging.INFO, logger="ui.menubar_client"):
+        _run(scenario())
+
+    assert not any("requested" in r.getMessage() for r in caplog.records)
+
+
+class _RecordingQueue(queue.Queue):
+    """queue.Queue que registra los timeouts con los que se llama a get()."""
+
+    def __init__(self):
+        super().__init__()
+        self.get_timeouts: list = []
+
+    def get(self, block=True, timeout=None):
+        self.get_timeouts.append(timeout)
+        return super().get(block, timeout)
+
+
+def _forwarder_threads():
+    import threading
+
+    return [t for t in threading.enumerate() if t.name == "menubar-ui-commands"]
+
+
+def test_ui_queue_drained_without_polling_nor_default_executor():
+    """Issue #100: antes se sondeaba ui_queue cada 200 ms con
+    run_in_executor(None, ...), ocupando para siempre un hilo del executor
+    por defecto (compartido con audio/HTTP). Ahora un hilo propio bloquea en
+    get() sin timeout y reenvía con call_soon_threadsafe; al terminar run()
+    el hilo se desbloquea y sale."""
+    bus = EventBus()
+    backend = FakeBackend()
+    client = MenubarClient(backend)
+    ui_queue = _RecordingQueue()
+    pause = asyncio.Event()
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+
+        def _no_executor(*_args, **_kwargs):
+            raise AssertionError("MenubarClient no debe usar el executor por defecto")
+
+        loop.run_in_executor = _no_executor
+        stop = asyncio.Event()
+        task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
+        await _subscribed(bus)
+        ui_queue.put_nowait("toggle_pause")
+        await wait_until(lambda: pause.is_set(), message="toggle_pause procesado")
+        assert _forwarder_threads(), "el hilo reenviador debe estar vivo"
+        bus.close()
+        await asyncio.wait_for(task, timeout=5.0)
+        await wait_until(lambda: not _forwarder_threads(), message="hilo reenviador terminado")
+
+    _run(scenario())
+
+    assert ui_queue.get_timeouts, "get() nunca se llamó"
+    assert all(t is None for t in ui_queue.get_timeouts), ui_queue.get_timeouts
+    assert backend.calls == [("set_listening_paused", (True,))]
+
+
+def test_forwarder_thread_exits_when_run_is_cancelled():
+    bus = EventBus()
+    client = MenubarClient(FakeBackend())
+    ui_queue: queue.Queue = queue.Queue()
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        task = asyncio.create_task(
+            client.run(bus, ui_queue, asyncio.Event(), loop, asyncio.Event())
+        )
+        await _subscribed(bus)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        await wait_until(lambda: not _forwarder_threads(), message="hilo reenviador terminado")
+
+    _run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Issues #108 y #7: estado del gateway y de la wake word en el menubar.
+# ---------------------------------------------------------------------------
+
+
+def _health_after(*events: VoiceEvent) -> tuple[FakeBackend, list[tuple[str, str]]]:
+    """Publica ``events`` en orden y devuelve las llamadas a set_health."""
+    bus = EventBus()
+    backend = FakeBackend()
+    client = MenubarClient(backend, hold_transient_s=0.0)
+    ui_queue: queue.Queue = queue.Queue()
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        task = asyncio.create_task(
+            client.run(bus, ui_queue, asyncio.Event(), loop, asyncio.Event())
+        )
+        await _subscribed(bus)
+        for ev in events:
+            bus.publish(ev)
+        bus.close()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    _run(scenario())
+    return backend, [c[1] for c in backend.calls if c[0] == "set_health"]
+
+
+def _status(service: str, state: str, **extra) -> VoiceEvent:
+    # Forma real: el gateway reenvía el mensaje íntegro (con type="status").
+    return VoiceEvent(
+        type="gateway_status",
+        data={"type": "status", "service": service, "state": state, **extra},
+    )
+
+
+def _gw(state: str, **extra) -> VoiceEvent:
+    # Forma de gateway_session._status() (supervisor de la sesión).
+    return VoiceEvent(type="gateway_status", data={"service": "gateway", "state": state, **extra})
+
+
+def _fatal(kind: str = "invalid_client_key") -> VoiceEvent:
+    # Forma de gateway_session.handshake_error_event().
+    return VoiceEvent(type="error", data={
+        "code": "GATEWAY_HANDSHAKE_REJECTED",
+        "kind": kind,
+        "close_code": 1008,
+        "message": "Gateway rechazó el handshake (1008): invalid client key",
+        "fatal": True,
+    })
+
+
+def test_transcriber_degraded_is_discreet():
+    """jota-gateway#227 manda "transcriber degraded" falsos en reposo: el
+    aviso es informativo, sin icono de error ni contador de errores."""
+    backend, health = _health_after(_status("transcriber", "degraded"))
+
+    assert health == [("info", "Transcripción degradada")]
+    assert not [c for c in backend.calls if c[0] in ("set_state", "set_errors_count")]
+
+
+def test_transcriber_degraded_cleared_by_restored():
+    _, health = _health_after(
+        _status("transcriber", "degraded"), _status("transcriber", "restored")
+    )
+    assert health[-1] == ("ok", "")
+
+
+def test_transcriber_degraded_cleared_by_next_good_transcription():
+    _, health = _health_after(
+        _status("transcriber", "degraded"),
+        VoiceEvent(type="transcription", data={"text": "enciende la luz"}),
+    )
+    assert health[-1] == ("ok", "")
+
+
+def test_empty_transcription_does_not_clear_degraded():
+    _, health = _health_after(
+        _status("transcriber", "degraded"),
+        VoiceEvent(type="transcription", data={"text": ""}),
+    )
+    assert health == [("info", "Transcripción degradada")]
+
+
+def test_repeated_status_is_not_resent():
+    _, health = _health_after(
+        _status("transcriber", "degraded"), _status("transcriber", "degraded")
+    )
+    assert health == [("info", "Transcripción degradada")]
+
+
+def test_transcriber_unavailable_is_a_warning():
+    _, health = _health_after(_status("transcriber", "unavailable"))
+    assert health == [("warn", "Transcripción no disponible")]
+
+
+def test_orchestrator_reconnecting_then_restored():
+    _, health = _health_after(
+        _status("orchestrator", "reconnecting"), _status("orchestrator", "restored")
+    )
+    assert health == [("warn", "Orquestador: reconectando…"), ("ok", "")]
+
+
+def test_gateway_reconnecting_then_connected():
+    _, health = _health_after(
+        _gw("reconnecting", attempt=1, delay_s=1.0), _gw("connected", session_id="s2")
+    )
+    assert health == [("warn", "Gateway: reconectando…"), ("ok", "")]
+
+
+def test_gateway_disconnected_supersedes_service_statuses():
+    """Con la sesión caída, los status de servicios de la sesión anterior ya
+    no significan nada: se descartan."""
+    _, health = _health_after(
+        _status("transcriber", "degraded"), _gw("disconnected", code=1006, reason="")
+    )
+    assert health[-1] == ("warn", "Gateway: desconectado")
+
+
+def test_non_fatal_disconnect_error_shows_no_connection_until_ready():
+    _, health = _health_after(
+        VoiceEvent(type="error", data={
+            "code": "GATEWAY_DISCONNECTED", "message": "x", "fatal": False,
+        }),
+        VoiceEvent(type="gateway_ready", data={"session_id": "s", "agent": "a", "capabilities": {}}),
+    )
+    assert health == [("warn", "Gateway: sin conexión"), ("ok", "")]
+
+
+def test_fatal_handshake_rejection_is_clearly_visible():
+    backend, health = _health_after(_fatal("invalid_client_key"))
+
+    assert health == [("fatal", "Gateway: client_key inválida")]
+    # Sigue contando como error y mostrando el icono de error transitorio.
+    assert ("set_errors_count", (1,)) in backend.calls
+    assert ("set_state", ("error",)) in backend.calls
+
+
+def test_fatal_survives_reconnecting_status_and_clears_on_ready():
+    _, health = _health_after(
+        _fatal("invalid_client_key"),
+        _gw("reconnecting", attempt=1, delay_s=1.0),
+        VoiceEvent(type="gateway_ready", data={"session_id": "s", "agent": "a", "capabilities": {}}),
+    )
+    assert health[0] == ("fatal", "Gateway: client_key inválida")
+    assert health[1][0] == "fatal"
+    assert health[-1] == ("ok", "")
+
+
+def test_other_fatal_gateway_error_is_shown():
+    _, health = _health_after(VoiceEvent(type="error", data={
+        "code": "TURN_ERROR", "message": "agente caído", "fatal": True,
+    }))
+    assert health == [("fatal", "Error grave: agente caído")]
+
+
+def test_non_fatal_error_does_not_touch_health():
+    _, health = _health_after(VoiceEvent(type="error", data={"message": "boom"}))
+    assert health == []
+
+
+def test_wake_word_degraded_and_recovered():
+    _, health = _health_after(
+        VoiceEvent(type="oww_degraded", data={"consecutive_failures": 3, "backoff_s": 5.0}),
+        VoiceEvent(type="oww_recovered", data={}),
+    )
+    assert health == [("warn", "Wake word no disponible"), ("ok", "")]
+
+
+def test_several_conditions_are_combined_by_severity():
+    _, health = _health_after(
+        _status("transcriber", "degraded"),
+        VoiceEvent(type="oww_degraded", data={"consecutive_failures": 3, "backoff_s": 5.0}),
+    )
+    assert health[-1] == ("warn", "Wake word no disponible · Transcripción degradada")
+
+
+def test_malformed_status_is_ignored():
+    _, health = _health_after(
+        VoiceEvent(type="gateway_status", data={"type": "status"}),
+        _status("transcriber", "algo_nuevo"),
+    )
+    assert health == []
+
+
+def test_good_turn_clears_orchestrator_and_tts_warnings():
+    _, health = _health_after(
+        _status("orchestrator", "unavailable"),
+        _status("tts", "unavailable"),
+        VoiceEvent(type="llm_token", data={"content": "Hola"}),
+        VoiceEvent(type="playback_started", data={}),
+    )
+    assert health[-1] == ("ok", "")
+    assert ("warn", "Orquestador no disponible · Síntesis de voz no disponible") in health
+
+
+def test_orderly_close_does_not_flash_a_warning():
+    """Un cierre 1000/1001 tras una sesión estable (inactividad, cierre
+    ordenado) se reabre al instante sin ``reconnecting``: no debe hacer
+    parpadear el aviso. Un corte real sí llega como reconnecting o error."""
+    _, health = _health_after(
+        _gw("disconnected", code=1000, reason="idle"),
+        _gw("connected", session_id="s2"),
+    )
+    assert health == []
+
+
+def test_orderly_close_still_drops_stale_service_statuses():
+    _, health = _health_after(
+        _status("transcriber", "degraded"),
+        _gw("disconnected", code=1001, reason="going away"),
+    )
+    assert health == [("info", "Transcripción degradada"), ("ok", "")]
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "kind, text",
+    [
+        ("invalid_client_key", "Gateway: client_key inválida"),
+        ("agent_not_permitted", "Gateway: agente no permitido"),
+        ("handshake_invalid", "Gateway: handshake inválido"),
+        ("http_rejected", "Gateway: acceso denegado (HTTP)"),
+        ("policy_rejected", "Gateway: conexión rechazada"),
+        ("error_message", "Gateway: conexión rechazada"),
+    ],
+)
+def test_fatal_handshake_texts_cover_every_fatal_kind(kind, text):
+    """Los kinds fatales son los de gateway_client._FATAL_HANDSHAKE_KINDS
+    (más error_message con fatal=True). agent_not_available y
+    service_unavailable nunca son fatales y no necesitan texto propio."""
+    _, health = _health_after(_fatal(kind))
+    assert health == [("fatal", text)]
+
+
+def test_fatal_kinds_match_gateway_client():
+    from backends.gateway_client import _FATAL_HANDSHAKE_KINDS
+    from ui.menubar_client import _HANDSHAKE_TEXTS
+
+    assert set(_HANDSHAKE_TEXTS) == set(_FATAL_HANDSHAKE_KINDS)
+
+
+def test_fatal_handshake_replaces_reconnecting_entry():
+    """Tras un rechazo fatal el supervisor deja de reintentar: "Gateway:
+    reconectando…" ya no es verdad y no debe acompañar al aviso rojo."""
+    _, health = _health_after(
+        _gw("reconnecting", attempt=1, delay_s=1.0), _fatal("invalid_client_key")
+    )
+    assert health[-1] == ("fatal", "Gateway: client_key inválida")
+
+
+def test_disconnect_error_drops_stale_service_statuses():
+    _, health = _health_after(
+        _status("transcriber", "degraded"),
+        VoiceEvent(type="error", data={
+            "code": "GATEWAY_DISCONNECTED", "message": "x", "fatal": False,
+        }),
+    )
+    assert health[-1] == ("warn", "Gateway: sin conexión")

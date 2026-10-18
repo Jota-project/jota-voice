@@ -25,3 +25,6 @@ class NullMenubarBackend:
 
     def set_commands(self, cmds: MenubarCommands) -> None:
         log.debug("NullMenubarBackend: commands registered")
+
+    def set_health(self, level: str, text: str) -> None:
+        log.debug("NullMenubarBackend: health=%s %r", level, text)
