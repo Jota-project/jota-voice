@@ -763,3 +763,21 @@ def test_cierre_1008_agent_not_available_no_es_fatal():
     exc = GatewayDisconnected(1008, "Agent 'main' not available.")
     assert exc.fatal is False
     assert GatewayDisconnected(1008, "Clave de cliente invalida o inactiva").fatal is True
+
+
+
+@pytest.mark.asyncio
+async def test_sesion_que_cierra_dentro_del_handshake_escala_el_backoff():
+    """Revisión Fase R, punto 7: si ensure_connected() vuelve bien pero la
+    sesión ya está cerrada (cerró justo tras 'ready'), el backoff escala."""
+    bus = EventBus()
+    gw = FakeGateway(connected=False)
+    orig = gw.ensure_connected
+
+    async def _connect_then_die():
+        await orig()
+        gw.close(1011, "boom")
+
+    gw.ensure_connected = _connect_then_die
+    await _run_supervisor(_gcfg(reconnect_backoff_s=[0.05, 0.1, 0.2]), bus, gw, 0.4)
+    assert gw.connect_calls <= 5, f"martilleó al gateway: {gw.connect_calls} connects en 0.4 s"

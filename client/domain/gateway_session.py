@@ -223,6 +223,13 @@ async def idle_supervisor(
                     "fatal": False,
                 }))
             continue
+        if not gateway.is_connected:
+            # La sesión se cerró dentro del propio handshake o justo tras
+            # `ready`: cuenta como intento fallido para que el backoff escale
+            # (si no, se reconectaba en caliente sin esperar).
+            attempt += 1
+            log.warning("Gateway: la sesión se cerró nada más abrirse; se reintentará")
+            continue
         gateway.reported_fatal = None
         failures = 0
         listen_started = loop.time()
