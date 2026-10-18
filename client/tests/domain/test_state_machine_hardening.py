@@ -445,7 +445,7 @@ def test_gracia_tras_turn_end_y_plazos_en_config(tmp_path) -> None:
 
     default = GatewayConfig(client_key="k")
     assert (default.response_start_timeout_s, default.turn_inactivity_timeout_s,
-            default.turn_end_grace_s) == (30.0, 130.0, 2.0)
+            default.turn_end_grace_s) == (30.0, 600.0, 2.0)
     base = {"gateway": {"host": "h", "client_key": "k"}, "device": {"id": "d"}}
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump({**base, "gateway": {
@@ -459,3 +459,18 @@ def test_gracia_tras_turn_end_y_plazos_en_config(tmp_path) -> None:
         path.write_text(yaml.safe_dump({**base, "gateway": {**base["gateway"], key: bad}}))
         with pytest.raises(ConfigError, match=rf"gateway\.{key}"):
             load_config(path)
+    # 0 desactiva la red del cliente en la fase de turno (manda el gateway).
+    path.write_text(yaml.safe_dump({**base, "gateway": {**base["gateway"], "turn_inactivity_timeout_s": 0}}))
+    assert load_config(path).gateway.turn_inactivity_timeout_s == 0
+
+
+def test_response_deadline_con_plazo_de_turno_0_no_vence() -> None:
+    """Revisión: el TURN_TIMEOUT_S del gateway se reinicia con eventos de
+    herramienta que el cliente no ve (tool_calls_enabled=False): con plazo
+    de turno 0 el cliente confía solo en el TURN_ERROR del gateway."""
+    clock = _FakeClock()
+    d = state_machine._ResponseDeadline(start_timeout_s=30, turn_timeout_s=0, clock=clock)
+    assert d.remaining() == 30  # la fase de inicio sigue acotada
+    d.our_turn_started()
+    clock.now += 10_000
+    assert d.remaining() is None

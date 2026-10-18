@@ -295,10 +295,10 @@ class GatewayConfig:
     # - Hasta que empieza nuestro turno (transcripción/turn_start); esta
     #   espera no la acota el gateway.
     response_start_timeout_s: float = 30.0
-    # - Con nuestro turno en marcha: por encima de los 120 s del gateway, para
-    #   que su TURN_ERROR turn_timeout llegue antes y no cortar turnos con
-    #   herramientas largas (el cliente no ve tráfico mientras corren).
-    turn_inactivity_timeout_s: float = 130.0
+    # - Con nuestro turno en marcha: manda el TURN_TIMEOUT_S del gateway (120 s
+    #   idle-reset, que se reinicia también con eventos de herramienta que el
+    #   cliente no ve). Esto es solo una red muy holgada; 0 la desactiva.
+    turn_inactivity_timeout_s: float = 600.0
     # Margen tras el turn_end de NUESTRO turno para el audio TTS aún en
     # tránsito (client-protocol.md §5).
     turn_end_grace_s: float = 2.0
@@ -495,7 +495,7 @@ def _gateway_from_dict(d: Any, problems: list[str] | None = None) -> GatewayConf
             "response_start_timeout_s", default.response_start_timeout_s, gt=0
         ),
         turn_inactivity_timeout_s=s.get_float(
-            "turn_inactivity_timeout_s", default.turn_inactivity_timeout_s, gt=0
+            "turn_inactivity_timeout_s", default.turn_inactivity_timeout_s, min=0
         ),
         turn_end_grace_s=s.get_float("turn_end_grace_s", default.turn_end_grace_s, min=0),
     )

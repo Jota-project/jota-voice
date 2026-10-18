@@ -74,12 +74,15 @@ class _ResponseDeadline:
       ``response_start_timeout_s``. El gateway no acota esta espera (si el
       transcriptor no entrega nada, p. ej. una falsa wake word sin voz,
       nadie avisaría), así que aquí manda el cliente.
-    - Con nuestro turno en marcha: ``turn_inactivity_timeout_s``. Por
-      defecto por encima de los 120 s del TURN_TIMEOUT_S del gateway: si el
-      orquestador se cuelga, llega antes su ``TURN_ERROR turn_timeout``, que
-      es más preciso; y mientras una herramienta trabaja el cliente no ve
-      tráfico (no pedimos tool_calls_enabled) aunque el gateway siga vivo.
-      El plazo del cliente queda como red de seguridad.
+    - Con nuestro turno en marcha: ``turn_inactivity_timeout_s`` (600 s por
+      defecto, 0 = desactivado). Aquí manda el TURN_TIMEOUT_S del gateway
+      (120 s idle-reset), que también se reinicia con los eventos de
+      herramienta del orquestador; el cliente NO los ve (no pedimos
+      tool_calls_enabled), así que un plazo propio cercano a 120 s cortaría
+      turnos sanos con varias herramientas largas. Si el orquestador se
+      cuelga llega el ``TURN_ERROR turn_timeout`` del gateway; el plazo del
+      cliente es solo una red muy holgada por si el gateway deja de hablar
+      sin cerrar el socket.
 
     ``clock`` inyectable para testear el reinicio sin esperas reales.
     """
@@ -102,7 +105,10 @@ class _ResponseDeadline:
         self.phase = "turn"
         self.progress()
 
-    def remaining(self) -> float:
+    def remaining(self) -> float | None:
+        """Segundos hasta vencer; None = sin plazo (timeout 0 = desactivado)."""
+        if self.timeout_s <= 0:
+            return None
         return self._deadline - self._clock()
 
 
@@ -514,7 +520,8 @@ async def _responding(
                 if remaining <= 0:
                     return
             else:
-                remaining = max(deadline.remaining(), 0.0)
+                left = deadline.remaining()
+                remaining = None if left is None else max(left, 0.0)
             try:
                 gw_event = await asyncio.wait_for(gen.__anext__(), timeout=remaining)
             except asyncio.TimeoutError:

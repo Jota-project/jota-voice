@@ -40,7 +40,12 @@ gateway:
   # respuesta larga pero activa no se corta. Al vencer se manda `cancel` al
   # gateway y se muestra el error RESPONSE_TIMEOUT.
   response_start_timeout_s: 30     # hasta que empieza la respuesta (transcripción)
-  turn_inactivity_timeout_s: 130   # con la respuesta en marcha (> 120 s del gateway)
+  # Con la respuesta en marcha quien vigila es el gateway: su TURN_TIMEOUT_S
+  # (120 s sin progreso) se reinicia también con las herramientas del agente,
+  # que el cliente no ve, y si el turno se cuelga manda TURN_ERROR. Este plazo
+  # es solo una red de seguridad muy holgada; no lo bajes cerca de 120 s o
+  # cortarás turnos con varias herramientas largas. 0 = desactivado.
+  turn_inactivity_timeout_s: 600
   turn_end_grace_s: 2              # audio en tránsito tras el turn_end
 
 device:
