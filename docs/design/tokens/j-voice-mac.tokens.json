@@ -1,0 +1,127 @@
+{
+  "hud": {
+    "surface": {
+      "hud":     { "$value": "rgba(30, 27, 38, 0.72)", "$type": "color", "$description": "Superficie por defecto. 6.2:1 para texto primario sobre documento blanco. NO bajar sin recalcular contraste." },
+      "veil":    { "$value": "rgba(30, 27, 38, 0.50)", "$type": "color", "$description": "Velo. 3.1:1 sobre blanco, solo texto grande." },
+      "whisper": { "$value": "rgba(30, 27, 38, 0.30)", "$type": "color", "$description": "Apenas presente. 1.9:1 sobre blanco: ILEGIBLE. Solo sobre fondos oscuros o con opacidad adaptativa." },
+      "solid":   { "$value": "rgba(30, 27, 38, 0.96)", "$type": "color", "$description": "Fallback para Reducir transparencia de Accesibilidad." }
+    },
+
+    "label": {
+      "primary":   { "$value": "rgba(255, 255, 255, 0.95)", "$type": "color" },
+      "secondary": { "$value": "rgba(255, 255, 255, 0.62)", "$type": "color", "$description": "Tu turno de conversación. Recede: ya sabes lo que dijiste." },
+      "tertiary":  { "$value": "rgba(255, 255, 255, 0.48)", "$type": "color", "$description": "Solo metadatos no críticos. Nunca contenido que haya que leer." }
+    },
+
+    "line": {
+      "separator": { "$value": "rgba(255, 255, 255, 0.09)", "$type": "color" },
+      "edge":      { "$value": "rgba(255, 255, 255, 0.10)", "$type": "color", "$description": "Borde base. En la superficie real va como degradado especular, brillante arriba." },
+      "specular":  { "$value": "rgba(255, 255, 255, 0.30)", "$type": "color", "$description": "Luz superior del vidrio. Separa una superficie con luz de un recuadro dibujado." }
+    },
+
+    "fill": {
+      "subtle": { "$value": "rgba(255, 255, 255, 0.055)", "$type": "color", "$description": "Relleno de tarjetas internas: tool calls, botones de icono." },
+      "hover":  { "$value": "rgba(255, 255, 255, 0.10)",  "$type": "color" }
+    },
+
+    "accent": {
+      "orbStart": { "$value": "{global.color.malva.400}", "$type": "color" },
+      "orbEnd":   { "$value": "{global.color.sky.500}",   "$type": "color" },
+      "active":   { "$value": "{global.color.malva.400}", "$type": "color", "$description": "Estados activos y destacados. El 400, no el 500: sobre oscuro el 500 se apaga." }
+    },
+
+    "blur": {
+      "backdrop": { "$value": 50, "$type": "dimension", "$description": "Blur de fondo del vidrio. La Plugin API solo expone layer-blur; esto se aplica desde la UI." },
+      "veil":     { "$value": 60, "$type": "dimension" }
+    },
+
+    "opacity": {
+      "surfaceMin": { "$value": 0.30, "$type": "opacity", "$description": "Extremo etéreo de la opacidad adaptativa." },
+      "surfaceMax": { "$value": 0.72, "$type": "opacity", "$description": "Extremo legible. Se activa sobre fondos claros." }
+    },
+
+    "elevation": {
+      "ambientY":    { "$value": 24, "$type": "dimension" },
+      "ambientBlur": { "$value": 60, "$type": "dimension" },
+      "contactY":    { "$value": 1,  "$type": "dimension" },
+      "contactBlur": { "$value": 3,  "$type": "dimension" }
+    },
+
+    "panel": {
+      "width":   { "$value": 380, "$type": "sizing" },
+      "radius":  { "$value": "{global.radius.lg}", "$type": "borderRadius" },
+      "padding": { "$value": "{global.space.lg}",  "$type": "spacing" },
+      "gap":     { "$value": "{global.space.xl}",  "$type": "spacing", "$description": "Separación entre turnos. El respiro se compra con espacio, no con transparencia." }
+    },
+
+    "glance": {
+      "width": { "$value": 340, "$type": "sizing", "$description": "Respuesta efímera. Se desvanece a los 6 segundos." }
+    },
+
+    "pill": {
+      "width":  { "$value": 230, "$type": "sizing" },
+      "radius": { "$value": "{global.radius.full}", "$type": "borderRadius" }
+    },
+
+    "orb": {
+      "idle":      { "$value": 22, "$type": "sizing" },
+      "listening": { "$value": 26, "$type": "sizing" },
+      "speaking":  { "$value": 28, "$type": "sizing" }
+    },
+
+    "anchor": {
+      "top":   { "$value": 38, "$type": "dimension", "$description": "Bajo la barra de menú de macOS." },
+      "right": { "$value": 14, "$type": "dimension" }
+    },
+
+    "motion": {
+      "enter":   { "$value": 420,  "$type": "number", "$description": "ms. Llega con calma." },
+      "exit":    { "$value": 240,  "$type": "number", "$description": "ms. Se va rápido." },
+      "stagger": { "$value": 40,   "$type": "number", "$description": "ms entre bloques en cascada." },
+      "breathe": { "$value": 2600, "$type": "number", "$description": "ms. Respiración del orbe en reposo." }
+    }
+  },
+
+  "prefs": {
+    "surface": {
+      "window":   { "$value": "{global.color.ink.900}", "$type": "color", "$description": "Fondo de la ventana de Preferencias. Nativa, opaca, sin blur — mismo ink que el material del HUD, pero opaco (no glass): es una ventana real, no un overlay. Rediseñada a dark el 2026-08-03 a petición del usuario ('quita ese modo blanco tan sobrio')." },
+      "field":    { "$value": "{global.color.ink.700}", "$type": "color", "$description": "Fondo de campo de formulario, dropdown, chip — tono elevado respecto a la ventana." },
+      "control":  { "$value": "{global.color.ink.700}", "$type": "color", "$description": "Pestaña activa." },
+      "inactive": { "$value": "{global.color.ink.900}", "$type": "color", "$description": "Pestaña inactiva y tira de la barra de pestañas — se funde con la ventana, solo la activa resalta." }
+    },
+    "label": {
+      "primary":   { "$value": "#F2F1F4", "$type": "color", "$description": "15:1 sobre ink.900. Blanco roto, no blanco puro — más suave a la vista en una ventana grande." },
+      "secondary": { "$value": "#B8B3C2", "$type": "color", "$description": "8.3:1 sobre ink.900." },
+      "tertiary":  { "$value": "#8B8595", "$type": "color", "$description": "4.75:1 sobre ink.900 — al límite de AA, solo para metadatos/kickers pequeños." }
+    },
+    "line": {
+      "border":      { "$value": "#3A3444", "$type": "color", "$description": "Borde entre secciones, filas, pestañas, track de switch/slider apagado." },
+      "fieldBorder": { "$value": "#4A4356", "$type": "color", "$description": "Borde de campo de formulario — un punto más visible que line.border." }
+    },
+    "state": {
+      "errorBg":     { "$value": "{global.color.danger.900}", "$type": "color" },
+      "errorBorder": { "$value": "{global.color.danger.300}", "$type": "color" },
+      "errorText":   { "$value": "{global.color.danger.300}", "$type": "color" }
+    },
+    "accent": {
+      "primary":      { "$value": "{global.color.malva.400}", "$type": "color", "$description": "Acento de marca sobre fondo oscuro — el 400, no el 500: sobre ink.900 el 500 se apaga (mismo razonamiento que hud.accent.active). Para texto/icono/track, no para fondos con texto blanco encima (ver button.primaryBg)." },
+      "primaryHover": { "$value": "{global.color.malva.500}", "$type": "color", "$description": "El hover profundiza hacia el 500 — dirección inversa a como funcionaba en el diseño claro." }
+    },
+    "button": {
+      "primaryBg":     { "$value": "{global.color.malva.500}", "$type": "color", "$description": "Deliberadamente NO referencia accent.primary (malva.400): con texto blanco encima, el 400 solo da 3.1:1 (falla AA); el 500 da 4.64:1 (pasa)." },
+      "primaryText":   { "$value": "{global.color.white}",         "$type": "color" },
+      "secondaryBg":   { "$value": "{prefs.surface.field}",        "$type": "color" },
+      "secondaryText": { "$value": "{prefs.label.primary}",        "$type": "color" }
+    },
+    "form": {
+      "switchOn":   { "$value": "{prefs.accent.primary}", "$type": "color", "$description": "Sin texto encima — aquí sí vale el 400 (más vívido sobre oscuro)." },
+      "switchOff":  { "$value": "{prefs.line.border}",    "$type": "color" },
+      "sliderTrack":{ "$value": "{prefs.line.border}",    "$type": "color" },
+      "sliderFill": { "$value": "{prefs.accent.primary}", "$type": "color" }
+    },
+    "radius": {
+      "field": { "$value": 5,  "$type": "borderRadius" },
+      "window":{ "$value": 10, "$type": "borderRadius" }
+    }
+  }
+}
