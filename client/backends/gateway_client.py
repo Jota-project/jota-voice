@@ -318,7 +318,18 @@ class GatewayClient:
         # transitorio, el rechazo fatal anterior deja de bloquear la
         # reconexión en segundo plano; si vuelve a ser fatal, se re-marca.
         self.fatal_error = None
+        try:
+            await self._open_session()
+        except GatewayHandshakeError as exc:
+            # Único sitio que marca el rechazo fatal, para TODA causa
+            # (close 1008 del handshake, `error` fatal, HTTP 401/403 en el
+            # upgrade). Antes el 401/403 no lo marcaba y el supervisor de
+            # IDLE reintentaba para siempre sin avisar (revisión Fase R).
+            if exc.fatal:
+                self.fatal_error = exc
+            raise
 
+    async def _open_session(self) -> None:
         try:
             ws = await asyncio.wait_for(
                 websockets.connect(self._cfg.ws_url, **self._connect_kwargs()),
@@ -382,8 +393,6 @@ class GatewayClient:
                 kind = classify_handshake_close(code, reason)
                 err = GatewayHandshakeError(kind, code, reason)
                 log.error("%s", err)
-                if err.fatal:
-                    self.fatal_error = err
                 raise err from exc
             if isinstance(raw, bytes):
                 log.warning("Gateway: frame binario inesperado antes de 'ready'; ignorado")
@@ -403,7 +412,6 @@ class GatewayClient:
                 )
                 if msg.get("fatal") is True:
                     err.fatal = True
-                    self.fatal_error = err
                 raise err
             raise RuntimeError(
                 f"Gateway: handshake devolvió tipo inesperado {msg_type!r}: {msg}"

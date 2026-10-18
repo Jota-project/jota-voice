@@ -587,3 +587,34 @@ async def test_rechazo_fatal_seguido_de_fallo_transitorio_vuelve_a_reintentar():
         await gw.ensure_connected()
     await _run_supervisor(_gcfg(), bus, gw, 0.2)
     assert gw.is_connected and gw.connect_calls == 2
+
+
+
+@pytest.mark.asyncio
+async def test_supervisor_con_gateway_real_http_403_no_reintenta_y_avisa(monkeypatch):
+    """Revisión Fase R, punto 1: un 403 en el upgrade lanzaba un
+    GatewayHandshakeError fatal sin asignar fatal_error y el supervisor
+    reintentaba para siempre sin publicar error. Con GatewayClient real."""
+    from websockets.exceptions import InvalidStatus
+
+    from backends import gateway_client as gc
+
+    calls = 0
+
+    async def _fake_connect(*a, **kw):
+        nonlocal calls
+        calls += 1
+        raise InvalidStatus(MagicMock(status_code=403))
+
+    monkeypatch.setattr(gc.websockets, "connect", _fake_connect)
+    cfg = _gcfg()
+    bus = EventBus()
+    gw = gc.GatewayClient(cfg, bus=bus)
+    got_task = asyncio.create_task(_collect_until(bus, lambda e, _: False, 0.4))
+    await asyncio.sleep(0)
+    await _run_supervisor(cfg, bus, gw, 0.3)
+    got = await got_task
+    assert calls == 1, f"reintentó un 403 {calls} veces"
+    assert gw.fatal_error is not None and gw.fatal_error.kind == "http_rejected"
+    errs = [e for e in got if e.type == "error"]
+    assert len(errs) == 1 and errs[0].data["kind"] == "http_rejected"
