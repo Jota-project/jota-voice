@@ -8,9 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 import threading
-import types
 from unittest.mock import MagicMock, create_autospec
 
 import pytest
@@ -20,6 +18,7 @@ from backends import audio_termux
 from backends.audio_termux import TermuxBackend
 from platforms.termux.audio_capture_termux import AudioCapture
 
+from tests.fakes.audio_modules import PA_INT16, PyAudioSpec
 from tests.fakes.waiting import wait_until
 
 
@@ -294,34 +293,10 @@ def test_stop_idempotent() -> None:
 # ---------------------------------------------------------------------------
 # Issue #35 — huecos de cobertura: import lazy de pyaudio, start(), apertura
 # perezosa del stream de salida, cierre con excepciones y delegación en
-# AudioCapture. Sin PyAudio ni parec reales: pyaudio se stubbea en
-# sys.modules y AudioCapture se sustituye por un mock con autospec.
+# AudioCapture. Sin PyAudio ni parec reales: pyaudio se stubbea con los
+# fixtures fake_pyaudio/no_pyaudio de tests/conftest.py y AudioCapture se
+# sustituye por un mock con autospec.
 # ---------------------------------------------------------------------------
-
-
-class _PaSpec:
-    """Superficie de pyaudio.PyAudio que usa TermuxBackend (spec de mocks)."""
-
-    def open(self, format, channels, rate, output):  # noqa: A002, ARG002
-        ...
-
-    def terminate(self) -> None:
-        ...
-
-
-_PA_INT16 = 8  # valor real de pyaudio.paInt16
-
-
-def _install_fake_pyaudio(monkeypatch) -> tuple[MagicMock, MagicMock]:
-    """Instala un módulo `pyaudio` falso. Devuelve (clase PyAudio, instancia)."""
-    pa_cls = create_autospec(_PaSpec)
-    pa_instance = pa_cls.return_value
-    pa_instance.open.side_effect = lambda **_: create_autospec(_FakeStream, instance=True)
-    fake = types.ModuleType("pyaudio")
-    fake.PyAudio = pa_cls  # type: ignore[attr-defined]
-    fake.paInt16 = _PA_INT16  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "pyaudio", fake)
-    return pa_cls, pa_instance
 
 
 def _backend_with_mock_capture() -> tuple[TermuxBackend, MagicMock]:
@@ -331,30 +306,26 @@ def _backend_with_mock_capture() -> tuple[TermuxBackend, MagicMock]:
     return be, capture
 
 
-def test_require_pyaudio_sin_modulo_lanza_runtimeerror_con_instrucciones(monkeypatch) -> None:
+def test_require_pyaudio_sin_modulo_lanza_runtimeerror_con_instrucciones(no_pyaudio) -> None:
     """Fuera de Termux pyaudio no existe: el error debe ser explícito y
     decir cómo instalarlo, encadenando el ImportError original."""
-    monkeypatch.setitem(sys.modules, "pyaudio", None)  # fuerza ImportError
-
     with pytest.raises(RuntimeError, match="pkg install portaudio") as excinfo:
         audio_termux._require_pyaudio()
 
     assert isinstance(excinfo.value.__cause__, ImportError)
 
 
-def test_construir_backend_no_importa_pyaudio(monkeypatch) -> None:
+def test_construir_backend_no_importa_pyaudio(no_pyaudio) -> None:
     """El import es lazy: instanciar el backend (p. ej. desde el registry
     en una plataforma sin pyaudio) no debe fallar."""
-    monkeypatch.setitem(sys.modules, "pyaudio", None)
-
     be = TermuxBackend(_cfg())
 
     assert be._pa is None
     assert be._stream is None
 
 
-def test_start_arranca_captura_e_inicializa_pyaudio(monkeypatch) -> None:
-    pa_cls, pa_instance = _install_fake_pyaudio(monkeypatch)
+def test_start_arranca_captura_e_inicializa_pyaudio(fake_pyaudio) -> None:
+    pa_cls, pa_instance = fake_pyaudio.cls, fake_pyaudio.instance
     be, capture = _backend_with_mock_capture()
 
     asyncio.run(be.start())
@@ -367,8 +338,7 @@ def test_start_arranca_captura_e_inicializa_pyaudio(monkeypatch) -> None:
     assert be._stream is None
 
 
-def test_start_sin_pyaudio_propaga_runtimeerror(monkeypatch) -> None:
-    monkeypatch.setitem(sys.modules, "pyaudio", None)
+def test_start_sin_pyaudio_propaga_runtimeerror(no_pyaudio) -> None:
     be, _ = _backend_with_mock_capture()
 
     with pytest.raises(RuntimeError, match="pyaudio"):
@@ -377,10 +347,10 @@ def test_start_sin_pyaudio_propaga_runtimeerror(monkeypatch) -> None:
     assert be._pa is None
 
 
-def test_play_abre_stream_perezoso_una_sola_vez_con_formato_tts(monkeypatch) -> None:
+def test_play_abre_stream_perezoso_una_sola_vez_con_formato_tts(fake_pyaudio) -> None:
     """El primer chunk abre el stream de salida (PCM16 mono 24 kHz, el
     formato TTS del gateway); los siguientes reutilizan el mismo."""
-    _, pa_instance = _install_fake_pyaudio(monkeypatch)
+    pa_instance = fake_pyaudio.instance
     be, _ = _backend_with_mock_capture()
 
     async def _run() -> None:
@@ -391,7 +361,7 @@ def test_play_abre_stream_perezoso_una_sola_vez_con_formato_tts(monkeypatch) -> 
     asyncio.run(_run())
 
     pa_instance.open.assert_called_once_with(
-        format=_PA_INT16, channels=1, rate=24000, output=True
+        format=PA_INT16, channels=1, rate=24000, output=True
     )
     stream = be._stream
     assert stream is not None
@@ -411,7 +381,7 @@ def test_play_antes_de_start_es_noop() -> None:
 
 def test_stop_para_captura_cierra_stream_y_termina_pyaudio() -> None:
     be, capture = _backend_with_mock_capture()
-    pa = create_autospec(_PaSpec, instance=True)
+    pa = create_autospec(PyAudioSpec, instance=True)
     stream = create_autospec(_FakeStream, instance=True)
     be._pa = pa  # type: ignore[assignment]
     be._stream = stream  # type: ignore[assignment]
@@ -430,7 +400,7 @@ def test_stop_tolera_excepcion_al_cerrar_stream() -> None:
     """Un stream ya roto (p. ej. dispositivo desaparecido) no debe impedir
     terminar PyAudio ni dejar referencias colgando."""
     be, _ = _backend_with_mock_capture()
-    pa = create_autospec(_PaSpec, instance=True)
+    pa = create_autospec(PyAudioSpec, instance=True)
     stream = create_autospec(_FakeStream, instance=True)
     stream.close.side_effect = OSError("Stream closed")
     be._pa = pa  # type: ignore[assignment]
@@ -443,8 +413,8 @@ def test_stop_tolera_excepcion_al_cerrar_stream() -> None:
     assert be._pa is None
 
 
-def test_drain_cierra_stream_y_el_siguiente_play_abre_otro(monkeypatch) -> None:
-    _, pa_instance = _install_fake_pyaudio(monkeypatch)
+def test_drain_cierra_stream_y_el_siguiente_play_abre_otro(fake_pyaudio) -> None:
+    pa_instance = fake_pyaudio.instance
     be, _ = _backend_with_mock_capture()
 
     async def _run() -> tuple[MagicMock, MagicMock]:
@@ -466,7 +436,7 @@ def test_drain_cierra_stream_y_el_siguiente_play_abre_otro(monkeypatch) -> None:
 
 def test_drain_error_cerrando_stream_loguea_y_limpia(caplog) -> None:
     be, _ = _backend_with_mock_capture()
-    be._pa = create_autospec(_PaSpec, instance=True)  # type: ignore[assignment]
+    be._pa = create_autospec(PyAudioSpec, instance=True)  # type: ignore[assignment]
     stream = create_autospec(_FakeStream, instance=True)
     stream.stop_stream.side_effect = OSError("boom")
     be._stream = stream  # type: ignore[assignment]
@@ -486,10 +456,9 @@ def test_drain_sin_stream_es_noop() -> None:
     assert be._stream is None
 
 
-def test_play_drain_stop_concurrentes_no_hacen_deadlock(monkeypatch) -> None:
+def test_play_drain_stop_concurrentes_no_hacen_deadlock(fake_pyaudio) -> None:
     """El asyncio.Lock compartido por _play/drain/stop no debe bloquearse
     (p. ej. por adquisición reentrante) cuando se intercalan."""
-    _install_fake_pyaudio(monkeypatch)
     be, capture = _backend_with_mock_capture()
 
     async def _run() -> None:

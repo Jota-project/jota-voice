@@ -547,11 +547,22 @@ async def test_todos_los_health_emitidos_cumplen_el_protocolo(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_health_renovado_reinicia_el_ttl(server) -> None:
+    """Renovar un health cancela su temporizador y arma otro. Antes se
+    renovaba cada 40 ms un TTL de 80 ms con sleeps reales: con la máquina
+    cargada caducaba entre renovaciones sin bug (issue #76). Ahora se miran
+    los temporizadores, y la caducidad real con un TTL corto."""
     backend, _, _ = server
-    for _ in range(3):
-        backend.send("health", {"key": "k", "level": "info", "ttl_s": 0.08})
-        await asyncio.sleep(0.04)
+    backend.send("health", {"key": "k", "level": "info", "ttl_s": 60})
+    first = backend._health_timers["k"]
+    backend.send("health", {"key": "k", "level": "info", "ttl_s": 60})
+    second = backend._health_timers["k"]
+    assert second is not first
+    assert first.cancelled(), "la renovación debe cancelar el TTL anterior"
+    assert not second.cancelled()
     assert "k" in backend._snapshot_health()
+    # La última renovación manda: con TTL corto caduca de verdad.
+    backend.send("health", {"key": "k", "level": "info", "ttl_s": 0.01})
+    assert second.cancelled()
     await wait_until(lambda: "k" not in backend._snapshot_health(), message="caduca")
 
 
@@ -583,8 +594,10 @@ async def test_cancel_de_un_turno_ya_terminado_se_ignora(server) -> None:
         await _recv(ws)
         await ws.send(json.dumps({"type": "cancel", "turn_id": "t-viejo"}))
         await ws.send(json.dumps({"type": "cancel", "turn_id": "t-nuevo"}))
+        # El servidor procesa los mensajes de un display en orden: cuando
+        # llega el efecto del segundo, el primero ya se descartó. Sin sleep
+        # de "por si acaso" (issue #76).
         await wait_until(lambda: len(cancels) == 1, message="solo el bueno")
-        await asyncio.sleep(0.02)
         assert len(cancels) == 1
     finally:
         await ws.close()
@@ -736,10 +749,13 @@ async def test_stop_es_rapido_con_un_display_que_no_lee(tmp_path: Path) -> None:
                                          "duration_s": 0.1})
             if i % 100 == 0:
                 await asyncio.sleep(0)
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.1)  # setup: deja que se llenen los buffers del socket
         t0 = time.monotonic()
-        await asyncio.wait_for(backend.stop(), 10.0)
-        assert time.monotonic() - t0 < 2.5
+        await asyncio.wait_for(backend.stop(), 30.0)
+        # El bug tardaba ~20 s (close_timeout 10 s + wait_closed); el fix,
+        # ~CLOSE_TIMEOUT_S + STOP_TIMEOUT_S (2 s). Margen amplio para no
+        # fallar por carga (issue #76) sin dejar de detectar el bug.
+        assert time.monotonic() - t0 < 8.0
         assert backend._clients == set()
     finally:
         w.close()

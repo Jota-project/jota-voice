@@ -3,10 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
-import types
 import warnings
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, create_autospec
 
 import pytest
 
@@ -14,11 +12,13 @@ import pytest
 # clases fake a nivel de módulo (y websockets.connect por un AsyncMock),
 # para TODA la sesión de pytest: cualquier test posterior con un servidor
 # real veía excepciones que el código ya no reconocía. Ahora se usan las
-# excepciones reales (construidas con frames Close) y el fixture autouse
-# restaura websockets.connect tras cada test.
-import websockets as _websockets_mod
+# excepciones reales (construidas con frames Close) y websockets.connect se
+# sustituye solo durante cada test con el fixture ws_connect (conftest.py).
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 from websockets.frames import Close
+
+from tests.fakes.gateway import FakeWS, FakeWSRaiseAfter, make_ws, never
+from tests.fakes.waiting import wait_until
 
 
 def _closed_error(code: int | None = None, reason: str = "") -> ConnectionClosedError:
@@ -31,10 +31,14 @@ def _closed_ok(code: int = 1000, reason: str = "") -> ConnectionClosedOK:
 
 
 @pytest.fixture(autouse=True)
-def _restore_websockets_connect():
-    original = _websockets_mod.connect
-    yield
-    _websockets_mod.connect = original
+def _sin_credenciales_cf(monkeypatch):
+    """connect() lee CF_ACCESS_CLIENT_ID/SECRET del entorno real (issue #39):
+    sin limpiarlas, el resultado dependería de la máquina o de otro test que
+    las hubiera dejado puestas (p. ej. vía un .env cargado por load_config).
+    Los tests que las necesitan las ponen con monkeypatch.setenv."""
+    monkeypatch.delenv("CF_ACCESS_CLIENT_ID", raising=False)
+    monkeypatch.delenv("CF_ACCESS_CLIENT_SECRET", raising=False)
+
 
 from config import GatewayConfig, AudioConfig, DeviceConfig, Config
 from backends.gateway_client import (
@@ -43,27 +47,6 @@ from backends.gateway_client import (
     GatewayHandshakeError,
     _cloudflare_access_headers,
 )
-
-
-class _FakeConnectionClosed(Exception):
-    """Stub para ConnectionClosed: el real (websockets.exceptions) requiere
-    frames rcvd/sent en el constructor, demasiado para este test. connect()
-    solo necesita propagar la excepción sin capturarla, así que cualquier
-    subclase de Exception sirve."""
-
-
-class _FakeWS:
-    """WS fake iterable async — basta para probar receive() sin servidor real."""
-
-    def __init__(self, messages: list) -> None:
-        self._messages = messages
-
-    def __aiter__(self):
-        return self._gen()
-
-    async def _gen(self):
-        for m in self._messages:
-            yield m
 
 
 async def _test_receive_separa_header_de_audio_binario() -> None:
@@ -76,7 +59,7 @@ async def _test_receive_separa_header_de_audio_binario() -> None:
     client = GatewayClient(cfg)
     pcm = b"\x01\x02\x03\x04\x05\x06"
     frame = bytes([0xA1, 0x00, 0x01]) + pcm  # turn_seq=1
-    client._ws = _FakeWS([frame])
+    client._ws = FakeWS([frame])
 
     events = [ev async for ev in client.receive()]
 
@@ -91,8 +74,7 @@ async def _test_receive_separa_header_de_audio_binario() -> None:
 async def _test_send_cancel_envia_mensaje() -> None:
     cfg = GatewayConfig(host="127.0.0.1", client_key="test")
     client = GatewayClient(cfg)
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
+    ws_mock = make_ws()
     client._ws = ws_mock
 
     await client.send_cancel()
@@ -145,19 +127,23 @@ def test_cloudflare_access_headers_con_solo_una_variable(monkeypatch) -> None:
     assert _cloudflare_access_headers() == {}
 
 
-class _FakeWS:
-    """Async-iterable mínimo que simula los mensajes de un websocket real."""
+@pytest.mark.asyncio
+async def test_connect_sin_credenciales_cf_no_manda_cabeceras(ws_connect) -> None:
+    connect = ws_connect(AsyncMock(return_value=_ws_with_recv([_READY])))
+    await GatewayClient(GatewayConfig(host="h", client_key="k", connect_timeout_s=1.0)).connect()
+    assert connect.call_args.kwargs["additional_headers"] is None
 
-    def __init__(self, messages: list) -> None:
-        self._messages = list(messages)
 
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        if not self._messages:
-            raise StopAsyncIteration
-        return self._messages.pop(0)
+@pytest.mark.asyncio
+async def test_connect_con_credenciales_cf_las_manda_en_el_upgrade(monkeypatch, ws_connect) -> None:
+    monkeypatch.setenv("CF_ACCESS_CLIENT_ID", "abc123")
+    monkeypatch.setenv("CF_ACCESS_CLIENT_SECRET", "secret456")
+    connect = ws_connect(AsyncMock(return_value=_ws_with_recv([_READY])))
+    await GatewayClient(GatewayConfig(host="h", client_key="k", connect_timeout_s=1.0)).connect()
+    assert connect.call_args.kwargs["additional_headers"] == {
+        "CF-Access-Client-Id": "abc123",
+        "CF-Access-Client-Secret": "secret456",
+    }
 
 
 async def _test_receive_termina_en_turn_end_sin_esperar_done() -> None:
@@ -167,7 +153,7 @@ async def _test_receive_termina_en_turn_end_sin_esperar_done() -> None:
     al ver turn_end, igual que hace con done."""
     cfg = GatewayConfig(host="127.0.0.1", client_key="test")
     client = GatewayClient(cfg)
-    client._ws = _FakeWS([
+    client._ws = FakeWS([
         json.dumps({"type": "pipeline_event", "stage": "tts_done"}),
         json.dumps({"type": "turn_end", "turn_id": "t-1"}),
         json.dumps({"type": "pipeline_event", "stage": "nunca_deberia_llegar"}),
@@ -195,12 +181,11 @@ def test_receive_termina_en_turn_end_sin_esperar_done() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _test_connect_espera_mensaje_ready_antes_de_retornar() -> None:
+async def _test_connect_espera_mensaje_ready_antes_de_retornar(ws_connect) -> None:
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
-    ws_mock.recv = AsyncMock(return_value=json.dumps({"type": "ready"}))
-    sys.modules["websockets"].connect = AsyncMock(return_value=ws_mock)
+    ws_mock = make_ws()
+    ws_mock.recv.return_value = json.dumps({"type": "ready"})
+    ws_connect(AsyncMock(return_value=ws_mock))
 
     client = GatewayClient(cfg)
     await client.connect()
@@ -209,12 +194,11 @@ async def _test_connect_espera_mensaje_ready_antes_de_retornar() -> None:
     ws_mock.send.assert_awaited_once()
 
 
-async def _test_connect_levanta_si_primer_mensaje_es_error() -> None:
+async def _test_connect_levanta_si_primer_mensaje_es_error(ws_connect) -> None:
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
-    ws_mock.recv = AsyncMock(return_value=json.dumps({"type": "error", "message": "bad key"}))
-    sys.modules["websockets"].connect = AsyncMock(return_value=ws_mock)
+    ws_mock = make_ws()
+    ws_mock.recv.return_value = json.dumps({"type": "error", "message": "bad key"})
+    ws_connect(AsyncMock(return_value=ws_mock))
 
     client = GatewayClient(cfg)
     try:
@@ -225,12 +209,11 @@ async def _test_connect_levanta_si_primer_mensaje_es_error() -> None:
         raise AssertionError("connect() debería haber lanzado RuntimeError por mensaje 'error'")
 
 
-async def _test_connect_levanta_si_primer_mensaje_tipo_inesperado() -> None:
+async def _test_connect_levanta_si_primer_mensaje_tipo_inesperado(ws_connect) -> None:
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
-    ws_mock.recv = AsyncMock(return_value=json.dumps({"type": "transcription"}))
-    sys.modules["websockets"].connect = AsyncMock(return_value=ws_mock)
+    ws_mock = make_ws()
+    ws_mock.recv.return_value = json.dumps({"type": "transcription"})
+    ws_connect(AsyncMock(return_value=ws_mock))
 
     client = GatewayClient(cfg)
     try:
@@ -241,13 +224,11 @@ async def _test_connect_levanta_si_primer_mensaje_tipo_inesperado() -> None:
         raise AssertionError("connect() debería haber lanzado RuntimeError por tipo inesperado")
 
 
-async def _test_connect_propagar_connection_closed_si_server_cierra_antes_de_ready() -> None:
+async def _test_connect_propagar_connection_closed_si_server_cierra_antes_de_ready(ws_connect) -> None:
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
-    ws_mock.recv = AsyncMock(side_effect=_closed_error(1008, "Clave de cliente invalida o inactiva"))
-    ws_mock.close = AsyncMock()
-    sys.modules["websockets"].connect = AsyncMock(return_value=ws_mock)
+    ws_mock = make_ws()
+    ws_mock.recv.side_effect = _closed_error(1008, "Clave de cliente invalida o inactiva")
+    ws_connect(AsyncMock(return_value=ws_mock))
 
     client = GatewayClient(cfg)
     try:
@@ -264,7 +245,7 @@ async def _test_connect_propagar_connection_closed_si_server_cierra_antes_de_rea
     ws_mock.close.assert_awaited()
 
 
-async def _test_connect_levanta_timeout_si_server_no_responde_ready() -> None:
+async def _test_connect_levanta_timeout_si_server_no_responde_ready(ws_connect) -> None:
     """El recv() del handshake respeta cfg.connect_timeout_s: si el gateway
     no envía ready a tiempo, asyncio.TimeoutError se loguea y se re-lanza.
     Pinea la rama del except (sin capturarla genéricamente como
@@ -275,10 +256,9 @@ async def _test_connect_levanta_timeout_si_server_no_responde_ready() -> None:
         await asyncio.sleep(1.0)
         return json.dumps({"type": "ready"})
 
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
-    ws_mock.recv = _slow_recv
-    sys.modules["websockets"].connect = AsyncMock(return_value=ws_mock)
+    ws_mock = make_ws()
+    ws_mock.recv.side_effect = _slow_recv
+    ws_connect(AsyncMock(return_value=ws_mock))
 
     client = GatewayClient(cfg)
     try:
@@ -289,17 +269,16 @@ async def _test_connect_levanta_timeout_si_server_no_responde_ready() -> None:
         raise AssertionError("connect() debería haber levantado TimeoutError esperando ready")
 
 
-async def _test_connect_propagar_json_invalido_en_respuesta_handshake() -> None:
+async def _test_connect_propagar_json_invalido_en_respuesta_handshake(ws_connect) -> None:
     """Si el primer mensaje no es JSON (p.ej. proxy/LB devolviendo HTML 502
     antes del WS), connect() propaga json.JSONDecodeError sin capturarla.
     Es la política 'fail fast' del handshake, deliberadamente distinta del
     'tolerant skip' de receive() — un cambio accidental aquí debe romper este
     test, no degradar silenciosamente."""
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
-    ws_mock.recv = AsyncMock(return_value="<html>502 Bad Gateway</html>")
-    sys.modules["websockets"].connect = AsyncMock(return_value=ws_mock)
+    ws_mock = make_ws()
+    ws_mock.recv.return_value = "<html>502 Bad Gateway</html>"
+    ws_connect(AsyncMock(return_value=ws_mock))
 
     client = GatewayClient(cfg)
     try:
@@ -310,28 +289,28 @@ async def _test_connect_propagar_json_invalido_en_respuesta_handshake() -> None:
         raise AssertionError("connect() debería propagar JSONDecodeError del handshake")
 
 
-def test_connect_espera_mensaje_ready_antes_de_retornar() -> None:
-    asyncio.run(_test_connect_espera_mensaje_ready_antes_de_retornar())
+def test_connect_espera_mensaje_ready_antes_de_retornar(ws_connect) -> None:
+    asyncio.run(_test_connect_espera_mensaje_ready_antes_de_retornar(ws_connect))
 
 
-def test_connect_levanta_si_primer_mensaje_es_error() -> None:
-    asyncio.run(_test_connect_levanta_si_primer_mensaje_es_error())
+def test_connect_levanta_si_primer_mensaje_es_error(ws_connect) -> None:
+    asyncio.run(_test_connect_levanta_si_primer_mensaje_es_error(ws_connect))
 
 
-def test_connect_levanta_si_primer_mensaje_tipo_inesperado() -> None:
-    asyncio.run(_test_connect_levanta_si_primer_mensaje_tipo_inesperado())
+def test_connect_levanta_si_primer_mensaje_tipo_inesperado(ws_connect) -> None:
+    asyncio.run(_test_connect_levanta_si_primer_mensaje_tipo_inesperado(ws_connect))
 
 
-def test_connect_propagar_connection_closed_si_server_cierra_antes_de_ready() -> None:
-    asyncio.run(_test_connect_propagar_connection_closed_si_server_cierra_antes_de_ready())
+def test_connect_propagar_connection_closed_si_server_cierra_antes_de_ready(ws_connect) -> None:
+    asyncio.run(_test_connect_propagar_connection_closed_si_server_cierra_antes_de_ready(ws_connect))
 
 
-def test_connect_levanta_timeout_si_server_no_responde_ready() -> None:
-    asyncio.run(_test_connect_levanta_timeout_si_server_no_responde_ready())
+def test_connect_levanta_timeout_si_server_no_responde_ready(ws_connect) -> None:
+    asyncio.run(_test_connect_levanta_timeout_si_server_no_responde_ready(ws_connect))
 
 
-def test_connect_propagar_json_invalido_en_respuesta_handshake() -> None:
-    asyncio.run(_test_connect_propagar_json_invalido_en_respuesta_handshake())
+def test_connect_propagar_json_invalido_en_respuesta_handshake(ws_connect) -> None:
+    asyncio.run(_test_connect_propagar_json_invalido_en_respuesta_handshake(ws_connect))
 
 
 # ---------------------------------------------------------------------------
@@ -393,26 +372,6 @@ def test_gateway_client_sin_device_id_sin_warning() -> None:
 # ---------------------------------------------------------------------------
 
 
-class _FakeWSRaiseAfter:
-    """Async-iterable que emite `messages` y luego lanza `exc`.
-
-    Suficiente para probar que receive() distingue ConnectionClosedOK de
-    ConnectionClosedError: el primero debe terminar en silencio, el segundo
-    debe propagar."""
-
-    def __init__(self, messages: list, exc: BaseException) -> None:
-        self._messages = list(messages)
-        self._exc = exc
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        if self._messages:
-            return self._messages.pop(0)
-        raise self._exc
-
-
 async def _test_receive_propagates_connection_closed_error() -> None:
     """Si el servidor cae a mitad de turno (ej. 1006 abnormal closure, 1009
     mensaje >max_size, 1011 internal error), websockets lanza
@@ -426,7 +385,7 @@ async def _test_receive_propagates_connection_closed_error() -> None:
     client = GatewayClient(cfg)
     pcm = b"\x00\x01" * 100
     frame = bytes([0xA1, 0x00, 0x01]) + pcm  # turn_seq=1 + PCM
-    client._ws = _FakeWSRaiseAfter([frame], _closed_error())  # 1006, sin close frame
+    client._ws = FakeWSRaiseAfter([frame], _closed_error())  # 1006, sin close frame
 
     try:
         events = [ev async for ev in client.receive()]
@@ -453,7 +412,7 @@ async def _test_receive_propagates_clean_close_as_disconnected() -> None:
     client = GatewayClient(cfg)
     pcm = b"\x00\x01" * 100
     frame = bytes([0xA1, 0x00, 0x01]) + pcm
-    client._ws = _FakeWSRaiseAfter([frame], _closed_ok(1001, "going away"))
+    client._ws = FakeWSRaiseAfter([frame], _closed_ok(1001, "going away"))
 
     events = []
     with pytest.raises(GatewayDisconnected) as info:
@@ -488,31 +447,33 @@ def _cfg(connect_timeout_s: float = 30.0) -> Config:
 
 
 @pytest.mark.asyncio
-async def test_connect_passes_open_timeout_to_websockets() -> None:
+async def test_connect_passes_open_timeout_to_websockets(ws_connect) -> None:
     """websockets.connect() debe recibir open_timeout=cfg.connect_timeout_s;
     de lo contrario, websockets usa open_timeout=10 (default) y un valor
-    superior en connect_timeout_s es un no-op silencioso."""
+    superior en connect_timeout_s es un no-op silencioso.
+
+    Antes parcheaba el módulo websockets entero con un MagicMock y se
+    tragaba cualquier excepción de connect(): el `except
+    websockets.exceptions.ConnectionClosed` del handshake se evaluaba contra
+    un MagicMock y lanzaba TypeError, que el test ocultaba. Ahora solo se
+    sustituye connect() y el handshake tiene que completarse."""
     cfg = _cfg(connect_timeout_s=30.0)
-    client = GatewayClient(cfg.gateway, device_id="test")
-    mock_ws = AsyncMock()
-    mock_ws.recv = AsyncMock(side_effect=asyncio.CancelledError)
-    with patch("backends.gateway_client.websockets") as mock_websockets:
-        mock_websockets.connect = AsyncMock(return_value=mock_ws)
-        try:
-            await client.connect()
-        except (asyncio.CancelledError, Exception):
-            pass
-        # Verifica que open_timeout se ha pasado explícitamente
-        assert mock_websockets.connect.called, "websockets.connect() no se llamó"
-        call_kwargs = mock_websockets.connect.call_args.kwargs
-        assert "open_timeout" in call_kwargs, (
-            "open_timeout no se ha pasado a websockets.connect() — "
-            "issue #26 sigue vigente"
-        )
-        assert call_kwargs["open_timeout"] == 30.0, (
-            f"open_timeout esperaba 30.0 (de connect_timeout_s), "
-            f"obtuve {call_kwargs['open_timeout']}"
-        )
+    client = GatewayClient(cfg.gateway)
+    connect = ws_connect(AsyncMock(return_value=_ws_with_recv([_READY])))
+
+    await client.connect()
+
+    assert client.is_connected
+    connect.assert_awaited_once()
+    call_kwargs = connect.call_args.kwargs
+    assert "open_timeout" in call_kwargs, (
+        "open_timeout no se ha pasado a websockets.connect() — "
+        "issue #26 sigue vigente"
+    )
+    assert call_kwargs["open_timeout"] == 30.0, (
+        f"open_timeout esperaba 30.0 (de connect_timeout_s), "
+        f"obtuve {call_kwargs['open_timeout']}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -521,13 +482,12 @@ async def test_connect_passes_open_timeout_to_websockets() -> None:
 
 
 @pytest.mark.asyncio
-async def test_connect_parsea_session_id_y_agent_de_ready(monkeypatch):
+async def test_connect_parsea_session_id_y_agent_de_ready(ws_connect):
     """Issue #24: connect() extrae session_id, agent y capabilities de ready."""
     from config import GatewayConfig
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
-    ws_mock.recv = AsyncMock(return_value=json.dumps({
+    ws_mock = make_ws()
+    ws_mock.recv.return_value = json.dumps({
         "type": "ready",
         "session_id": "hab_sito:1751289600000",
         "agent": "main",
@@ -535,8 +495,8 @@ async def test_connect_parsea_session_id_y_agent_de_ready(monkeypatch):
         "output_mode": ["audio", "text", "status"],
         "requested_capabilities": {"barge_in": True, "tts": True, "transcriber": True},
         "live_capabilities": {"barge_in": True, "tts": False, "transcriber": True},
-    }))
-    sys.modules["websockets"].connect = AsyncMock(return_value=ws_mock)
+    })
+    ws_connect(AsyncMock(return_value=ws_mock))
 
     client = GatewayClient(cfg)
     await client.connect()
@@ -548,18 +508,17 @@ async def test_connect_parsea_session_id_y_agent_de_ready(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_connect_publica_gateway_ready_al_bus(monkeypatch):
+async def test_connect_publica_gateway_ready_al_bus(ws_connect):
     """Issue #24: connect() publica gateway_ready al bus con session_id."""
     from config import GatewayConfig
     from domain.event_bus import EventBus
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
-    ws_mock.recv = AsyncMock(return_value=json.dumps({
+    ws_mock = make_ws()
+    ws_mock.recv.return_value = json.dumps({
         "type": "ready", "session_id": "s-1", "agent": "main",
         "requested_capabilities": {}, "live_capabilities": {},
-    }))
-    sys.modules["websockets"].connect = AsyncMock(return_value=ws_mock)
+    })
+    ws_connect(AsyncMock(return_value=ws_mock))
 
     bus = EventBus()
     captured = []
@@ -581,35 +540,33 @@ async def test_connect_publica_gateway_ready_al_bus(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_connect_no_publica_sin_bus(monkeypatch):
+async def test_connect_no_publica_sin_bus(ws_connect):
     """Issue #24: sin bus inyectado, connect() no intenta publicar."""
     from config import GatewayConfig
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
-    ws_mock.recv = AsyncMock(return_value=json.dumps({
+    ws_mock = make_ws()
+    ws_mock.recv.return_value = json.dumps({
         "type": "ready", "session_id": "s-1", "agent": "main",
         "requested_capabilities": {}, "live_capabilities": {},
-    }))
-    sys.modules["websockets"].connect = AsyncMock(return_value=ws_mock)
+    })
+    ws_connect(AsyncMock(return_value=ws_mock))
 
     client = GatewayClient(cfg)  # bus=None
     await client.connect()  # no debe intentar publicar (no fallaría sin bus porque la rama está guardada)
 
 
-def test_connect_handshake_sin_device_id(monkeypatch):
+def test_connect_handshake_sin_device_id(ws_connect):
     """Issue #24: handshake NO incluye device_id (el gateway lo ignora)."""
     from config import GatewayConfig
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
-    ws_mock = MagicMock()
-    ws_mock.send = AsyncMock()
-    ws_mock.recv = AsyncMock(return_value=json.dumps({
+    ws_mock = make_ws()
+    ws_mock.recv.return_value = json.dumps({
         "type": "ready", "session_id": "s-1", "agent": "main",
         "requested_capabilities": {}, "live_capabilities": {},
-    }))
+    })
     captured_send = []
     ws_mock.send.side_effect = lambda x: captured_send.append(json.loads(x))
-    sys.modules["websockets"].connect = AsyncMock(return_value=ws_mock)
+    ws_connect(AsyncMock(return_value=ws_mock))
 
     asyncio.run(GatewayClient(cfg).connect())
 
@@ -633,7 +590,7 @@ async def test_receive_rinde_turn_start():
     from config import GatewayConfig
     cfg = GatewayConfig(host="127.0.0.1", client_key="test")
     client = GatewayClient(cfg)
-    client._ws = _FakeWS([json.dumps({
+    client._ws = FakeWS([json.dumps({
         "type": "turn_start", "turn_id": "t-1", "turn_seq": 42,
     })])
 
@@ -651,7 +608,7 @@ async def test_receive_rinde_interrupted():
     from config import GatewayConfig
     cfg = GatewayConfig(host="127.0.0.1", client_key="test")
     client = GatewayClient(cfg)
-    client._ws = _FakeWS([json.dumps({"type": "interrupted"})])
+    client._ws = FakeWS([json.dumps({"type": "interrupted"})])
 
     events = [ev async for ev in client.receive()]
 
@@ -665,7 +622,7 @@ async def test_receive_rinde_tool_call_start_y_result():
     from config import GatewayConfig
     cfg = GatewayConfig(host="127.0.0.1", client_key="test")
     client = GatewayClient(cfg)
-    client._ws = _FakeWS([
+    client._ws = FakeWS([
         json.dumps({
             "type": "tool_call", "turn_id": "t-1", "phase": "start",
             "name": "exec", "tool_call_id": "call-1",
@@ -694,7 +651,7 @@ async def test_current_turn_seq_se_actualiza_con_turn_start_mayor():
     cfg = GatewayConfig(host="127.0.0.1", client_key="test")
     client = GatewayClient(cfg)
     assert client._current_turn_seq == 0
-    client._ws = _FakeWS([json.dumps({
+    client._ws = FakeWS([json.dumps({
         "type": "turn_start", "turn_id": "t-1", "turn_seq": 5,
     })])
 
@@ -711,7 +668,7 @@ async def test_current_turn_seq_ignora_turn_start_menor_o_igual(caplog):
     cfg = GatewayConfig(host="127.0.0.1", client_key="test")
     client = GatewayClient(cfg)
     client._current_turn_seq = 10
-    client._ws = _FakeWS([json.dumps({
+    client._ws = FakeWS([json.dumps({
         "type": "turn_start", "turn_id": "t-2", "turn_seq": 10,
     })])
 
@@ -734,7 +691,7 @@ async def test_tts_chunk_se_descarta_si_turn_seq_menor():
     pcm = b"\x00\x01" * 50
     frame_old = bytes([0xA1, 0x00, 0x05]) + pcm  # turn_seq=5 (anterior)
     frame_new = bytes([0xA1, 0x00, 0x0A]) + pcm  # turn_seq=10 (igual)
-    client._ws = _FakeWS([frame_old, frame_new])
+    client._ws = FakeWS([frame_old, frame_new])
 
     events = [ev async for ev in client.receive()]
 
@@ -751,11 +708,8 @@ async def test_tts_chunk_se_descarta_si_turn_seq_menor():
 
 
 def _ws_with_recv(messages):
-    ws = MagicMock()
-    ws.send = AsyncMock()
-    ws.close = AsyncMock()
-    ws.recv = AsyncMock(side_effect=list(messages))
-    return ws
+    """Socket abierto cuyo recv() entrega `messages` en orden."""
+    return make_ws(recv=messages)
 
 
 _READY = json.dumps({
@@ -766,7 +720,7 @@ _READY = json.dumps({
 
 
 @pytest.mark.asyncio
-async def test_connect_acepta_status_antes_de_ready_y_lo_publica():
+async def test_connect_acepta_status_antes_de_ready_y_lo_publica(ws_connect):
     """client-protocol.md §1/§5: pueden llegar `status` antes de `ready`
     (health check con transcriber caído). Antes connect() lo rechazaba como
     "tipo inesperado" y con un servicio degradado no se podía reconectar."""
@@ -774,7 +728,7 @@ async def test_connect_acepta_status_antes_de_ready_y_lo_publica():
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
     status = json.dumps({"type": "status", "service": "transcriber", "state": "unavailable"})
     ws = _ws_with_recv([status, _READY])
-    sys.modules["websockets"].connect = AsyncMock(return_value=ws)
+    ws_connect(AsyncMock(return_value=ws))
     bus = EventBus()
     seen = []
 
@@ -799,21 +753,21 @@ async def test_connect_acepta_status_antes_de_ready_y_lo_publica():
 
 
 @pytest.mark.asyncio
-async def test_connect_reinicia_turn_seq_y_sesion():
+async def test_connect_reinicia_turn_seq_y_sesion(ws_connect):
     """#118: el gateway reinicia turn_seq en cada sesión; con el valor viejo
     se descartarían todos los frames de la sesión nueva."""
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
     client = GatewayClient(cfg)
     client._current_turn_seq = 7
     client._session_id = "vieja"
-    sys.modules["websockets"].connect = AsyncMock(return_value=_ws_with_recv([_READY]))
+    ws_connect(AsyncMock(return_value=_ws_with_recv([_READY])))
     await client.connect()
     assert client._current_turn_seq == 0
     assert client._session_id == "s-2"
 
 
 @pytest.mark.asyncio
-async def test_connect_pasa_keepalive_y_cola_explicitos():
+async def test_connect_pasa_keepalive_y_cola_explicitos(ws_connect):
     """#118/#116: ping explícito (configurable) y max_queue=None para que la
     librería vacíe el socket aunque la app lea al ritmo de reproducción."""
     cfg = GatewayConfig(
@@ -821,7 +775,7 @@ async def test_connect_pasa_keepalive_y_cola_explicitos():
         ping_interval_s=15.0, ping_timeout_s=25.0,
     )
     connect = AsyncMock(return_value=_ws_with_recv([_READY]))
-    sys.modules["websockets"].connect = connect
+    ws_connect(connect)
     await GatewayClient(cfg).connect()
     kw = connect.call_args.kwargs
     assert kw["ping_interval"] == 15.0
@@ -831,10 +785,10 @@ async def test_connect_pasa_keepalive_y_cola_explicitos():
 
 
 @pytest.mark.asyncio
-async def test_connect_ping_cero_lo_desactiva():
+async def test_connect_ping_cero_lo_desactiva(ws_connect):
     cfg = GatewayConfig(host="127.0.0.1", client_key="t", ping_interval_s=0)
     connect = AsyncMock(return_value=_ws_with_recv([_READY]))
-    sys.modules["websockets"].connect = connect
+    ws_connect(connect)
     await GatewayClient(cfg).connect()
     assert connect.call_args.kwargs["ping_interval"] is None
 
@@ -848,12 +802,12 @@ async def test_connect_ping_cero_lo_desactiva():
     (1011, "Servicio critico no disponible", "service_unavailable", False),
     (1011, "Servicio de identidad no disponible", "service_unavailable", False),
 ])
-def test_handshake_1008_distingue_causa(code, reason, kind, fatal):
+def test_handshake_1008_distingue_causa(code, reason, kind, fatal, ws_connect):
     """#107: la causa del rechazo solo viaja en el reason del close frame
     (client-protocol.md §1 y nota del §9: no hay mensaje `error` previo)."""
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
     ws = _ws_with_recv([_closed_error(code, reason)])
-    sys.modules["websockets"].connect = AsyncMock(return_value=ws)
+    ws_connect(AsyncMock(return_value=ws))
     client = GatewayClient(cfg)
 
     with pytest.raises(GatewayHandshakeError) as info:
@@ -866,18 +820,20 @@ def test_handshake_1008_distingue_causa(code, reason, kind, fatal):
 
 
 @pytest.mark.asyncio
-async def test_connect_http_403_es_fatal():
+async def test_connect_http_403_es_fatal(ws_connect):
     """Cloudflare Access sin credenciales válidas → HTTP 403 en el upgrade."""
     from websockets.exceptions import InvalidStatus
-    resp = MagicMock(status_code=403)
-    sys.modules["websockets"].connect = AsyncMock(side_effect=InvalidStatus(resp))
+    from websockets.http11 import Response
+    resp = create_autospec(Response, instance=True)
+    resp.status_code = 403
+    ws_connect(AsyncMock(side_effect=InvalidStatus(resp)))
     with pytest.raises(GatewayHandshakeError) as info:
         await GatewayClient(GatewayConfig(host="h", client_key="k")).connect()
     assert info.value.kind == "http_rejected" and info.value.fatal
 
 
 @pytest.mark.asyncio
-async def test_ensure_connected_comparte_un_unico_intento():
+async def test_ensure_connected_comparte_un_unico_intento(ws_connect):
     """Supervisor de IDLE e inicio de turno pueden pedir conexión a la vez."""
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
     gate = asyncio.Event()
@@ -887,11 +843,13 @@ async def test_ensure_connected_comparte_un_unico_intento():
         return _ws_with_recv([_READY])
 
     connect = AsyncMock(side_effect=_slow_connect)
-    sys.modules["websockets"].connect = connect
+    ws_connect(connect)
     client = GatewayClient(cfg)
     t1 = asyncio.create_task(client.ensure_connected())
     t2 = asyncio.create_task(client.ensure_connected())
-    await asyncio.sleep(0.01)
+    # Ambas peticiones en marcha y el intento bloqueado en el gate (antes:
+    # sleep(0.01), issue #76).
+    await wait_until(lambda: connect.call_count >= 1)
     gate.set()
     await asyncio.gather(t1, t2)
     assert connect.await_count == 1
@@ -899,20 +857,14 @@ async def test_ensure_connected_comparte_un_unico_intento():
 
 
 @pytest.mark.asyncio
-async def test_connect_cancelado_no_deja_socket_medio_abierto():
+async def test_connect_cancelado_no_deja_socket_medio_abierto(ws_connect):
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=5.0)
-    ws = MagicMock()
-    ws.send = AsyncMock()
-    ws.close = AsyncMock()
-
-    async def _never():
-        await asyncio.Event().wait()
-
-    ws.recv = _never
-    sys.modules["websockets"].connect = AsyncMock(return_value=ws)
+    ws = make_ws()
+    ws.recv.side_effect = never
+    ws_connect(AsyncMock(return_value=ws))
     client = GatewayClient(cfg)
     t = asyncio.create_task(client.connect())
-    await asyncio.sleep(0.01)
+    await wait_until(lambda: ws.recv.await_count >= 1)  # en pleno handshake
     t.cancel()
     with pytest.raises(asyncio.CancelledError):
         await t
@@ -923,8 +875,8 @@ async def test_connect_cancelado_no_deja_socket_medio_abierto():
 @pytest.mark.asyncio
 async def test_send_tras_cierre_lanza_gateway_disconnected():
     client = GatewayClient(GatewayConfig(host="h", client_key="k"))
-    ws = MagicMock()
-    ws.send = AsyncMock(side_effect=_closed_error(1013, "client too slow"))
+    ws = make_ws()
+    ws.send.side_effect = _closed_error(1013, "client too slow")
     client._ws = ws
     with pytest.raises(GatewayDisconnected) as info:
         await client.send_audio(b"x")
@@ -939,8 +891,7 @@ async def test_send_tras_cierre_lanza_gateway_disconnected():
 @pytest.mark.asyncio
 async def test_send_keepalive_es_json_ignorado_por_el_gateway():
     client = GatewayClient(GatewayConfig(host="h", client_key="k"))
-    ws = MagicMock()
-    ws.send = AsyncMock()
+    ws = make_ws()
     client._ws = ws
     await client.send_keepalive()
     assert json.loads(ws.send.call_args[0][0]) == {"type": "keepalive"}
@@ -964,7 +915,7 @@ async def test_receive_token_expone_el_texto_como_content():
     pero _receive_loop lee data["content"] (formato antiguo): los tokens
     llegaban vacíos a playback y al bus."""
     client = GatewayClient(GatewayConfig(host="h", client_key="k"))
-    client._ws = _FakeWS([json.dumps({"type": "token", "turn_id": "t-1", "text": "Hola"})])
+    client._ws = FakeWS([json.dumps({"type": "token", "turn_id": "t-1", "text": "Hola"})])
     events = [ev async for ev in client.receive()]
     assert events[0].type == "llm_token"
     assert events[0].data["content"] == "Hola"
@@ -972,15 +923,15 @@ async def test_receive_token_expone_el_texto_como_content():
 
 
 @pytest.mark.asyncio
-async def test_cierre_1008_a_mitad_de_sesion_marca_fatal_y_connect_lo_limpia():
+async def test_cierre_1008_a_mitad_de_sesion_marca_fatal_y_connect_lo_limpia(ws_connect):
     client = GatewayClient(GatewayConfig(host="h", client_key="k", connect_timeout_s=1.0))
-    ws = MagicMock()
-    ws.send = AsyncMock(side_effect=_closed_error(1008, "Agent 'x' not permitted for this client."))
+    ws = make_ws()
+    ws.send.side_effect = _closed_error(1008, "Agent 'x' not permitted for this client.")
     client._ws = ws
     with pytest.raises(GatewayDisconnected):
         await client.send_end()
     assert client.fatal_error is not None and client.fatal_error.kind == "agent_not_permitted"
-    sys.modules["websockets"].connect = AsyncMock(side_effect=OSError("red caída"))
+    ws_connect(AsyncMock(side_effect=OSError("red caída")))
     with pytest.raises(OSError):
         await client.connect()
     assert client.fatal_error is None, "el último intento (transitorio) manda"
@@ -992,13 +943,12 @@ async def test_tras_cancel_se_descarta_el_audio_del_turno_cancelado():
     """Revisión Fase R, punto 3: tras cancelar el turno N, sus frames en
     tránsito tienen seq == current y se colaban al principio de N+1."""
     client = GatewayClient(GatewayConfig(host="h", client_key="k"))
-    ws = MagicMock()
-    ws.send = AsyncMock()
+    ws = make_ws()
     client._ws = ws
     client._current_turn_seq = 3
     await client.send_cancel()
     pcm = b"\x00\x01"
-    client._ws = _FakeWS([
+    client._ws = FakeWS([
         bytes([0xA1, 0x00, 0x03]) + pcm,   # turno 3 cancelado, en tránsito
         json.dumps({"type": "turn_start", "turn_id": "t-4", "turn_seq": 4}),
         bytes([0xA1, 0x00, 0x04]) + pcm,
@@ -1009,69 +959,80 @@ async def test_tras_cancel_se_descarta_el_audio_del_turno_cancelado():
 
 
 @pytest.mark.asyncio
-async def test_connect_reinicia_el_descarte_tras_cancel():
+async def test_connect_reinicia_el_descarte_tras_cancel(ws_connect):
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
     client = GatewayClient(cfg)
     client._discard_upto = 9
-    sys.modules["websockets"].connect = AsyncMock(return_value=_ws_with_recv([_READY]))
+    ws_connect(AsyncMock(return_value=_ws_with_recv([_READY])))
     await client.connect()
     assert client._discard_upto == 0
 
 
 
 @pytest.mark.asyncio
-async def test_connect_un_unico_deadline_para_abrir_y_handshake():
+async def test_connect_un_unico_deadline_para_abrir_y_handshake(ws_connect, monkeypatch):
     """Revisión Fase R, punto 4: abrir el socket y esperar `ready` comparten
-    connect_timeout_s (antes eran dos plazos completos seguidos)."""
-    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=0.3)
+    connect_timeout_s (antes eran dos plazos completos seguidos).
+
+    Antes se medía el tiempo total contra un umbral (< 0.45 s con un plazo
+    de 0.3 s): con la máquina cargada fallaba sin bug (issue #76). Ahora se
+    mira el plazo que connect() le da al recv() del handshake: tras gastar
+    al menos 0.05 s abriendo, debe quedar menos que el plazo completo. La
+    lentitud del entorno solo puede reducirlo, y el plazo (5 s) queda lejos
+    de la apertura, así que tampoco puede vencer antes de tiempo."""
+    budget, open_delay = 5.0, 0.05
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=budget)
+    timeouts: list[float] = []
+    real_wait_for = asyncio.wait_for
+
+    async def _recording_wait_for(aw, timeout):
+        timeouts.append(timeout)
+        return await real_wait_for(aw, timeout)
 
     async def _slow_open(*a, **kw):
-        await asyncio.sleep(0.2)
-        ws = MagicMock()
-        ws.send = AsyncMock()
-        ws.close = AsyncMock()
+        await asyncio.sleep(open_delay)
+        # recv falla al instante (JSON inválido): el test no espera el plazo.
+        return make_ws(recv=["<html>502</html>"])
 
-        async def _never():
-            await asyncio.Event().wait()
+    ws_connect(_slow_open)
+    with monkeypatch.context() as m:
+        m.setattr(asyncio, "wait_for", _recording_wait_for)
+        with pytest.raises(json.JSONDecodeError):
+            await GatewayClient(cfg).connect()
 
-        ws.recv = _never
-        return ws
-
-    sys.modules["websockets"].connect = _slow_open
-    loop = asyncio.get_running_loop()
-    t0 = loop.time()
-    with pytest.raises(asyncio.TimeoutError):
-        await GatewayClient(cfg).connect()
-    assert loop.time() - t0 < 0.45, "abrir + handshake deben caber en connect_timeout_s"
-
+    assert len(timeouts) >= 2, f"esperaba wait_for de apertura y de recv: {timeouts}"
+    open_timeout, recv_timeout = timeouts[0], timeouts[1]
+    assert open_timeout == pytest.approx(budget)
+    assert recv_timeout <= budget - open_delay + 1e-6, (
+        f"al recv del handshake le quedaban {recv_timeout:.3f}s de {budget}s: abrir + "
+        "handshake deben caber en un único connect_timeout_s"
+    )
 
 
 @pytest.mark.asyncio
-async def test_cancelar_handshake_no_espera_el_close_lento():
+async def test_cancelar_handshake_no_espera_el_close_lento(ws_connect):
     """Revisión Fase R, punto 5: cancelar un handshake hacía await ws.close()
     con el close_timeout por defecto (10 s) y retrasaba RECORDING."""
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=5.0)
-    ws = MagicMock()
-    ws.send = AsyncMock()
+    ws = make_ws()
     aborted = []
-    ws.transport = MagicMock(abort=lambda: aborted.append(True))
+    ws.transport.abort.side_effect = lambda: aborted.append(True)
 
     async def _slow_close():
         await asyncio.sleep(10)
 
-    async def _never():
-        await asyncio.Event().wait()
-
-    ws.close = _slow_close
-    ws.recv = _never
-    sys.modules["websockets"].connect = AsyncMock(return_value=ws)
+    ws.close.side_effect = _slow_close
+    ws.recv.side_effect = never
+    ws_connect(AsyncMock(return_value=ws))
     client = GatewayClient(cfg)
     t = asyncio.create_task(client.connect())
-    await asyncio.sleep(0.02)
+    await wait_until(lambda: ws.recv.await_count >= 1)  # antes: sleep(0.02)
     loop = asyncio.get_running_loop()
     t0 = loop.time()
     t.cancel()
-    await asyncio.wait([t], timeout=5)
+    await asyncio.wait([t], timeout=9)
     assert t.cancelled()
-    assert loop.time() - t0 < 1.0
+    # El bug esperaba el close lento entero (10 s); el fix aborta a los
+    # _ABORT_CLOSE_S (0.5 s). Margen amplio para no fallar por carga (#76).
+    assert loop.time() - t0 < 5.0
     assert aborted, "debe abortar el transporte si el close no termina enseguida"

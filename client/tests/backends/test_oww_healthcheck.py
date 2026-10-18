@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, Awaitable, Callable, List
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -100,6 +100,10 @@ class _Collector:
         return [e for e in self.events if e.type == event_type]
 
 
+async def _noop_on_wake(name: str) -> None:
+    pass
+
+
 class _AbortLoop(Exception):
     """La lanza el wait_for_detection fake para sacar a run_forever de su
     bucle si no respondió a la cancelación (evita colgar el teardown)."""
@@ -116,7 +120,8 @@ class _CountingWFD:
         self.abort = False
         self.calls = 0
 
-    async def __call__(self) -> str:
+    async def __call__(self, *_self) -> str:
+        # *_self: con patch.object(..., autospec=True) llega la instancia.
         if self.abort:
             raise _AbortLoop()
         self.calls += 1
@@ -129,7 +134,7 @@ async def _run_until(client: OWWClient, wfd: _CountingWFD) -> None:
     """Arranca run_forever, espera a ``wfd.reached`` y cancela. Falla si
     run_forever no termina cancelada (p.ej. si se traga la cancelación)."""
     task = asyncio.create_task(
-        client.run_forever(audio=_EmptyAudio(), on_wake_word=AsyncMock())
+        client.run_forever(audio=_EmptyAudio(), on_wake_word=_noop_on_wake)
     )
     try:
         await asyncio.wait_for(wfd.reached.wait(), timeout=_SAFETY_TIMEOUT_S)
@@ -148,12 +153,15 @@ def _patches(wfd: _CountingWFD):
     from contextlib import ExitStack
 
     stack = ExitStack()
-    stack.enter_context(patch.object(OWWClient, "connect", new=AsyncMock(return_value=None)))
+    # autospec=True (issue #38): firma real, y un método inexistente falla.
+    stack.enter_context(patch.object(OWWClient, "connect", autospec=True, return_value=None))
     stack.enter_context(
-        patch.object(OWWClient, "connect_with_backoff", new=AsyncMock(return_value=None))
+        patch.object(OWWClient, "connect_with_backoff", autospec=True, return_value=None)
     )
-    stack.enter_context(patch.object(OWWClient, "wait_for_detection", side_effect=wfd.__call__))
-    stack.enter_context(patch.object(OWWClient, "disconnect", new=AsyncMock(return_value=None)))
+    stack.enter_context(
+        patch.object(OWWClient, "wait_for_detection", autospec=True, side_effect=wfd.__call__)
+    )
+    stack.enter_context(patch.object(OWWClient, "disconnect", autospec=True, return_value=None))
     return stack
 
 
@@ -257,13 +265,13 @@ async def test_connect_with_backoff_counts_initial_failures_for_degraded() -> No
     client = OWWClient(cfg.oww, audio_cfg=cfg.audio, bus=bus)
     attempts = {"n": 0}
 
-    async def _connect() -> None:
+    async def _connect(_self) -> None:
         attempts["n"] += 1
         if attempts["n"] <= 5:
             raise ConnectionRefusedError("OWW caído")
 
     async with _Collector(bus) as col:
-        with patch.object(OWWClient, "connect", side_effect=_connect):
+        with patch.object(OWWClient, "connect", autospec=True, side_effect=_connect):
             await asyncio.wait_for(client.connect_with_backoff(), timeout=_SAFETY_TIMEOUT_S)
         await col.drain()
 
@@ -280,13 +288,13 @@ async def test_connect_with_backoff_below_threshold_does_not_publish() -> None:
     client = OWWClient(cfg.oww, audio_cfg=cfg.audio, bus=bus)
     attempts = {"n": 0}
 
-    async def _connect() -> None:
+    async def _connect(_self) -> None:
         attempts["n"] += 1
         if attempts["n"] <= 2:
             raise ConnectionRefusedError("OWW caído")
 
     async with _Collector(bus) as col:
-        with patch.object(OWWClient, "connect", side_effect=_connect):
+        with patch.object(OWWClient, "connect", autospec=True, side_effect=_connect):
             await asyncio.wait_for(client.connect_with_backoff(), timeout=_SAFETY_TIMEOUT_S)
         await col.drain()
 
