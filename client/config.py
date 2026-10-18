@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +33,15 @@ class ConfigError(ValueError):
 
 
 _MISSING = object()
+
+# Valores aceptados (los mismos que entiende backends/registry.py).
+AUDIO_BACKENDS = ("sounddevice", "termux")
+DISPLAY_BACKENDS = ("ws", "http", "null")
+OWW_BACKENDS = ("wyoming",)
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+_PORT = {"min": 1, "max": 65535}
+# jota-gateway cierra la sesión tras IDLE_TIMEOUT_S sin mensajes del cliente.
+GATEWAY_IDLE_TIMEOUT_S = 300.0
 _TRUE = frozenset({"true", "yes", "on", "1"})
 _FALSE = frozenset({"false", "no", "off", "0"})
 
@@ -57,6 +66,15 @@ class _Section:
             )
             data = {}
         self.data: dict = data
+
+    def warn_unknown(self, known: set[str]) -> None:
+        """Una clave mal escrita aplicaba el default en silencio (issue #49).
+        Se avisa en vez de fallar: configs desplegadas pueden llevar claves
+        de versiones anteriores."""
+        for key in sorted(set(self.data) - known, key=str):
+            log.warning(
+                "config.yaml: clave desconocida %s.%s (se ignora; ¿errata?)", self.name, key
+            )
 
     def _bad(self, key: str, value: Any, expected: str) -> None:
         self.problems.append(f"{self.name}.{key}: {expected} (recibido {value!r})")
@@ -354,6 +372,16 @@ class Config:
     menubar: MenubarConfig = field(default_factory=MenubarConfig)
 
 
+def _field_names(cls: type) -> set[str]:
+    return {f.name for f in fields(cls)}
+
+
+# Secciones de nivel superior que entiende este cliente. `control` está
+# obsoleta (solo avisa, ver load_config).
+_SECTIONS = {"gateway", "device", "oww", "audio", "display", "logging", "menubar"}
+_DEPRECATED_SECTIONS = {"control"}
+
+
 def _start(problems: list[str] | None) -> tuple[list[str], bool]:
     """Los loaders acumulan en la lista de load_config; llamados sueltos
     (tests) lanzan ellos mismos."""
@@ -371,6 +399,8 @@ def _gateway_from_dict(d: Any, problems: list[str] | None = None) -> GatewayConf
     default = GatewayConfig(client_key="")
     if "client_key" not in s.data:
         problems.append("gateway.client_key: falta (obligatoria)")
+    elif s.raw("client_key") is None or not str(s.raw("client_key")).strip():
+        problems.append("gateway.client_key: no puede estar vacía")
     if not s.has("url") and not s.has("host"):
         problems.append("gateway: necesita 'url' o 'host'")
 
@@ -379,19 +409,32 @@ def _gateway_from_dict(d: Any, problems: list[str] | None = None) -> GatewayConf
     # con URL completa del tipo "wss://host/ruta" — el puerto no debe
     # aparecer porque el cliente habla por el esquema por defecto del proxy).
     cfg = GatewayConfig(
-        client_key=s.get_str("client_key", ""),
+        client_key=s.get_str("client_key", "").strip(),
         host=s.get_str("host", ""),
-        port=s.get_int("port", None, optional=True),
+        port=s.get_int("port", None, optional=True, **_PORT),
         path=s.get_str("path", ""),
-        scheme=s.get_str("scheme", default.scheme),
-        connect_timeout_s=s.get_float("connect_timeout_s", default.connect_timeout_s),
+        scheme=s.get_str("scheme", default.scheme, choices=("ws", "wss")),
+        connect_timeout_s=s.get_float("connect_timeout_s", default.connect_timeout_s, gt=0),
         url=s.get_str("url", None, optional=True),
         persistent_session=s.get_bool("persistent_session", default.persistent_session),
-        reconnect_backoff_s=s.get_float_list("reconnect_backoff_s", default.reconnect_backoff_s),
-        keepalive_interval_s=s.get_float("keepalive_interval_s", default.keepalive_interval_s),
-        ping_interval_s=s.get_float("ping_interval_s", default.ping_interval_s),
-        ping_timeout_s=s.get_float("ping_timeout_s", default.ping_timeout_s),
+        reconnect_backoff_s=s.get_float_list(
+            "reconnect_backoff_s", default.reconnect_backoff_s, min=0
+        ),
+        keepalive_interval_s=s.get_float(
+            "keepalive_interval_s", default.keepalive_interval_s, min=0
+        ),
+        ping_interval_s=s.get_float("ping_interval_s", default.ping_interval_s, min=0),
+        ping_timeout_s=s.get_float("ping_timeout_s", default.ping_timeout_s, min=0),
     )
+    if cfg.url and not cfg.url.startswith(("ws://", "wss://")):
+        s._bad("url", cfg.url, "debe empezar por ws:// o wss://")
+    if cfg.keepalive_interval_s >= GATEWAY_IDLE_TIMEOUT_S:
+        log.warning(
+            "config.yaml: gateway.keepalive_interval_s=%s no llega a tiempo: el gateway "
+            "cierra la sesión tras %.0f s sin mensajes del cliente",
+            cfg.keepalive_interval_s, GATEWAY_IDLE_TIMEOUT_S,
+        )
+    s.warn_unknown(_field_names(GatewayConfig))
     _finish(problems, own)
     return cfg
 
@@ -401,7 +444,8 @@ def _device_from_dict(d: Any, problems: list[str] | None = None) -> DeviceConfig
     s = _Section("device", d, problems)
     if "id" not in s.data:
         problems.append("device.id: falta (obligatorio)")
-    cfg = DeviceConfig(id=s.get_str("id", DeviceConfig().id))
+    cfg = DeviceConfig(id=s.get_str("id", DeviceConfig().id, non_empty=True))
+    s.warn_unknown(_field_names(DeviceConfig))
     _finish(problems, own)
     return cfg
 
@@ -413,23 +457,29 @@ def _oww_from_dict(d: Any, problems: list[str] | None = None) -> OWWConfig:
     wake_words = s.raw("wake_words", default.wake_words)
     if isinstance(wake_words, str):
         wake_words = [wake_words]  # antes list("ok_nabu") daba una lista de letras
-    if not isinstance(wake_words, list):
-        s._bad("wake_words", wake_words, "debe ser una lista de nombres")
+    if not isinstance(wake_words, list) or not wake_words or not all(
+        isinstance(w, str) and w.strip() for w in wake_words
+    ):
+        s._bad("wake_words", wake_words, "debe ser una lista no vacía de nombres")
         wake_words = list(default.wake_words)
     cfg = OWWConfig(
-        backend=s.get_str("backend", default.backend),
-        host=s.get_str("host", default.host),
-        port=s.get_int("port", default.port),
-        wake_words=[str(w) for w in wake_words],
-        reconnect_backoff_s=s.get_float_list("reconnect_backoff_s", default.reconnect_backoff_s),
-        idle_detection_timeout_s=s.get_float(
-            "idle_detection_timeout_s", default.idle_detection_timeout_s
+        backend=s.get_str("backend", default.backend, choices=OWW_BACKENDS),
+        host=s.get_str("host", default.host, non_empty=True),
+        port=s.get_int("port", default.port, **_PORT),
+        wake_words=list(wake_words),
+        # run_forever/connect_with_backoff no admiten una lista vacía.
+        reconnect_backoff_s=s.get_float_list(
+            "reconnect_backoff_s", default.reconnect_backoff_s, non_empty=True, min=0
         ),
-        debounce_s=s.get_float("debounce_s", default.debounce_s),
+        idle_detection_timeout_s=s.get_float(
+            "idle_detection_timeout_s", default.idle_detection_timeout_s, min=0
+        ),
+        debounce_s=s.get_float("debounce_s", default.debounce_s, min=0),
         oww_healthcheck_threshold=s.get_int(
-            "oww_healthcheck_threshold", default.oww_healthcheck_threshold
+            "oww_healthcheck_threshold", default.oww_healthcheck_threshold, min=1
         ),
     )
+    s.warn_unknown(_field_names(OWWConfig))
     _finish(problems, own)
     return cfg
 
@@ -439,7 +489,7 @@ def _device_index(s: _Section, key: str) -> int | str | None:
     value = s.data.get(key)
     if value is None or isinstance(value, str):
         return value
-    return s.get_int(key, None, optional=True)
+    return s.get_int(key, None, optional=True, min=0)
 
 
 def _audio_from_dict(d: Any, problems: list[str] | None = None) -> AudioConfig:
@@ -447,20 +497,23 @@ def _audio_from_dict(d: Any, problems: list[str] | None = None) -> AudioConfig:
     s = _Section("audio", d, problems)
     default = AudioConfig()
     cfg = AudioConfig(
-        backend=s.get_str("backend", None, optional=True),
-        sample_rate=s.get_int("sample_rate", default.sample_rate),
-        channels=s.get_int("channels", default.channels),
-        frames_per_buffer=s.get_int("frames_per_buffer", default.frames_per_buffer),
-        preroll_seconds=s.get_float("preroll_seconds", default.preroll_seconds),
-        silence_timeout_s=s.get_float("silence_timeout_s", default.silence_timeout_s),
-        recording_timeout_s=s.get_float("recording_timeout_s", default.recording_timeout_s),
-        vad_rms_threshold=s.get_float("vad_rms_threshold", default.vad_rms_threshold),
+        backend=s.get_str("backend", None, optional=True, choices=AUDIO_BACKENDS),
+        sample_rate=s.get_int("sample_rate", default.sample_rate, min=1),
+        channels=s.get_int("channels", default.channels, min=1),
+        frames_per_buffer=s.get_int("frames_per_buffer", default.frames_per_buffer, min=1),
+        preroll_seconds=s.get_float("preroll_seconds", default.preroll_seconds, min=0),
+        silence_timeout_s=s.get_float("silence_timeout_s", default.silence_timeout_s, gt=0),
+        recording_timeout_s=s.get_float(
+            "recording_timeout_s", default.recording_timeout_s, gt=0
+        ),
+        vad_rms_threshold=s.get_float("vad_rms_threshold", default.vad_rms_threshold, min=0),
         input_device=_device_index(s, "input_device"),
         output_device=_device_index(s, "output_device"),
         start_retry_backoff_s=s.get_float_list(
-            "start_retry_backoff_s", default.start_retry_backoff_s
+            "start_retry_backoff_s", default.start_retry_backoff_s, min=0
         ),
     )
+    s.warn_unknown(_field_names(AudioConfig))
     _finish(problems, own)
     return cfg
 
@@ -470,17 +523,20 @@ def _display_from_dict(d: Any, problems: list[str] | None = None) -> DisplayConf
     s = _Section("display", d, problems)
     default = DisplayConfig()
     cfg = DisplayConfig(
-        backend=s.get_str("backend", None, optional=True),
+        backend=s.get_str("backend", None, optional=True, choices=DISPLAY_BACKENDS),
         url=s.get_str("url", default.url),
-        timeout_s=s.get_float("timeout_s", default.timeout_s),
-        port=s.get_int("port", default.port),
+        timeout_s=s.get_float("timeout_s", default.timeout_s, gt=0),
+        port=s.get_int("port", default.port, **_PORT),
         token_path=s.get_str("token_path", None, optional=True),
         rate_limit_max_requests=s.get_int(
-            "rate_limit_max_requests", default.rate_limit_max_requests
+            "rate_limit_max_requests", default.rate_limit_max_requests, min=1
         ),
-        rate_limit_window_s=s.get_float("rate_limit_window_s", default.rate_limit_window_s),
-        max_clients=s.get_int("max_clients", default.max_clients),
+        rate_limit_window_s=s.get_float(
+            "rate_limit_window_s", default.rate_limit_window_s, gt=0
+        ),
+        max_clients=s.get_int("max_clients", default.max_clients, min=1),
     )
+    s.warn_unknown(_field_names(DisplayConfig))
     _finish(problems, own)
     return cfg
 
@@ -488,7 +544,14 @@ def _display_from_dict(d: Any, problems: list[str] | None = None) -> DisplayConf
 def _logging_from_dict(d: Any, problems: list[str] | None = None) -> LoggingConfig:
     problems, own = _start(problems)
     s = _Section("logging", d, problems)
-    cfg = LoggingConfig(level=s.get_str("level", LoggingConfig().level))
+    level = s.get_str("level", LoggingConfig().level).strip().upper()
+    if level == "WARN":
+        level = "WARNING"
+    if level not in LOG_LEVELS:
+        s._bad("level", s.raw("level"), "debe ser uno de " + ", ".join(LOG_LEVELS))
+        level = LoggingConfig().level
+    cfg = LoggingConfig(level=level)
+    s.warn_unknown(_field_names(LoggingConfig))
     _finish(problems, own)
     return cfg
 
@@ -503,6 +566,7 @@ def _menubar_from_dict(d: Any, problems: list[str] | None = None) -> MenubarConf
         log_path=s.get_str("log_path", None, optional=True),
         config_path=s.get_str("config_path", None, optional=True),
     )
+    s.warn_unknown(_field_names(MenubarConfig))
     _finish(problems, own)
     return cfg
 
@@ -549,6 +613,8 @@ def load_config(path: str | Path) -> Config:
         logging=_logging_from_dict(data.get("logging"), problems),
         menubar=_menubar_from_dict(menubar_section, problems),
     )
+    for key in sorted(set(data) - _SECTIONS - _DEPRECATED_SECTIONS, key=str):
+        log.warning("config.yaml: sección desconocida %r (se ignora; ¿errata?)", key)
     if problems:
         raise ConfigError(problems, path)
     return cfg

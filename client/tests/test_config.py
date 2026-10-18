@@ -426,3 +426,147 @@ def test_fichero_vacio_da_config_error(tmp_path) -> None:
     path.write_text("")
     with pytest.raises(ConfigError, match="gateway"):
         load_config(path)
+
+
+# ---------------------------------------------------------------------------
+# Issue #49: rangos, valores permitidos y claves desconocidas
+# ---------------------------------------------------------------------------
+
+_OUT_OF_RANGE = [
+    ("gateway", "port", 99999),
+    ("gateway", "port", 0),
+    ("gateway", "connect_timeout_s", 0),
+    ("gateway", "keepalive_interval_s", -1),
+    ("gateway", "ping_interval_s", -1),
+    ("gateway", "ping_timeout_s", -1),
+    ("gateway", "reconnect_backoff_s", [1, -2]),
+    ("gateway", "scheme", "http"),
+    ("gateway", "url", "http://host/ws"),
+    ("oww", "port", 70000),
+    ("oww", "backend", "porcupine"),
+    ("oww", "debounce_s", -0.5),
+    ("oww", "idle_detection_timeout_s", -1),
+    ("oww", "oww_healthcheck_threshold", 0),
+    ("oww", "reconnect_backoff_s", []),
+    ("oww", "wake_words", []),
+    ("oww", "host", ""),
+    ("audio", "backend", "alsa"),
+    ("audio", "sample_rate", 0),
+    ("audio", "channels", 0),
+    ("audio", "frames_per_buffer", 0),
+    ("audio", "preroll_seconds", -1),
+    ("audio", "silence_timeout_s", 0),
+    ("audio", "recording_timeout_s", 0),
+    ("audio", "vad_rms_threshold", -50),
+    ("audio", "input_device", -1),
+    ("audio", "start_retry_backoff_s", [-1]),
+    ("display", "backend", "kiosk"),
+    ("display", "timeout_s", 0),
+    ("display", "port", 65536),
+    ("display", "rate_limit_max_requests", 0),
+    ("display", "rate_limit_window_s", 0),
+    ("display", "max_clients", 0),
+    ("logging", "level", "VERBOSE"),
+    ("device", "id", ""),
+]
+
+
+@pytest.mark.parametrize("section,key,value", _OUT_OF_RANGE)
+def test_valor_fuera_de_rango_da_config_error_con_la_clave(tmp_path, section, key, value) -> None:
+    from config import ConfigError
+    with pytest.raises(ConfigError) as info:
+        _load_tmp(tmp_path, _with(section, {key: value}))
+    assert f"{section}.{key}" in str(info.value)
+
+
+@pytest.mark.parametrize("value", ["", "   ", None])
+def test_client_key_vacia_o_nula_falla_al_cargar(tmp_path, value) -> None:
+    """Antes `client_key: ""` o `null` pasaban y fallaban mucho después, al
+    autenticar, con un error de protocolo confuso."""
+    from config import ConfigError
+    with pytest.raises(ConfigError, match=r"gateway\.client_key"):
+        _load_tmp(tmp_path, _with("gateway", {"client_key": value}))
+
+
+def test_client_key_numerica_se_acepta_como_texto(tmp_path) -> None:
+    cfg = _load_tmp(tmp_path, _with("gateway", {"client_key": 12345}))
+    assert cfg.gateway.client_key == "12345"
+
+
+def test_clave_desconocida_avisa_sin_fallar(tmp_path, caplog) -> None:
+    """Una clave mal escrita (typo) aplicaba el default en silencio."""
+    data = _with("audio", {"silence_timout_s": 3})
+    data["audoi"] = {"x": 1}
+    with caplog.at_level("WARNING", logger="config"):
+        cfg = _load_tmp(tmp_path, data)
+    assert cfg.audio.silence_timeout_s == 1.5
+    assert "audio.silence_timout_s" in caplog.text
+    assert "audoi" in caplog.text
+
+
+def test_logging_level_se_normaliza(tmp_path) -> None:
+    cfg = _load_tmp(tmp_path, {**_BASE, "logging": {"level": "debug"}})
+    assert cfg.logging.level == "DEBUG"
+
+
+@pytest.mark.parametrize("value", [0, 4.5, "0"])
+def test_ceros_validos_se_aceptan(tmp_path, value) -> None:
+    """0 desactiva keepalive y ping (documentado en config.example.yaml)."""
+    cfg = _load_tmp(tmp_path, _with("gateway", {
+        "keepalive_interval_s": value, "ping_interval_s": value, "ping_timeout_s": value,
+    }))
+    assert cfg.gateway.keepalive_interval_s == float(value)
+
+
+def test_keepalive_mayor_que_idle_timeout_del_gateway_avisa(tmp_path, caplog) -> None:
+    with caplog.at_level("WARNING", logger="config"):
+        _load_tmp(tmp_path, _with("gateway", {"keepalive_interval_s": 400}))
+    assert "gateway.keepalive_interval_s" in caplog.text
+
+
+def test_audio_device_acepta_indice_o_nombre(tmp_path) -> None:
+    cfg = _load_tmp(tmp_path, _with("audio", {"input_device": 2, "output_device": "MacBook Pro Speakers"}))
+    assert cfg.audio.input_device == 2
+    assert cfg.audio.output_device == "MacBook Pro Speakers"
+
+
+def test_display_backend_null_con_url_sigue_valiendo(tmp_path) -> None:
+    """Configs desplegadas (Termux): `backend: "null"` o null con `url:`."""
+    cfg = _load_tmp(tmp_path, {**_BASE, "display": {"backend": "null", "url": "http://127.0.0.1:8766"}})
+    assert cfg.display.backend == "null"
+    cfg = _load_tmp(tmp_path, {**_BASE, "display": {"backend": None, "url": "http://127.0.0.1:8766"}})
+    assert cfg.display.backend is None
+
+
+def test_seccion_control_obsoleta_solo_avisa(tmp_path, caplog) -> None:
+    with caplog.at_level("WARNING", logger="config"):
+        _load_tmp(tmp_path, {**_BASE, "control": {"port": 8765, "token_path": "/tmp/x"}})
+    assert "control" in caplog.text
+    # Un solo aviso: sus claves internas no se reportan como desconocidas.
+    assert "control.port" not in caplog.text
+
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _wizard_config_yaml() -> str:
+    """El YAML que escribe install/macos/02-config-wizard.sh, con valores reales."""
+    with open(os.path.join(_REPO_ROOT, "install/macos/02-config-wizard.sh")) as f:
+        script = f.read()
+    body = script.split('cat > "$CFG" <<EOF\n', 1)[1].split("\nEOF\n", 1)[0]
+    return (
+        body.replace("${GATEWAY_URL}", "wss://gw.example.org/ws/stream")
+        .replace("${GATEWAY_CLIENT_KEY}", "clave-real")
+        .replace("${ID}", "macbook")
+        .replace("${WAKE_WORD}", "ok_nabu")
+    )
+
+
+def test_la_config_del_wizard_de_macos_carga_sin_avisos(tmp_path, caplog) -> None:
+    from config import load_config
+    path = tmp_path / "config.yaml"
+    path.write_text(_wizard_config_yaml())
+    with caplog.at_level("WARNING", logger="config"):
+        cfg = load_config(path)
+    assert cfg.display.backend == "ws"
+    assert not caplog.records, caplog.text
