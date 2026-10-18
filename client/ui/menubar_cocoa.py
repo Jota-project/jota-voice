@@ -30,6 +30,17 @@ _STATE_ICONS = {
     "cancelled": "xmark.circle",
 }
 
+# Etiquetas de la cabecera del menú (issue #97: antes state.upper(), que
+# mostraba "CANCELLED" en inglés entre etiquetas en español).
+_STATE_LABELS = {
+    "idle":      "En espera",
+    "listening": "Escuchando",
+    "thinking":  "Pensando",
+    "speaking":  "Hablando",
+    "error":     "Error",
+    "cancelled": "Cancelado",
+}
+
 
 class CocoaMenubarBackend:
     def __init__(self, cfg: MenubarConfig, shared: Optional[_SharedState] = None) -> None:
@@ -160,9 +171,10 @@ class CocoaMenubarBackend:
             # no llegará.
             return "Arrancando…"
         suffix = " (pausado)" if paused else ""
+        label = _STATE_LABELS.get(state, state.capitalize())
         if errors:
-            return f"{state.upper()} — {errors} error(es){suffix}"
-        return f"{state.upper()}{suffix}"
+            return f"{label} — {errors} error(es){suffix}"
+        return f"{label}{suffix}"
 
     # ------------------------------------------------------------------
     # API pública (llamada desde asyncio a través de _SharedState o

@@ -122,6 +122,37 @@ def test_set_commands_requests_repaint(backend):
     assert scheduled == [(backend.tick_, (None,))]
 
 
+@pytest.mark.parametrize(
+    "state, title",
+    [
+        ("idle", "En espera"),
+        ("listening", "Escuchando"),
+        ("thinking", "Pensando"),
+        ("speaking", "Hablando"),
+        ("error", "Error"),
+        ("cancelled", "Cancelado"),
+    ],
+)
+def test_header_title_is_spanish(backend, state, title):
+    """Issue #97: la cabecera hacía state.upper() ("CANCELLED") mezclando
+    inglés con el resto de etiquetas en español."""
+    backend.set_commands(_noop_commands())
+    backend.set_state(state)
+    backend.tick_(None)
+
+    assert backend._header_item.title() == title
+
+
+def test_header_title_with_errors_and_pause(backend):
+    backend.set_commands(_noop_commands())
+    backend.set_state("cancelled")
+    backend.set_errors_count(2)
+    backend.set_listening_paused(True)
+    backend.tick_(None)
+
+    assert backend._header_item.title() == "Cancelado — 2 error(es) (pausado)"
+
+
 def test_status_item_created(backend):
     assert backend.status_item is not None
     assert backend.status_item.button() is not None
