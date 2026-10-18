@@ -130,8 +130,10 @@ class OWWClient:
             "data": {"rate": self._rate, "width": _DEFAULT_OWW_WIDTH, "channels": self._channels, "timestamp": 0},
             "payload_length": len(pcm_int16),
         }
-        await self._send_json(header)
-        self._writer.write(pcm_int16)
+        # Cabecera + payload en un único write()+drain() (issue #85): el bucle
+        # corre cada ~32 ms y dos drains por chunk serializaban sin motivo.
+        line = json.dumps(header, separators=(",", ":")).encode() + b"\n"
+        self._writer.write(line + pcm_int16)
         await self._writer.drain()
 
     async def wait_for_detection(self) -> str:

@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from unittest.mock import create_autospec, patch
+from unittest.mock import AsyncMock, MagicMock, create_autospec, patch
 
 from config import AudioConfig, OWWConfig
 from backends.oww_client import OWWClient
@@ -571,3 +571,24 @@ def test_oww_connect_timeout_s_por_defecto_y_desde_yaml(tmp_path) -> None:
         assert "oww.connect_timeout_s" in str(exc)
     else:
         raise AssertionError("connect_timeout_s: 0 debía rechazarse")
+
+
+def test_send_audio_un_solo_write_y_drain_por_chunk() -> None:
+    """Issue #85: cabecera JSON + payload PCM van en un único write() y un
+    único drain() por chunk (antes eran dos ciclos write+drain cada ~32 ms)."""
+    client = OWWClient(OWWConfig(host="127.0.0.1", port=1))
+    writer = MagicMock(spec=asyncio.StreamWriter)
+    writer.drain = AsyncMock()
+    client._writer = writer
+    client._connected = True
+
+    asyncio.run(client.send_audio(b"\x01\x02\x03\x04"))
+
+    assert writer.write.call_count == 1
+    assert writer.drain.await_count == 1
+    data = writer.write.call_args.args[0]
+    header_line, payload = data.split(b"\n", 1)
+    header = json.loads(header_line)
+    assert header["type"] == "audio-chunk"
+    assert header["payload_length"] == 4
+    assert payload == b"\x01\x02\x03\x04"
