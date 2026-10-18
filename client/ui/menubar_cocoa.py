@@ -100,6 +100,7 @@ class CocoaMenubarBackend:
         self._header_item: Optional[AppKit.NSMenuItem] = None
         self._pause_menu_item: Optional[AppKit.NSMenuItem] = None
         self._health_item: Optional[AppKit.NSMenuItem] = None
+        self._agent_item: Optional[AppKit.NSMenuItem] = None
         # Items que solo funcionan con MenubarCommands: deshabilitados hasta
         # que set_commands() llegue (issue #71).
         self._command_items: list[AppKit.NSMenuItem] = []
@@ -144,6 +145,15 @@ class CocoaMenubarBackend:
         self._health_item.setHidden_(True)
         self._command_items.append(self._health_item)
         self._menu.addItem_(self._health_item)
+
+        # 1c. Agente activo de la sesión (issue #111), informativo. Oculto
+        # hasta el primer `ready`.
+        self._agent_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "", None, ""
+        )
+        self._agent_item.setEnabled_(False)
+        self._agent_item.setHidden_(True)
+        self._menu.addItem_(self._agent_item)
 
         # 2. Submenú "Servicio"
         servicio_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -262,6 +272,10 @@ class CocoaMenubarBackend:
 
     def set_health(self, level: str, text: str) -> None:
         self._shared.set_health(level, text)
+        self._request_repaint()
+
+    def set_agent(self, agent: str) -> None:
+        self._shared.set_agent(agent)
         self._request_repaint()
 
     def set_commands(self, cmds: MenubarCommands) -> None:
@@ -394,6 +408,7 @@ class CocoaMenubarBackend:
         self._header_item = None
         self._pause_menu_item = None
         self._health_item = None
+        self._agent_item = None
         self._command_items = []
 
     # ------------------------------------------------------------------
@@ -410,6 +425,11 @@ class CocoaMenubarBackend:
             button.setToolTip_(f"jota-voice — {health_text}" if health_text else "jota-voice")
 
         self._paint_health(health_level, health_text)
+
+        if self._agent_item is not None:
+            agent = self._shared.read_agent()
+            self._agent_item.setHidden_(not agent)
+            self._agent_item.setTitle_(f"Agente: {agent}" if agent else "")
 
         if self._header_item is not None:
             self._header_item.setTitle_(self._header_title())

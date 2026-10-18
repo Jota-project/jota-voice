@@ -86,6 +86,9 @@ class MenubarClient:
     def __init__(self, backend: MenubarBackend, hold_transient_s: float = _HOLD_TRANSIENT_S_DEFAULT) -> None:
         self._backend = backend
         self._errors_count = 0
+        # Último agente enviado al backend (issue #111): solo se repinta si
+        # cambia entre sesiones.
+        self._agent: str | None = None
         self._hold_transient_s = hold_transient_s
         self._hold_until: float = 0.0
         self._pending_idle_task: "asyncio.Task | None" = None
@@ -219,6 +222,14 @@ class MenubarClient:
             self._set_transient_state("error")
         elif event.type == "cancelled":
             self._set_transient_state("cancelled")
+        elif event.type == "gateway_ready":
+            # Issue #111: agente efectivo de la sesión, resuelto por la
+            # cascada del gateway (pedido → default_agent del client_key →
+            # global). El gateway NO manda allowed_agents ni default_agent.
+            agent = str(event.data.get("agent") or "")
+            if agent != self._agent:
+                self._agent = agent
+                self._backend.set_agent(agent)
 
     # ------------------------------------------------------------------
     # Salud: gateway, servicios del gateway y wake word (#108, #7)
@@ -289,7 +300,7 @@ class MenubarClient:
             # se reintenta solo: se queda visible hasta que una sesión vuelva
             # a abrirse (gateway_ready / connected).
             if code == "GATEWAY_HANDSHAKE_REJECTED":
-                text = _HANDSHAKE_TEXTS.get(data.get("kind"), "Gateway: conexión rechazada")
+                text = _HANDSHAKE_TEXTS.get(data.get("kind") or "", "Gateway: conexión rechazada")
                 # El supervisor deja de reintentar: "reconectando…" ya no
                 # es cierto.
                 self._health.pop("gateway", None)

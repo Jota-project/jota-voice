@@ -516,3 +516,30 @@ def test_response_deadline_con_plazo_de_turno_0_no_vence() -> None:
     d.our_turn_started()
     clock.now += 10_000
     assert d.remaining() is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #113: shape de los errores y JSON null en code/message
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_error_del_gateway_con_code_null_no_se_convierte_en_none() -> None:
+    events = [GatewayEvent(type="error", data={"code": None, "message": None, "fatal": False})]
+    gateway = _streaming_gateway(events, _FakeClock(), step_s=0)
+    with pytest.raises(state_machine._GatewayError) as info:
+        await asyncio.wait_for(state_machine._responding(
+            EventBus(), gateway, MagicMock(spec=PlaybackEngine), asyncio.Event(),
+            gateway_cfg=_gcfg(),
+        ), 2.0)
+    assert info.value.code == ""
+    assert info.value.message == ""
+
+
+def test_error_local_publica_el_mismo_shape_que_los_del_gateway() -> None:
+    bus = EventBus()
+    events = bus.subscribe()
+    state_machine._log_error("RESPONDING", TimeoutError(), bus)
+    ev = events._q.get_nowait()
+    assert ev.type == "error"
+    assert ev.data == {"code": None, "message": "TimeoutError", "fatal": False}

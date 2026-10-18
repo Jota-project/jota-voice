@@ -12,7 +12,9 @@ class PrerollBuffer:
 
     @property
     def maxlen(self) -> int:
-        return self._buffer.maxlen
+        maxlen = self._buffer.maxlen
+        assert maxlen is not None  # el deque se crea siempre con maxlen
+        return maxlen
 
     def append(self, frame: bytes) -> None:
         self._buffer.append(frame)
