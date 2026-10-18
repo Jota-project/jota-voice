@@ -1,7 +1,9 @@
 """Detección de plataforma — fuente única de verdad.
 
 Preferencia de detección de Termux (en orden):
-  1. Variable de entorno PREFIX (recomendado — testeable sin filesystem).
+  1. Variables de entorno: PREFIX dentro de com.termux o TERMUX_VERSION
+     (backends.platform_detect.termux_env_signal, compartida con
+     is_termux(); issue #60).
   2. Existencia de TERMUX_HOSTS_PATH en el filesystem (fallback robusto
      para entornos donde PREFIX no se reenvía al proceso hijo, p.ej. init
      systems que sanitizan variables).
@@ -22,7 +24,7 @@ from typing import Literal
 # Fase A revisión: detect_platform() también la usa como fallback para
 # detectar Termux sin depender de PREFIX (resistente a init systems
 # que sanitizan variables de entorno).
-from backends.platform_detect import TERMUX_HOSTS_PATH
+from backends.platform_detect import TERMUX_HOSTS_PATH, termux_env_signal
 
 
 class UnsupportedPlatformError(Exception):
@@ -38,7 +40,7 @@ class PlatformKey:
 def detect_platform() -> PlatformKey:
     if sys.platform == "darwin":
         return PlatformKey("darwin", "desktop")
-    if "com.termux" in os.environ.get("PREFIX", ""):
+    if termux_env_signal():  # PREFIX en com.termux o TERMUX_VERSION (#60)
         return PlatformKey("termux", "mobile")
     if os.path.exists(TERMUX_HOSTS_PATH):
         return PlatformKey("termux", "mobile")

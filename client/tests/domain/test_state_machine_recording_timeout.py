@@ -18,10 +18,13 @@ from __future__ import annotations
 
 import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
+from app.playback_engine import PlaybackEngine
+from backends.audio_base import AudioBackend
+from backends.gateway_client import GatewayClient
 from config import AudioConfig, Config, DeviceConfig, GatewayConfig
 from domain.event_bus import EventBus
 
@@ -46,61 +49,33 @@ def _cfg(recording_timeout_s: float = 0.3) -> Config:
 
 
 def _audio_mock_with_frames(n: int) -> tuple[MagicMock, asyncio.Queue[bytes]]:
-    """Devuelve (audio_mock, queue). La queue está VACÍA inicialmente.
+    """Devuelve (audio_mock, queue) con la queue VACÍA al entrar en RECORDING.
 
-    Razón: _recording drena la cola al entrar (líneas 218-220 de
-    state_machine.py) para descartar el backlog acumulado durante _idle.
-    Si la cola ya tiene frames al llamar a audio.get_queue(), el drain se
-    los come ANTES de que _capture_loop arranque — y luego _capture_loop
-    se queda en wait_for(q.get(), timeout=0.1) hasta el deadline sin
-    pasar nunca por send_audio (que es lo que queremos testear).
-
-    El test mete frames en la cola DESPUÉS del drain usando un callback
-    de side_effect sobre audio.get_queue: la primera llamada (drain) ve
-    cola vacía, las siguientes (_capture_loop) reciben una cola con
-    frames.
+    _recording drena la cola al entrar (descarta el backlog de IDLE), así
+    que los frames se meten justo DESPUÉS del drain: get_preroll() se llama
+    tras el drain y antes de _capture_loop, y su side_effect encola los ``n``
+    frames. Sin esperas reales (issue #76).
     """
-    audio = MagicMock()
+    audio = MagicMock(spec=AudioBackend)
     q: asyncio.Queue[bytes] = asyncio.Queue()
-    # La cola se queda vacía. El test la rellena tras el drain.
-    audio.get_preroll.return_value = b""
+    audio.get_queue.return_value = q
     audio.is_silence.return_value = False  # nunca silencio → solo el deadline termina
 
-    # side_effect: la primera llamada devuelve cola vacía (drain se la
-    # come — q.empty() es True inmediatamente y no drena nada). Las
-    # llamadas posteriores (_capture_loop) reciben una cola con frames.
-    calls = {"count": 0}
+    def _preroll_then_frames() -> bytes:
+        for _ in range(n):
+            q.put_nowait(b"\x00" * 100)
+        return b""
 
-    def _get_q() -> asyncio.Queue[bytes]:
-        calls["count"] += 1
-        if calls["count"] == 1:
-            return q  # vacía — drain no hace nada
-        # Segunda+ llamadas: misma cola, pero el test ya la habrá rellenado.
-        return q
-
-    audio.get_queue.side_effect = _get_q
+    audio.get_preroll.side_effect = _preroll_then_frames
     return audio, q
 
 
 def _gateway_mock() -> MagicMock:
-    gateway = MagicMock()
-    gateway.connect = AsyncMock()
-    gateway.disconnect = AsyncMock()
-    gateway.send_audio = AsyncMock()
-    gateway.send_end = AsyncMock()
-    gateway.send_text = AsyncMock()
-    gateway.send_cancel = AsyncMock()
-    return gateway
+    return MagicMock(spec=GatewayClient)
 
 
 def _playback_mock() -> MagicMock:
-    playback = MagicMock()
-    playback.push_token = MagicMock()
-    playback.play_chunk = AsyncMock()
-    playback.play_notification = AsyncMock()
-    playback.drain = AsyncMock()
-    playback.reset = MagicMock()
-    return playback
+    return MagicMock(spec=PlaybackEngine)
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +95,7 @@ def test_recording_timeout_is_hard_limit_when_send_audio_blocks() -> None:
     async def _driver() -> None:
         cfg = _cfg(recording_timeout_s=0.3)
         bus = EventBus()
-        audio, q = _audio_mock_with_frames(n=5)
+        audio, _ = _audio_mock_with_frames(n=5)
         gateway = _gateway_mock()
         playback = _playback_mock()
         cancel_event = asyncio.Event()
@@ -140,14 +115,8 @@ def test_recording_timeout_is_hard_limit_when_send_audio_blocks() -> None:
             _recording("wake", bus, audio, gateway, playback, cfg, cancel_event)
         )
 
-        # Dejar que _recording ejecute el drain (cola vacía → no hace nada),
-        # llame a connect() y cree _capture_loop. El primer await de
-        # _capture_loop es wait_for(q.get(), timeout=0.1) — necesitamos que
-        # los frames estén YA en la cola para que send_audio se llame
-        # (que es el camino donde está el bug).
-        await asyncio.sleep(0.05)
-        for _ in range(5):
-            q.put_nowait(b"\x00" * 100)
+        # Los frames llegan tras el drain (side_effect de get_preroll), así
+        # que _capture_loop llama a send_audio (el camino del bug).
 
         # Margen generoso: deadline 0.3s + overhead asyncio (~0.05s típico)
         # + tiempo de propagación de cancel tras el break. 2s es holgado.
@@ -193,7 +162,7 @@ def test_recording_timeout_still_fires_when_send_audio_is_normal() -> None:
         bus = EventBus()
         # 20 frames non-silence — silence_count nunca llega al umbral,
         # así que la única salida es el deadline.
-        audio, q = _audio_mock_with_frames(n=20)
+        audio, _ = _audio_mock_with_frames(n=20)
         gateway = _gateway_mock()
         playback = _playback_mock()
         cancel_event = asyncio.Event()
@@ -204,10 +173,7 @@ def test_recording_timeout_still_fires_when_send_audio_is_normal() -> None:
             _recording("wake", bus, audio, gateway, playback, cfg, cancel_event)
         )
 
-        # Igual que el test anterior: dejar pasar el drain, luego rellenar.
-        await asyncio.sleep(0.05)
-        for _ in range(20):
-            q.put_nowait(b"\x00" * 100)
+        # Los 20 frames llegan tras el drain (side_effect de get_preroll).
 
         start = time.monotonic()
         await asyncio.wait_for(task, timeout=2.0)

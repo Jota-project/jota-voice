@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from unittest.mock import AsyncMock, patch
+from unittest.mock import create_autospec, patch
 
 from config import AudioConfig, OWWConfig
 from backends.oww_client import OWWClient
@@ -335,12 +335,14 @@ async def _test_run_forever_recupera_connection_error_de_send_task(caplog) -> No
         await asyncio.sleep(0)
         raise ConnectionError("fallo de recepción")
 
-    client.connect_with_backoff = AsyncMock(
-        side_effect=[None, asyncio.CancelledError()]
+    client.connect_with_backoff = create_autospec(
+        client.connect_with_backoff, side_effect=[None, asyncio.CancelledError()]
     )
-    client._send_audio_loop = AsyncMock(side_effect=_fail_sending)
-    client.wait_for_detection = AsyncMock(side_effect=_fail_receiving)
-    client.disconnect = AsyncMock()
+    client._send_audio_loop = create_autospec(client._send_audio_loop, side_effect=_fail_sending)
+    client.wait_for_detection = create_autospec(
+        client.wait_for_detection, side_effect=_fail_receiving
+    )
+    client.disconnect = create_autospec(client.disconnect)
 
     async def _on_wake(_name: str) -> None:
         pass
@@ -483,10 +485,12 @@ async def _test_run_forever_propaga_cancelacion_durante_limpieza_de_send_task() 
         await asyncio.Event().wait()  # si el bug sigue, el bucle llega aquí
         return "unreachable"  # pragma: no cover
 
-    client.connect_with_backoff = AsyncMock(return_value=None)
-    client._send_audio_loop = AsyncMock(side_effect=_slow_cancel_send)
-    client.wait_for_detection = AsyncMock(side_effect=_drop_then_block)
-    client.disconnect = AsyncMock()
+    client.connect_with_backoff = create_autospec(client.connect_with_backoff, return_value=None)
+    client._send_audio_loop = create_autospec(client._send_audio_loop, side_effect=_slow_cancel_send)
+    client.wait_for_detection = create_autospec(
+        client.wait_for_detection, side_effect=_drop_then_block
+    )
+    client.disconnect = create_autospec(client.disconnect)
 
     async def _on_wake(_name: str) -> None:
         pass
@@ -513,3 +517,57 @@ async def _test_run_forever_propaga_cancelacion_durante_limpieza_de_send_task() 
 
 def test_run_forever_propaga_cancelacion_durante_limpieza_de_send_task() -> None:
     asyncio.run(_test_run_forever_propaga_cancelacion_durante_limpieza_de_send_task())
+
+
+# ---------------------------------------------------------------------------
+# Issue #82: timeout de conexión TCP configurable (antes 10 s fijos)
+# ---------------------------------------------------------------------------
+
+
+def test_connect_usa_connect_timeout_s_de_la_config(monkeypatch) -> None:
+    """La apertura TCP se acota con OWWConfig.connect_timeout_s. Sin esperas
+    reales: open_connection no termina nunca y el wait_for falso registra el
+    plazo pedido y simula su vencimiento."""
+    from backends import oww_client
+
+    requested: list[float] = []
+
+    async def _never_connects(host, port):
+        await asyncio.Event().wait()
+
+    async def _fake_wait_for(aw, timeout):
+        requested.append(timeout)
+        aw.close()  # la corrutina de open_connection nunca llega a correr
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(oww_client.asyncio, "open_connection", _never_connects)
+    monkeypatch.setattr(oww_client.asyncio, "wait_for", _fake_wait_for)
+
+    client = OWWClient(OWWConfig(host="10.0.0.9", port=10401, connect_timeout_s=3.5))
+    try:
+        asyncio.run(client.connect())
+    except OSError as exc:
+        assert "10.0.0.9:10401" in str(exc)
+        assert "3.5" in str(exc)
+    else:
+        raise AssertionError("connect() debía fallar por timeout")
+    assert requested == [3.5]
+    assert client.is_connected is False
+
+
+def test_oww_connect_timeout_s_por_defecto_y_desde_yaml(tmp_path) -> None:
+    import yaml as _yaml
+    from config import ConfigError, load_config
+
+    assert OWWConfig().connect_timeout_s == 10.0
+    base = {"gateway": {"host": "h", "client_key": "k"}, "device": {"id": "d"}}
+    path = tmp_path / "config.yaml"
+    path.write_text(_yaml.safe_dump({**base, "oww": {"connect_timeout_s": 4}}))
+    assert load_config(path).oww.connect_timeout_s == 4.0
+    path.write_text(_yaml.safe_dump({**base, "oww": {"connect_timeout_s": 0}}))
+    try:
+        load_config(path)
+    except ConfigError as exc:
+        assert "oww.connect_timeout_s" in str(exc)
+    else:
+        raise AssertionError("connect_timeout_s: 0 debía rechazarse")

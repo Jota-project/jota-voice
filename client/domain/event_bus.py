@@ -7,10 +7,15 @@ Sin dependencias externas: solo stdlib + asyncio.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import inspect
+import logging
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -136,3 +141,57 @@ class _Subscription:
     async def aclose(self) -> None:
         await self._gen.aclose()
         self._bus._unsubscribe(self._q)
+
+
+async def consume(
+    events: "_Subscription",
+    handler: Callable[[VoiceEvent], Awaitable[None] | None],
+    *,
+    name: str,
+    summary_every: int = 100,
+    summary_interval_s: float = 60.0,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
+    """Bucle estándar de un suscriptor del bus (issue #63).
+
+    Llama a ``handler(event)`` (síncrono o async) por cada evento. Si lanza,
+    se registra con el nombre del suscriptor y el bucle sigue: un backend
+    defectuoso no puede matar la task de ese suscriptor para el resto de la
+    sesión. ``publish`` ya aísla a los suscriptores entre sí (una cola por
+    suscriptor, put_nowait). ``CancelledError`` se propaga. Termina al
+    cerrarse el bus y, con ``aclosing``, retira la suscripción en el acto al
+    terminar o cancelarse (si no, una suscripción creada de antemano, como
+    las de voice_client, seguiría registrada acumulando eventos).
+
+    Para no llenar el log con un backend roto de forma permanente (en Termux
+    el almacenamiento es escaso), solo el PRIMER fallo lleva traceback; los
+    siguientes se cuentan y se resumen en un aviso cada ``summary_every``
+    fallos o cada ``summary_interval_s`` segundos, lo que llegue antes.
+    """
+    failures = 0
+    last_summary_failures = 0
+    last_summary_at = 0.0
+    async with contextlib.aclosing(events):
+        async for event in events:
+            try:
+                result = handler(event)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:
+                failures += 1
+                if failures == 1:
+                    log.exception(
+                        "EventBus: el suscriptor %s falló procesando %s", name, event.type
+                    )
+                    last_summary_at = clock()  # resúmenes a los N, 2N... fallos
+                    continue
+                now = clock()
+                if (
+                    failures - last_summary_failures >= summary_every
+                    or now - last_summary_at >= summary_interval_s
+                ):
+                    log.warning(
+                        "EventBus: el suscriptor %s lleva %d fallos (último con %s: %r)",
+                        name, failures, event.type, exc,
+                    )
+                    last_summary_failures, last_summary_at = failures, now

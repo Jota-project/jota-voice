@@ -79,10 +79,13 @@ class OWWClient:
         try:
             self._reader, self._writer = await asyncio.wait_for(
                 asyncio.open_connection(self._cfg.host, self._cfg.port),
-                timeout=10.0,
+                timeout=self._cfg.connect_timeout_s,
             )
         except asyncio.TimeoutError:
-            raise OSError(f"OWW: timeout conectando a {self._cfg.host}:{self._cfg.port}")
+            raise OSError(
+                f"OWW: timeout ({self._cfg.connect_timeout_s}s) conectando a "
+                f"{self._cfg.host}:{self._cfg.port}"
+            )
         try:
             await self._send_json(
                 {

@@ -35,6 +35,18 @@ gateway:
   # red muertos. No cuenta como actividad para IDLE_TIMEOUT_S. 0 = sin ping.
   ping_interval_s: 20
   ping_timeout_s: 20
+  # Plazos de la respuesta (issue #65). Son de INACTIVIDAD: se reinician con
+  # cada transcripción, token o chunk de audio del turno, así que una
+  # respuesta larga pero activa no se corta. Al vencer se manda `cancel` al
+  # gateway y se muestra el error RESPONSE_TIMEOUT.
+  response_start_timeout_s: 30     # hasta que empieza la respuesta (transcripción)
+  # Con la respuesta en marcha quien vigila es el gateway: su TURN_TIMEOUT_S
+  # (120 s sin progreso) se reinicia también con las herramientas del agente,
+  # que el cliente no ve, y si el turno se cuelga manda TURN_ERROR. Este plazo
+  # es solo una red de seguridad muy holgada; no lo bajes cerca de 120 s o
+  # cortarás turnos con varias herramientas largas. 0 = desactivado.
+  turn_inactivity_timeout_s: 600
+  turn_end_grace_s: 2              # audio en tránsito tras el turn_end
 
 device:
   id: "mi-dispositivo"
@@ -46,7 +58,8 @@ oww:
   wake_words:
     - "ok_nabu"
   reconnect_backoff_s: [5, 10, 20, 60]
-  debounce_s: 2.0              # ignora detecciones repetidas de la misma wake
+  connect_timeout_s: 10        # plazo para abrir la conexión TCP con OWW
+  debounce_s: 2.0             # ignora detecciones repetidas de la misma wake
                                 # word dentro de esta ventana (wyoming-openwakeword
                                 # dispara una detección por cada chunk de audio por
                                 # encima del threshold, no una por locución)
@@ -78,6 +91,9 @@ display:
   # rate_limit_window_s: 10.0
   # max_clients: 8              # displays conectados a la vez
 
+# Solo para los scripts de Termux (install/02-hosts.sh vía lib/yaml.sh):
+# añaden estas entradas al /etc/hosts del teléfono. El cliente Python no la
+# usa (la reconoce y la ignora sin aviso); en macOS/Linux puedes quitarla.
 hosts:
   - ip: "192.168.X.X"
     name: "mi-servidor"
