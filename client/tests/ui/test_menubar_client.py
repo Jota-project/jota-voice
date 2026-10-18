@@ -460,3 +460,36 @@ def test_shutdown_service_sends_sigterm_to_self():
     assert killed["sig"] == signal.SIGTERM, (
         f"Expected SIGTERM={signal.SIGTERM}, got sig={killed['sig']}"
     )
+
+
+def test_only_queue_commands_are_dispatched(caplog):
+    """Issue #99: por ui_queue solo pasan los comandos que tocan estado de
+    asyncio (toggle_pause y shutdown_service). open_logs, open_config y quit
+    son callbacks directos en voice_client; sus ramas en la cola eran código
+    muerto y ahora caen en "comando UI desconocido"."""
+    import logging
+
+    bus = EventBus()
+    backend = FakeBackend()
+    client = MenubarClient(backend)
+    ui_queue: queue.Queue = queue.Queue()
+    pause = asyncio.Event()
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        stop = asyncio.Event()
+        task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
+        await _subscribed(bus)
+        for cmd in ("open_logs", "open_config", "quit"):
+            ui_queue.put_nowait(cmd)
+        await wait_until(
+            lambda: sum("desconocido" in r.getMessage() for r in caplog.records) == 3,
+            message="tres comandos desconocidos",
+        )
+        bus.close()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    with caplog.at_level(logging.INFO, logger="ui.menubar_client"):
+        _run(scenario())
+
+    assert not any("requested" in r.getMessage() for r in caplog.records)

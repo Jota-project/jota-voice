@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import queue
+import signal
 
 from domain.event_bus import EventBus, VoiceEvent
 
@@ -54,69 +56,12 @@ class MenubarClient:
             except queue.Empty:
                 return None
 
-        async def _run_subprocess(cmd: list[str], timeout: float = 5.0) -> None:
-            """Ejecuta un subprocess en un executor y loguea errores."""
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                await asyncio.wait_for(proc.wait(), timeout=timeout)
-            except Exception as exc:
-                log.warning("MenubarClient: %s falló: %s", cmd[0], exc)
-
-        def _call_soon_threadsafe_safe(ev: asyncio.Event) -> None:
-            try:
-                loop.call_soon_threadsafe(ev.set)
-            except RuntimeError:
-                log.debug("Loop de asyncio ya cerrado; stop_event ignorado")
-
         async def _drain_queue() -> None:
             while True:
                 cmd = await loop.run_in_executor(None, _get_nowait_or_none)
                 if cmd is None:
                     continue
-                if cmd == "toggle_pause":
-                    if pause_event.is_set():
-                        pause_event.clear()
-                    else:
-                        pause_event.set()
-                    self._backend.set_listening_paused(pause_event.is_set())
-                    log.info("MenubarClient: toggle_pause -> paused=%s", pause_event.is_set())
-                elif cmd == "open_logs":
-                    log.info("MenubarClient: open_logs requested")
-                    # Acción manejada por el caller (voice_client.main); aquí
-                    # sólo logueamos para mantener el cliente agnóstico.
-                elif cmd == "open_config":
-                    log.info("MenubarClient: open_config requested")
-                elif cmd == "shutdown_service":
-                    # El bug original (#30) era subprocess.run sincrónico en el
-                    # hilo Cocoa. Lo movimos a async subprocess vía
-                    # asyncio.create_subprocess_exec. PERO: launchctl disable/bootout
-                    # en macOS Sonoma con KeepAlive=true no desactiva permanentemente
-                    # el agente — launchd lo relanza en ~1s tras shutdown.
-                    # Bypass: enviar SIGTERM al proceso actual. Nuestro NSFileHandle
-                    # observer (issue #104) lo captura, _cancel_main() corre,
-                    # stop_event se dispara, main() apaga, NSApp.run() retorna.
-                    # launchd puede relanzarlo tras exit (KeepAlive=true); el
-                    # usuario debe hacer 'launchctl unload -w ~/Library/LaunchAgents/com.jota.voice.plist'
-                    # para desactivarlo permanentemente.
-                    import os as _os
-                    import signal as _signal
-                    pid = _os.getpid()
-                    log.info(
-                        "MenubarClient: shutdown_service received, enviando SIGTERM "
-                        "a PID %d (KeepAlive=true puede relanzar el proceso)", pid,
-                    )
-                    try:
-                        _os.kill(pid, _signal.SIGTERM)
-                    except Exception as exc:
-                        log.warning("MenubarClient: os.kill(SIGTERM) falló: %s", exc)
-                elif cmd == "quit":
-                    log.info("MenubarClient: quit requested")
-                else:
-                    log.warning("MenubarClient: comando UI desconocido: %r", cmd)
+                self._dispatch_command(cmd, pause_event)
 
         drain_task = asyncio.create_task(_drain_queue())
 
@@ -130,6 +75,49 @@ class MenubarClient:
                 await drain_task
             except asyncio.CancelledError:
                 pass
+
+    def _dispatch_command(self, cmd: str, pause_event: asyncio.Event) -> None:
+        """Ejecuta en el loop de asyncio un comando que la UI encoló.
+
+        Contrato de la cola (issue #99): por ui_queue pasan SOLO los
+        comandos que necesitan tocar estado de asyncio o que no deben correr
+        en el hilo de la UI. Hoy son dos:
+
+        - ``"toggle_pause"``: conmuta ``pause_event`` (lo vigila oww_loop).
+        - ``"shutdown_service"``: envía SIGTERM al propio proceso (#30).
+
+        Abrir logs, abrir configuración y Salir son callbacks directos de
+        MenubarCommands en voice_client (Popen no bloquea; Salir usa
+        call_soon_threadsafe), así que no tienen rama aquí. Un comando nuevo
+        solo necesita rama si cumple el criterio de arriba.
+        """
+        if cmd == "toggle_pause":
+            if pause_event.is_set():
+                pause_event.clear()
+            else:
+                pause_event.set()
+            self._backend.set_listening_paused(pause_event.is_set())
+            log.info("MenubarClient: toggle_pause -> paused=%s", pause_event.is_set())
+        elif cmd == "shutdown_service":
+            # El bug original (#30) era subprocess.run sincrónico en el hilo
+            # Cocoa. launchctl disable/bootout en macOS Sonoma con
+            # KeepAlive=true no desactiva el agente (launchd lo relanza en
+            # ~1s), así que enviamos SIGTERM al proceso actual: el observer
+            # NSFileHandle (issue #104) lo captura, stop_event se dispara,
+            # main() apaga y NSApp.run() retorna. launchd puede relanzarlo
+            # (KeepAlive=true); para desactivarlo del todo:
+            # 'launchctl unload -w ~/Library/LaunchAgents/com.jota.voice.plist'.
+            pid = os.getpid()
+            log.info(
+                "MenubarClient: shutdown_service received, enviando SIGTERM "
+                "a PID %d (KeepAlive=true puede relanzar el proceso)", pid,
+            )
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except Exception as exc:
+                log.warning("MenubarClient: os.kill(SIGTERM) falló: %s", exc)
+        else:
+            log.warning("MenubarClient: comando UI desconocido: %r", cmd)
 
     async def _handle(self, event: VoiceEvent) -> None:
         if not isinstance(event.data, dict):
