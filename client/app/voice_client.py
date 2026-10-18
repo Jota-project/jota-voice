@@ -3,7 +3,8 @@
 
 Instancia los backends vía registry, crea el EventBus, arranca tareas:
 - OWW run_forever como task background permanente (vía WyomingBackend)
-- Display run() como task background permanente
+- Display: servidor/cliente del backend (start/stop) + DisplayClient.run()
+  como task background permanente
 - Menubar UI (macOS) como task background permanente
 - state_machine.run() como loop principal
 - Gestión de señales (SIGTERM/SIGINT → shutdown limpio)
@@ -92,7 +93,6 @@ from domain.state_machine import run as sm_run
 from ui.menubar_base import MenubarCommands
 from ui.menubar_client import MenubarClient
 
-from app import control_server
 from app.display_client import DisplayClient
 from app.playback_engine import PlaybackEngine
 
@@ -175,13 +175,16 @@ async def main(
 
     # --- Crear bus + backends via registry ---
     bus = EventBus()
+    # Antes que los backends: el display (backend ws) lo activa cuando un
+    # display conectado manda `cancel` (sustituye al antiguo ControlServer).
+    cancel_event = asyncio.Event()
 
     async def _oww_on_wake(name: str) -> None:
         bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": name}))
 
     audio = registry.make_audio(cfg)
     oww = registry.make_oww(cfg, on_wake_word=_oww_on_wake)
-    display_backend = registry.make_display(cfg)
+    display_backend = registry.make_display(cfg, on_cancel=cancel_event.set)
     # bus=bus: sin él gateway_ready (session_id, capabilities, #110) y los
     # status previos a ready nunca llegaban al bus en producción.
     gateway = GatewayClient(cfg.gateway, bus=bus)
@@ -255,7 +258,12 @@ async def main(
         return
     log.info("AudioCapture iniciado")
 
-    cancel_event = asyncio.Event()
+    # Arranca el backend de display (servidor WebSocket, sender http). Un
+    # fallo aquí nunca impide la voz: el display es opcional.
+    try:
+        await display_backend.start()
+    except Exception:
+        log.exception("No se pudo arrancar el backend de display; se sigue sin display")
 
     # --- Task background permanente: Menubar UI (macOS) ---
     menubar_client = MenubarClient(menubar_backend)
@@ -319,11 +327,6 @@ async def main(
     # --- Task background permanente: DisplayClient ---
     display_task = asyncio.create_task(display.run(bus), name="display")
 
-    # --- Task background: ControlServer ---
-    control_task = asyncio.create_task(
-        control_server.run(cfg.control, cancel_event), name="control_server"
-    )
-
     # --- Task principal: StateMachine ---
     sm_task = asyncio.create_task(
         sm_run(
@@ -349,7 +352,14 @@ async def main(
         # main() que llegue durante el apagado (el patrón anterior
         # `cancel(); try: await t except CancelledError: pass` sí lo hacía).
         await cancel_and_wait(menubar_task)
-        await cancel_and_wait(sm_task, oww_task, display_task, control_task, stop_task)
+        await cancel_and_wait(sm_task, oww_task, display_task, stop_task)
+
+        # Cierra el servidor de displays (libera el puerto y desconecta a los
+        # displays) y el sender http.
+        try:
+            await display_backend.stop()
+        except Exception:
+            log.exception("Error al parar el backend de display (no crítico)")
 
         await audio.stop()
 

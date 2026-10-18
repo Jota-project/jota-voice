@@ -1,4 +1,4 @@
-"""Tests de config.py (sección control)."""
+"""Tests de config.py."""
 from __future__ import annotations
 
 import os
@@ -14,78 +14,67 @@ def _write_cfg(data: dict) -> str:
     return f.name
 
 
-def test_control_port_default() -> None:
-    path = _write_cfg({"gateway": {"host": "127.0.0.1", "client_key": "test"}, "device": {"id": "test-device"}})
+# ---------------------------------------------------------------------------
+# Sección display (Fase D: backend ws + http de compatibilidad, issue #58)
+# ---------------------------------------------------------------------------
+
+_BASE = {"gateway": {"host": "127.0.0.1", "client_key": "test"}, "device": {"id": "test-device"}}
+
+
+def _load(extra: dict):
+    from config import load_config
+    path = _write_cfg({**_BASE, **extra})
     try:
-        from config import load_config
-        cfg = load_config(path)
-        assert cfg.control.port == 8765, f"Esperaba 8765, got {cfg.control.port}"
+        return load_config(path)
     finally:
         os.unlink(path)
 
 
-def test_control_port_custom() -> None:
-    path = _write_cfg({
-        "gateway": {"host": "127.0.0.1", "client_key": "test"},
-        "device": {"id": "test-device"},
-        "control": {"port": 9000},
-    })
-    try:
-        from config import load_config
-        cfg = load_config(path)
-        assert cfg.control.port == 9000, f"Esperaba 9000, got {cfg.control.port}"
-    finally:
-        os.unlink(path)
+def test_display_defaults_sin_seccion() -> None:
+    from config import DEFAULT_DISPLAY_WS_PORT, DisplayConfig
+    cfg = _load({})
+    assert cfg.display.backend is None
+    assert cfg.display.url == ""
+    assert cfg.display.port == DEFAULT_DISPLAY_WS_PORT == 8767
+    assert cfg.display.token_path is None
+    assert cfg.display.rate_limit_max_requests == 10
+    assert cfg.display.rate_limit_window_s == 10.0
+    assert cfg.display.max_clients == 8
+    # Issue #58: el default de la dataclass y el del loader son el mismo.
+    assert DisplayConfig() == cfg.display
 
 
-def test_control_token_path_default() -> None:
-    path = _write_cfg({"gateway": {"host": "127.0.0.1", "client_key": "test"}, "device": {"id": "test-device"}})
-    try:
-        from config import load_config
-        cfg = load_config(path)
-        assert cfg.control.token_path is None
-    finally:
-        os.unlink(path)
+def test_display_campos_ws_custom() -> None:
+    cfg = _load({"display": {
+        "backend": "ws", "port": 9100, "token_path": "/tmp/tok",
+        "rate_limit_max_requests": 3, "rate_limit_window_s": 5,
+        "max_clients": 2,
+    }})
+    assert cfg.display.backend == "ws"
+    assert cfg.display.port == 9100
+    assert cfg.display.token_path == "/tmp/tok"
+    assert cfg.display.rate_limit_max_requests == 3
+    assert cfg.display.rate_limit_window_s == 5.0
+    assert cfg.display.max_clients == 2
 
 
-def test_control_token_path_custom() -> None:
-    path = _write_cfg({
-        "gateway": {"host": "127.0.0.1", "client_key": "test"},
-        "device": {"id": "test-device"},
-        "control": {"token_path": "/tmp/mi-token"},
-    })
-    try:
-        from config import load_config
-        cfg = load_config(path)
-        assert cfg.control.token_path == "/tmp/mi-token"
-    finally:
-        os.unlink(path)
+def test_display_http_campos() -> None:
+    cfg = _load({"display": {"backend": "http", "url": "http://127.0.0.1:8766", "timeout_s": 1}})
+    assert cfg.display.backend == "http"
+    assert cfg.display.url == "http://127.0.0.1:8766"
+    assert cfg.display.timeout_s == 1.0
 
 
-def test_control_rate_limit_defaults() -> None:
-    path = _write_cfg({"gateway": {"host": "127.0.0.1", "client_key": "test"}, "device": {"id": "test-device"}})
-    try:
-        from config import load_config
-        cfg = load_config(path)
-        assert cfg.control.rate_limit_max_requests == 10
-        assert cfg.control.rate_limit_window_s == 10.0
-    finally:
-        os.unlink(path)
+def test_seccion_control_obsoleta_se_ignora() -> None:
+    """Configs desplegadas aún llevan `control: port: 8765` (el ControlServer
+    se eliminó en la Fase D: su cancel va por el WebSocket del display)."""
+    cfg = _load({"control": {"port": 8765, "token_path": "/tmp/x"}})
+    assert not hasattr(cfg, "control")
 
 
-def test_control_rate_limit_custom() -> None:
-    path = _write_cfg({
-        "gateway": {"host": "127.0.0.1", "client_key": "test"},
-        "device": {"id": "test-device"},
-        "control": {"rate_limit_max_requests": 3, "rate_limit_window_s": 5.0},
-    })
-    try:
-        from config import load_config
-        cfg = load_config(path)
-        assert cfg.control.rate_limit_max_requests == 3
-        assert cfg.control.rate_limit_window_s == 5.0
-    finally:
-        os.unlink(path)
+def test_display_url_null_equivale_a_sin_url() -> None:
+    cfg = _load({"display": {"backend": None, "url": None}})
+    assert cfg.display.url == ""
 
 
 def test_ws_url_prioriza_url_sobre_host_port_path() -> None:
