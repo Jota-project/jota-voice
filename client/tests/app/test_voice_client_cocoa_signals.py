@@ -115,3 +115,26 @@ def test_signal_triggers_orderly_shutdown_and_run_loop_returns(sig):
     assert code == 0, f"exit {code} (¿muerto por la señal?)\nstdout={out}\nstderr={err}"
     assert "ORDERLY_SHUTDOWN" in out, out + err
     assert "RUNLOOP_RETURNED" in out, out + err
+
+
+def test_menubar_stops_even_if_cleanup_raises_before_stop():
+    """Si el finally de main() lanza antes de menubar_backend.stop(), el
+    run loop debe pararse igualmente."""
+    proc = _spawn("cleanup_raises")
+    _wait_ready(proc)
+    proc.send_signal(signal.SIGTERM)
+    code, out, err = _finish(proc)
+
+    assert code == 0, f"exit {code}\nstdout={out}\nstderr={err}"
+    assert "RUNLOOP_RETURNED" in out, out + err
+
+
+def test_quit_while_starting_also_stops_asyncio():
+    """"Salir" durante "Arrancando…" (sin comandos) paraba el run loop pero
+    dejaba vivo el hilo asyncio (no daemon): el proceso no terminaba."""
+    proc = _spawn("quit_while_starting")
+    code, out, err = _finish(proc)
+
+    assert code == 0, f"exit {code}\nstdout={out}\nstderr={err}"
+    assert "ORDERLY_SHUTDOWN" in out, out + err
+    assert "RUNLOOP_RETURNED" in out, out + err

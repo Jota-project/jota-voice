@@ -423,6 +423,15 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
                 )
             except Exception:
                 log.exception("No se pudo reflejar el error en el menubar")
+        finally:
+            # main() llama a stop() al final de su finally; si ese finally
+            # lanzó antes, el run loop de Cocoa no pararía nunca. stop() es
+            # idempotente y seguro desde cualquier hilo.
+            try:
+                if needs_main_thread(menubar_backend):
+                    menubar_backend.stop()
+            except Exception:
+                log.exception("No se pudo parar el menubar")
 
     t = threading.Thread(target=_asyncio_thread, name="jota-asyncio", daemon=False)
     t.start()
@@ -501,6 +510,14 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
 
     menubar_backend.run_forever()  # bloquea el hilo principal (NSApp.run)
 
+    # El run loop puede haber parado sin pasar por main() (p.ej. "Salir"
+    # durante "Arrancando…", antes de set_commands()): pedir también el
+    # apagado del lado asyncio, o el hilo (no daemon) mantendría vivo el
+    # proceso. Si main() ya terminó, es un no-op.
+    loop = loop_holder.get("loop")
+    stop_event = stop_holder.get("stop_event")
+    if loop is not None and stop_event is not None:
+        _call_soon_threadsafe_safe(loop, stop_event)
     t.join(timeout=10.0)
 
 
