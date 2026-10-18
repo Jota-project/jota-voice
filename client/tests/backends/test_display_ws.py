@@ -656,6 +656,40 @@ async def test_seq_monotono_y_sync_tras_hueco(tmp_path: Path) -> None:
         await backend._unregister(client)
 
 
+@pytest.mark.asyncio
+async def test_writer_que_falla_cierra_la_conexion_para_forzar_reconexion(tmp_path: Path) -> None:
+    class _Broken:
+        def __init__(self) -> None:
+            self.closed: list[int] = []
+
+        async def send(self, raw: str) -> None:
+            raise RuntimeError("socket raro")
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            self.closed.append(code)
+
+    backend = WsDisplayBackend(_cfg(tmp_path))
+    conn = _Broken()
+    client = backend._register(conn)
+    try:
+        await wait_until(lambda: conn.closed == [1011], message="cerrada con 1011")
+    finally:
+        await backend._unregister(client)
+
+
+@pytest.mark.asyncio
+async def test_valores_no_serializables_no_matan_al_writer(tmp_path: Path) -> None:
+    backend = WsDisplayBackend(_cfg(tmp_path))
+    fast = _FastConnection()
+    client = backend._register(fast)
+    try:
+        backend.send("health", {"key": "x", "level": "warning", "detail": {"obj": object()}})
+        backend.send("state", {"value": "listening", "text": ""})
+        await wait_until(lambda: len(fast.sent) == 3, message="sync + 2")
+    finally:
+        await backend._unregister(client)
+
+
 # ---------------------------------------------------------------------------
 # Extremo a extremo: EventBus -> DisplayClient -> WsDisplayBackend -> display
 # ---------------------------------------------------------------------------

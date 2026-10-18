@@ -336,11 +336,20 @@ class WsDisplayBackend:
         while True:
             envelope = await client.queue.get()
             try:
-                await client.conn.send(json.dumps(envelope))
+                # default=str: un valor no serializable en data (p.ej. en el
+                # detail de un health) no puede matar al writer.
+                await client.conn.send(json.dumps(envelope, default=str))
             except websockets.exceptions.ConnectionClosed:
                 return
             except Exception:
-                log.exception("WsDisplayBackend: error enviando a un display")
+                # Sin writer el display se quedaría colgado (conectado y
+                # respondiendo pings, pero sin recibir nada): se cierra para
+                # que reconecte y reciba un sync.
+                log.exception("WsDisplayBackend: error enviando a un display; se cierra")
+                try:
+                    await client.conn.close(1011, "internal error")
+                except Exception:
+                    pass
                 return
 
     def _handle_command(self, client: _Client, raw: str | bytes) -> None:

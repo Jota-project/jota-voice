@@ -352,11 +352,12 @@ Cualquier otro `type` se ignora sin cerrar la conexión.
 ## 7. Orden, reconexión e idempotencia
 
 - Los mensajes llegan a cada display **en orden de emisión**.
-- `seq` crece en 1 con cada mensaje emitido. Si un display ve un salto
-  (`seq` > último + 1), es que se ha quedado atrás y el servidor ha descartado
-  mensajes; en ese caso el siguiente mensaje que le llega es siempre un
-  `sync` (§9). Un display que quiera ser estricto puede mandar `resync` al
-  ver un hueco.
+- `seq` crece en 1 con cada mensaje emitido. Si el servidor descarta
+  mensajes de un display que se ha quedado atrás (§9), el salto de `seq`
+  aparece **en un `sync`**: el snapshot ya incluye lo descartado y los
+  mensajes que le siguen vuelven a ser consecutivos. Un salto en un mensaje
+  que no sea `sync` no debería ocurrir; si un display lo ve, puede mandar
+  `resync`.
 - Mensajes con `seq` menor o igual que el del último `sync` recibido son
   anteriores al snapshot: se pueden descartar.
 - **Reconectar siempre es seguro**: el primer mensaje es un `sync` con el
