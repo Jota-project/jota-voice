@@ -46,7 +46,8 @@ oww:
   wake_words:
     - "ok_nabu"
   reconnect_backoff_s: [5, 10, 20, 60]
-  debounce_s: 2.0              # ignora detecciones repetidas de la misma wake
+  connect_timeout_s: 10        # plazo para abrir la conexión TCP con OWW
+  debounce_s: 2.0             # ignora detecciones repetidas de la misma wake
                                 # word dentro de esta ventana (wyoming-openwakeword
                                 # dispara una detección por cada chunk de audio por
                                 # encima del threshold, no una por locución)

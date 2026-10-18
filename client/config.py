@@ -332,6 +332,10 @@ class OWWConfig:
     # un evento oww_degraded al EventBus (issue #22). Subir este valor en
     # redes muy degradadas para evitar spam al usuario.
     oww_healthcheck_threshold: int = 3
+    # Plazo para abrir la conexión TCP con wyoming-openwakeword (issue #82;
+    # antes 10 s fijos en OWWClient.connect). Mismo papel que
+    # GatewayConfig.connect_timeout_s.
+    connect_timeout_s: float = 10.0
 
 
 @dataclass
@@ -526,6 +530,7 @@ def _oww_from_dict(d: Any, problems: list[str] | None = None) -> OWWConfig:
         oww_healthcheck_threshold=s.get_int(
             "oww_healthcheck_threshold", default.oww_healthcheck_threshold, min=1
         ),
+        connect_timeout_s=s.get_float("connect_timeout_s", default.connect_timeout_s, gt=0),
     )
     s.warn_unknown(_field_names(OWWConfig))
     _finish(problems, own)

@@ -513,3 +513,57 @@ async def _test_run_forever_propaga_cancelacion_durante_limpieza_de_send_task() 
 
 def test_run_forever_propaga_cancelacion_durante_limpieza_de_send_task() -> None:
     asyncio.run(_test_run_forever_propaga_cancelacion_durante_limpieza_de_send_task())
+
+
+# ---------------------------------------------------------------------------
+# Issue #82: timeout de conexión TCP configurable (antes 10 s fijos)
+# ---------------------------------------------------------------------------
+
+
+def test_connect_usa_connect_timeout_s_de_la_config(monkeypatch) -> None:
+    """La apertura TCP se acota con OWWConfig.connect_timeout_s. Sin esperas
+    reales: open_connection no termina nunca y el wait_for falso registra el
+    plazo pedido y simula su vencimiento."""
+    from backends import oww_client
+
+    requested: list[float] = []
+
+    async def _never_connects(host, port):
+        await asyncio.Event().wait()
+
+    async def _fake_wait_for(aw, timeout):
+        requested.append(timeout)
+        aw.close()  # la corrutina de open_connection nunca llega a correr
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(oww_client.asyncio, "open_connection", _never_connects)
+    monkeypatch.setattr(oww_client.asyncio, "wait_for", _fake_wait_for)
+
+    client = OWWClient(OWWConfig(host="10.0.0.9", port=10401, connect_timeout_s=3.5))
+    try:
+        asyncio.run(client.connect())
+    except OSError as exc:
+        assert "10.0.0.9:10401" in str(exc)
+        assert "3.5" in str(exc)
+    else:
+        raise AssertionError("connect() debía fallar por timeout")
+    assert requested == [3.5]
+    assert client.is_connected is False
+
+
+def test_oww_connect_timeout_s_por_defecto_y_desde_yaml(tmp_path) -> None:
+    import yaml as _yaml
+    from config import ConfigError, load_config
+
+    assert OWWConfig().connect_timeout_s == 10.0
+    base = {"gateway": {"host": "h", "client_key": "k"}, "device": {"id": "d"}}
+    path = tmp_path / "config.yaml"
+    path.write_text(_yaml.safe_dump({**base, "oww": {"connect_timeout_s": 4}}))
+    assert load_config(path).oww.connect_timeout_s == 4.0
+    path.write_text(_yaml.safe_dump({**base, "oww": {"connect_timeout_s": 0}}))
+    try:
+        load_config(path)
+    except ConfigError as exc:
+        assert "oww.connect_timeout_s" in str(exc)
+    else:
+        raise AssertionError("connect_timeout_s: 0 debía rechazarse")
