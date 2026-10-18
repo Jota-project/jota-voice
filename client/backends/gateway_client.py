@@ -195,6 +195,9 @@ class GatewayClient:
         self._agent: str | None = None
         self._capabilities: dict[str, Any] = {}
         self._current_turn_seq: int = 0
+        # Tras un cancel, el audio en tránsito del turno cancelado tiene
+        # seq == _current_turn_seq: se descarta todo frame con seq <= esto.
+        self._discard_upto: int = 0
         self._ws: Any | None = None
         # Issue #118: estado coherente de la sesión.
         self._closed: bool = False
@@ -310,6 +313,7 @@ class GatewayClient:
         if self._ws is not None:
             await self.disconnect()
         self._current_turn_seq = 0
+        self._discard_upto = 0
         self._session_id = None
         self._agent = None
         self._capabilities = {}
@@ -475,6 +479,9 @@ class GatewayClient:
         log.debug("Gateway: enviado end")
 
     async def send_cancel(self) -> None:
+        # Marcar antes de enviar: aunque el envío falle, el audio del turno
+        # actual ya no debe reproducirse.
+        self._discard_upto = max(self._discard_upto, self._current_turn_seq)
         await self._send(json.dumps({"type": "cancel"}))
         log.debug("Gateway: enviado cancel")
 
@@ -517,7 +524,9 @@ class GatewayClient:
                     # Issue #24: descarte de audio de turnos anteriores. Si el
                     # gateway ya anunció un turn_start con seq mayor, este
                     # frame es del turno cancelado y no debe reproducirse.
-                    if frame_seq < self._current_turn_seq:
+                    if frame_seq < self._current_turn_seq or (
+                        self._discard_upto and frame_seq <= self._discard_upto
+                    ):
                         log.debug(
                             "Gateway: descartando tts_chunk con turn_seq=%d "
                             "(current=%d, turno cancelado)",

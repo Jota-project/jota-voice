@@ -984,3 +984,35 @@ async def test_cierre_1008_a_mitad_de_sesion_marca_fatal_y_connect_lo_limpia():
     with pytest.raises(OSError):
         await client.connect()
     assert client.fatal_error is None, "el último intento (transitorio) manda"
+
+
+
+@pytest.mark.asyncio
+async def test_tras_cancel_se_descarta_el_audio_del_turno_cancelado():
+    """Revisión Fase R, punto 3: tras cancelar el turno N, sus frames en
+    tránsito tienen seq == current y se colaban al principio de N+1."""
+    client = GatewayClient(GatewayConfig(host="h", client_key="k"))
+    ws = MagicMock()
+    ws.send = AsyncMock()
+    client._ws = ws
+    client._current_turn_seq = 3
+    await client.send_cancel()
+    pcm = b"\x00\x01"
+    client._ws = _FakeWS([
+        bytes([0xA1, 0x00, 0x03]) + pcm,   # turno 3 cancelado, en tránsito
+        json.dumps({"type": "turn_start", "turn_id": "t-4", "turn_seq": 4}),
+        bytes([0xA1, 0x00, 0x04]) + pcm,
+    ])
+    events = [ev async for ev in client.receive()]
+    assert [e.type for e in events] == ["turn_start", "tts_chunk"]
+    assert events[1].data["turn_seq"] == 4
+
+
+@pytest.mark.asyncio
+async def test_connect_reinicia_el_descarte_tras_cancel():
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
+    client = GatewayClient(cfg)
+    client._discard_upto = 9
+    sys.modules["websockets"].connect = AsyncMock(return_value=_ws_with_recv([_READY]))
+    await client.connect()
+    assert client._discard_upto == 0
