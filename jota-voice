@@ -31,7 +31,10 @@ _load_device() {
     local file="$DEVICES_DIR/${name}.env"
     [ -f "$file" ] || { _err "Dispositivo '$name' no encontrado en $DEVICES_DIR/"; exit 1; }
     chmod 600 "$file" 2>/dev/null || true   # credenciales: issue #56
-    set -a; . "$file"; set +a
+    set -a
+    # shellcheck source=devices/example.env
+    . "$file"
+    set +a
 }
 
 _auto_device() {
@@ -42,7 +45,10 @@ _auto_device() {
     count=$(echo "$files" | grep -c "^" || true)
     [ "$count" -gt 1 ] && { _err "Hay $count dispositivos — especifica el nombre: jota-voice <device> $*"; exit 1; }
     # Un solo dispositivo → cargarlo
-    set -a; . "$files"; set +a
+    set -a
+    # shellcheck source=devices/example.env
+    . "$files"
+    set +a
 }
 
 # ── Helpers SSH ───────────────────────────────────────────────────────────────
@@ -63,13 +69,16 @@ _sshpass() {
     if [ -n "${SSHPASS:-}" ]; then sshpass -e "$@"; else "$@"; fi
 }
 
+# StrictHostKeyChecking=accept-new: guarda la clave del teléfono la primera
+# vez y rechaza la conexión si después cambia (con "no" se aceptaba
+# cualquier clave, también la de un equipo que suplantara al teléfono).
 _ssh() {
-    _sshpass ssh -o StrictHostKeyChecking=no -p "$PHONE_PORT" "$PHONE_USER@$PHONE_HOST" "$@"
+    _sshpass ssh -o StrictHostKeyChecking=accept-new -p "$PHONE_PORT" "$PHONE_USER@$PHONE_HOST" "$@"
 }
 
 _rsync() {
     _sshpass rsync -av \
-        -e "ssh -o StrictHostKeyChecking=no -p $PHONE_PORT" \
+        -e "ssh -o StrictHostKeyChecking=accept-new -p $PHONE_PORT" \
         --exclude='.git' --exclude='.venv' --exclude='__pycache__' \
         --exclude='.claude' --exclude='.agents' \
         --exclude='devices/' --exclude='scripts/' \
@@ -138,7 +147,7 @@ cmd_init() {
             if [ -n "$_ip" ] && [ -n "$_name" ]; then
                 # Añadir al config.yaml
                 sed -i '' "/^hosts:/a\\  - ip: \"$_ip\"\\n    name: \"$_name\"" "$REPO_DIR/config.yaml" 2>/dev/null || \
-                echo "  - ip: \"$_ip\"\n    name: \"$_name\"" >> "$REPO_DIR/config.yaml"
+                printf '  - ip: "%s"\n    name: "%s"\n' "$_ip" "$_name" >> "$REPO_DIR/config.yaml"
                 _ok "$_name -> $_ip"
             fi
         }
@@ -176,6 +185,14 @@ cmd_init() {
         printf "  Puerto SSH [8022]: "
         read -r PHONE_PORT
         PHONE_PORT="${PHONE_PORT:-8022}"
+        # Usuario de Termux en el teléfono (`whoami` allí, p.ej. u0_a123):
+        # deploy.sh y _ssh lo necesitan.
+        printf "  Usuario SSH de Termux (whoami en el teléfono): "
+        read -r PHONE_USER
+        while [ -z "$PHONE_USER" ]; do
+            printf "  El usuario no puede estar vacío: "
+            read -r PHONE_USER || { _err "Entrada cerrada"; exit 1; }
+        done
         printf "  Contraseña SSH (vacío = usar clave SSH, recomendado): "
         read -rs PHONE_PASS
         echo ""
@@ -186,6 +203,7 @@ cmd_init() {
 DEVICE_NAME="${DEVICE_NAME}"
 PHONE_HOST="${PHONE_HOST}"
 PHONE_PORT="${PHONE_PORT}"
+PHONE_USER="${PHONE_USER}"
 PHONE_PASS="${PHONE_PASS}"
 PHONE_DIR="/data/data/com.termux/files/home/jota-voice"
 EOF
@@ -232,6 +250,8 @@ cmd_logs() {
     _check_sshpass
     local svc="${1:-jota-voice}"
     local logfile
+    # La "~" se expande en el teléfono (va dentro del comando remoto de _ssh).
+    # shellcheck disable=SC2088
     case "$svc" in
         jota-voice)   logfile="~/jota-voice.log" ;;
         oww)          logfile="~/oww.log" ;;
@@ -315,7 +335,10 @@ run_all() {
     [ -z "$files" ] && { _err "No hay dispositivos configurados"; exit 1; }
     local exit_code=0
     for f in $files; do
-        set -a; . "$f"; set +a
+        set -a
+        # shellcheck source=devices/example.env
+        . "$f"
+        set +a
         printf "\n${YELLOW}[%s]${NC}\n" "$DEVICE_NAME"
         case "$subcmd" in
             status)  cmd_status  ;;
@@ -362,7 +385,7 @@ case "$1" in
     --all)
         shift
         [ $# -eq 0 ] && { _err "--all requiere un comando (ej: --all status)"; exit 1; }
-        run_all "$@"; exit $?
+        run_all "$@"
         ;;
     -h|--help|help) usage; exit 0 ;;
 esac
