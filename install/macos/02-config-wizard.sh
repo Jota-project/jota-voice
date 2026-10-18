@@ -28,8 +28,13 @@ if [ -f "$DEFAULT_CFG" ]; then
 fi
 
 printf "  device id [%s]: " "$DEVICE_ID"
-read -r INPUT_ID
+read -r INPUT_ID || _fail "Entrada cerrada leyendo el device id"
 ID="${INPUT_ID:-$DEVICE_ID}"
+# El id se usa en rutas: nada de "/", ".." ni espacios (issue #55).
+while ! jota_valid_id "$ID"; do
+    printf "  id inválido (solo letras, dígitos, _ y -, máx. 64). device id: "
+    read -r ID || _fail "Entrada cerrada leyendo el device id"
+done
 CFG="$REPO_DIR/devices/$ID/config.yaml"
 
 if [ -f "$CFG" ]; then
@@ -62,11 +67,27 @@ if [ -z "${GATEWAY_CLIENT_KEY:-}" ]; then
     done
 fi
 
+# Los valores van entre comillas dobles en el YAML generado: una comilla o
+# una barra invertida lo romperían (o inyectarían claves).
+_yaml_safe() {
+    # shellcheck disable=SC1003  # el patrón es una barra invertida literal
+    case "$2" in
+        *'"'*|*'\'*) _fail "$1 no puede contener comillas dobles ni barras invertidas" ;;
+    esac
+}
+_yaml_safe "GATEWAY_URL" "$GATEWAY_URL"
+_yaml_safe "client_key" "$GATEWAY_CLIENT_KEY"
+
 # wake word: el único default legítimo del script — ok_nabu es el modelo
 # bundled upstream de openWakeWord, no un secreto del usuario.
 printf "  wake word [ok_nabu]: "
 read -r WAKE_WORD
 WAKE_WORD="${WAKE_WORD:-ok_nabu}"
+# También acaba en una ruta (${WAKE_WORD}.tflite) y en el YAML: letras,
+# dígitos, "_", "-" y "." (p.ej. hey_jarvis_v0.1), sin empezar por ".".
+case "$WAKE_WORD" in
+    .*|*[!A-Za-z0-9_.-]*) _fail "wake word inválida: '$WAKE_WORD' (solo letras, dígitos, _, - y .)" ;;
+esac
 
 if [ "$WAKE_WORD" != "ok_nabu" ]; then
     printf "  ruta al modelo .tflite de '%s' (vacío = ya está instalado en %s): " "$WAKE_WORD" "$OWW_DATA_DIR"

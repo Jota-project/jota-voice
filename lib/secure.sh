@@ -31,6 +31,17 @@ jota_secure_perms() {
     return 0
 }
 
+# jota_valid_id <id> — 0 si <id> es un nombre de dispositivo seguro para
+# usarlo en rutas (devices/<id>/...): letras, dígitos, "_" y "-", 1-64
+# caracteres, sin empezar por "-" (issue #55: "../../tmp/x" escapaba de
+# devices/).
+jota_valid_id() {
+    case "$1" in
+        ""|-*|*[!A-Za-z0-9_-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 64 ]
+}
+
 # Modo octal (p.ej. "644") de un fichero: stat de GNU/Termux o de BSD (macOS).
 # GNU primero: `stat -f` en GNU significa "sistema de ficheros" y escribiría
 # basura en stdout; `stat -c` en BSD falla sin escribir nada.

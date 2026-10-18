@@ -14,6 +14,8 @@ set -euo pipefail
 
 REPO_LOCAL_SELF="$(cd "$(dirname "$0")" && pwd)"
 TARGET="${1:-phone}"
+# shellcheck source=lib/secure.sh
+. "$REPO_LOCAL_SELF/lib/secure.sh"
 
 case "$TARGET" in
     macbook)
@@ -73,6 +75,11 @@ case "$TARGET" in
             esac
         fi
 
+        # El nombre acaba en una ruta (devices/<nombre>.env): issue #55.
+        if ! jota_valid_id "$DEVICE_NAME"; then
+            echo "ERROR: nombre de dispositivo inválido: '$DEVICE_NAME' (solo letras, dígitos, _ y -)."
+            exit 1
+        fi
         DEVICE_ENV="$DEVICES_DIR/${DEVICE_NAME}.env"
         if [ ! -f "$DEVICE_ENV" ]; then
             echo "ERROR: $DEVICE_ENV no existe."

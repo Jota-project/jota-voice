@@ -17,8 +17,17 @@ _list_device_files() {
     find "$DEVICES_DIR" -maxdepth 1 -name "*.env" -not -name "example.env" 2>/dev/null | sort
 }
 
+# Nombre de dispositivo seguro para rutas (devices/<nombre>.env): issue #55.
+_valid_device_name() {
+    case "$1" in
+        ""|-*|*[!A-Za-z0-9_-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 64 ]
+}
+
 _load_device() {
     local name="$1"
+    _valid_device_name "$name" || { _err "Nombre de dispositivo inválido: '$name' (solo letras, dígitos, _ y -)"; exit 1; }
     local file="$DEVICES_DIR/${name}.env"
     [ -f "$file" ] || { _err "Dispositivo '$name' no encontrado en $DEVICES_DIR/"; exit 1; }
     set -a; . "$file"; set +a
@@ -143,6 +152,7 @@ cmd_init() {
     printf "  Nombre del dispositivo (ej: salon, cocina): "
     read -r DEVICE_NAME
     [ -z "$DEVICE_NAME" ] && { _err "Nombre no puede estar vacío"; exit 1; }
+    _valid_device_name "$DEVICE_NAME" || { _err "Nombre inválido: solo letras, dígitos, _ y - (máx. 64)"; exit 1; }
 
     local device_file="$DEVICES_DIR/${DEVICE_NAME}.env"
     if [ -f "$device_file" ]; then
