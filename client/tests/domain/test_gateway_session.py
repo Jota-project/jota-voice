@@ -650,7 +650,9 @@ def _ev(t, **d):
     return GatewayEvent(t, d)
 
 
-async def _respond(script, monkeypatch=None):
+async def _respond(script, grace_s: float = 0.05):
+    """Ejecuta _responding con un guion. Gracia tras turn_end corta por
+    config (issue #65; antes se parcheaba state_machine.TURN_END_GRACE_S)."""
     from domain.state_machine import _responding
 
     bus = EventBus()
@@ -660,14 +662,15 @@ async def _respond(script, monkeypatch=None):
     pb.reset = MagicMock()
     published = asyncio.create_task(_collect_until(bus, lambda e, _: e.type == "playback_ended", 5.0))
     await asyncio.sleep(0)
-    await asyncio.wait_for(_responding(bus, gw, pb, asyncio.Event()), 5.0)
+    await asyncio.wait_for(
+        _responding(bus, gw, pb, asyncio.Event(), gateway_cfg=_gcfg(turn_end_grace_s=grace_s)),
+        5.0,
+    )
     return gw, pb, await published
 
 
 @pytest.mark.asyncio
-async def test_turn_end_de_un_push_no_termina_nuestro_turno(monkeypatch):
-    from domain import state_machine
-    monkeypatch.setattr(state_machine, "TURN_END_GRACE_S", 0.05, raising=False)
+async def test_turn_end_de_un_push_no_termina_nuestro_turno():
     gw, pb, got = await _respond([
         _ev("transcription", text="hola"),
         _ev("turn_end", turn_id="t-3"),            # push que acaba ahora
@@ -684,9 +687,7 @@ async def test_turn_end_de_un_push_no_termina_nuestro_turno(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_tokens_y_audio_de_otro_turno_se_ignoran(monkeypatch):
-    from domain import state_machine
-    monkeypatch.setattr(state_machine, "TURN_END_GRACE_S", 0.05, raising=False)
+async def test_tokens_y_audio_de_otro_turno_se_ignoran():
     gw, pb, got = await _respond([
         _ev("llm_token", turn_id="t-3", content="push"),   # push en curso
         _ev("tts_chunk", audio=b"\x09\x00", turn_seq=3),

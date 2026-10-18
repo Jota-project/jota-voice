@@ -31,7 +31,7 @@ from backends.gateway_client import (
     GatewayDisconnected,
     GatewayHandshakeError,
 )
-from config import Config
+from config import Config, GatewayConfig
 from core.aio import cancel_and_wait
 
 from .event_bus import EventBus, VoiceEvent
@@ -43,10 +43,53 @@ log = logging.getLogger(__name__)
 # State helpers
 # ---------------------------------------------------------------------------
 
-# Margen tras el turn_end de NUESTRO turno para el audio TTS que aún está en
-# tránsito (client-protocol.md §5: "El audio TTS puede seguir llegando
-# brevemente después").
-TURN_END_GRACE_S = 2.0
+# Los plazos de RESPONDING viven en GatewayConfig (issue #65):
+# turn_end_grace_s, response_start_timeout_s y turn_inactivity_timeout_s.
+
+
+class _ResponseDeadline:
+    """Plazo de INACTIVIDAD de RESPONDING (issue #65).
+
+    Antes era un tope total (``wait_for(_receive_loop(), 30)``): cualquier
+    respuesta de más de 30 s se cortaba aunque siguiera llegando audio, y sin
+    avisar al gateway. Ahora, como el TURN_TIMEOUT_S del gateway
+    (client-protocol §13, "idle-reset"), el reloj se reinicia con cada señal
+    de progreso de NUESTRO turno. Dos fases:
+
+    - Hasta que empieza nuestro turno (transcripción, turn_start):
+      ``response_start_timeout_s``. El gateway no acota esta espera (si el
+      transcriptor no entrega nada, p. ej. una falsa wake word sin voz,
+      nadie avisaría), así que aquí manda el cliente.
+    - Con nuestro turno en marcha: ``turn_inactivity_timeout_s``. Por
+      defecto por encima de los 120 s del TURN_TIMEOUT_S del gateway: si el
+      orquestador se cuelga, llega antes su ``TURN_ERROR turn_timeout``, que
+      es más preciso; y mientras una herramienta trabaja el cliente no ve
+      tráfico (no pedimos tool_calls_enabled) aunque el gateway siga vivo.
+      El plazo del cliente queda como red de seguridad.
+
+    ``clock`` inyectable para testear el reinicio sin esperas reales.
+    """
+
+    def __init__(self, start_timeout_s: float, turn_timeout_s: float, clock) -> None:
+        self._start = start_timeout_s
+        self._turn = turn_timeout_s
+        self._clock = clock
+        self.phase = "start"
+        self._deadline = clock() + start_timeout_s
+
+    @property
+    def timeout_s(self) -> float:
+        return self._turn if self.phase == "turn" else self._start
+
+    def progress(self) -> None:
+        self._deadline = self._clock() + self.timeout_s
+
+    def our_turn_started(self) -> None:
+        self.phase = "turn"
+        self.progress()
+
+    def remaining(self) -> float:
+        return self._deadline - self._clock()
 
 
 class _TurnCancelled(Exception):
@@ -86,6 +129,27 @@ class _GatewayError(Exception):
 
     def __str__(self) -> str:
         return self.message
+
+
+class _ResponseTimeout(_GatewayError):
+    """RESPONDING sin progreso durante su plazo de inactividad (issue #65).
+
+    _responding manda ``cancel`` al gateway antes de propagarla (que deje de
+    generar y no siga mandando audio de un turno que el cliente ya abandonó)
+    y run() la publica como ``error`` con code RESPONSE_TIMEOUT.
+    """
+
+    def __init__(self, *, phase: str, timeout_s: float) -> None:
+        if phase == "start":
+            what = "no empezó a responder"
+        else:
+            what = "dejó de responder"
+        super().__init__(
+            code="RESPONSE_TIMEOUT",
+            message=f"El gateway {what} en {timeout_s:g} s; turno cancelado",
+            fatal=False,
+            extra={"phase": phase, "timeout_s": timeout_s},
+        )
 
 
 async def _safe_send_cancel(gateway: GatewayClient) -> None:
@@ -371,10 +435,21 @@ async def _responding(
     gateway: GatewayClient,
     playback: PlaybackEngine,
     cancel_event: asyncio.Event,
+    *,
+    gateway_cfg: GatewayConfig | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> None:
+    """Estado RESPONDING. ``gateway_cfg`` aporta los plazos (issue #65; None =
+    los defaults de GatewayConfig). ``clock``: reloj de los plazos, solo para
+    tests (por defecto el del loop)."""
     # Sin cancel_event.clear() (issue #62): un cancel que llegó al terminar
     # RECORDING (enviando `end`, durante el beep) es de este turno y debe
     # cancelarlo; los anteriores al turno ya los descartó IDLE.
+    if gateway_cfg is None:
+        gateway_cfg = GatewayConfig(client_key="")
+    if clock is None:
+        clock = asyncio.get_running_loop().time
+    grace_s = gateway_cfg.turn_end_grace_s
     playback_started = False
 
     async def _receive_loop() -> None:
@@ -382,11 +457,17 @@ async def _responding(
         # El protocolo de jota-gateway (docs/client-protocol.md) señala fin
         # de turno con "turn_end", nunca con "done" — y no cierra la
         # conexión WS tras el turno (puede haber más turnos en la misma
-        # sesión). Sin este margen, el loop dependería siempre del timeout
-        # externo de 30s para cortar, aunque la respuesta ya haya terminado.
+        # sesión). Tras NUESTRO turn_end se espera turn_end_grace_s al audio
+        # en tránsito y se termina.
         gen = gateway.receive()
-        loop = asyncio.get_running_loop()
         grace_deadline: float | None = None
+        # Issue #65: plazo de inactividad (ver _ResponseDeadline). Se
+        # reinicia DESPUÉS de procesar cada señal de progreso de nuestro
+        # turno: el tiempo que el cliente pasa reproduciendo un chunk no es
+        # silencio del gateway.
+        deadline = _ResponseDeadline(
+            gateway_cfg.response_start_timeout_s, gateway_cfg.turn_inactivity_timeout_s, clock,
+        )
         # Revisión Fase R: en sesión persistente pueden llegar mensajes de
         # OTROS turnos (un push del agente que empezó antes de nuestro
         # `send`). Nuestro turno es el del primer turn_start visto después de
@@ -413,16 +494,23 @@ async def _responding(
             return False
 
         while True:
+            in_grace = grace_deadline is not None
+            if in_grace:
+                remaining = grace_deadline - clock()
+                if remaining <= 0:
+                    return
+            else:
+                remaining = max(deadline.remaining(), 0.0)
             try:
-                if grace_deadline is not None:
-                    remaining = grace_deadline - loop.time()
-                    if remaining <= 0:
-                        return
-                    gw_event = await asyncio.wait_for(gen.__anext__(), timeout=remaining)
-                else:
-                    gw_event = await gen.__anext__()
+                gw_event = await asyncio.wait_for(gen.__anext__(), timeout=remaining)
             except asyncio.TimeoutError:
-                return
+                if in_grace:
+                    return
+                log.warning(
+                    "RESPONDING: %.1fs sin progreso del gateway (fase %s); se cancela el turno",
+                    deadline.timeout_s, deadline.phase,
+                )
+                raise _ResponseTimeout(phase=deadline.phase, timeout_s=deadline.timeout_s)
             except StopAsyncIteration:
                 return
 
@@ -432,10 +520,12 @@ async def _responding(
                 log.info("RESPONDING: transcription → %r", text)
                 await gateway.send_text(text)
                 sent_text = True
+                deadline.progress()
 
             elif gw_event.type == "transcription_partial":
                 text = gw_event.data.get("text", "")
                 bus.publish(VoiceEvent(type="transcription_partial", data={"text": text}))
+                deadline.progress()
 
             elif gw_event.type == "llm_token":
                 if _is_foreign(turn_id=gw_event.data.get("turn_id")):
@@ -444,6 +534,7 @@ async def _responding(
                 content = gw_event.data.get("content", "")
                 playback.push_token(content)
                 bus.publish(VoiceEvent(type="llm_token", data={"content": content}))
+                deadline.progress()
 
             elif gw_event.type == "tts_chunk":
                 if _is_foreign(turn_seq=gw_event.data.get("turn_seq")):
@@ -454,9 +545,10 @@ async def _responding(
                     playback_started = True
                 audio_bytes = gw_event.data.get("audio", b"")
                 await playback.play_chunk(audio_bytes)
+                deadline.progress()
                 if grace_deadline is not None:
                     # Sigue llegando audio en tránsito tras turn_end — no cortar aún.
-                    grace_deadline = loop.time() + TURN_END_GRACE_S
+                    grace_deadline = clock() + grace_s
 
             elif gw_event.type == "turn_start":
                 # Issue #24: turn_start del gateway resetea el estado de
@@ -466,6 +558,7 @@ async def _responding(
                 tseq = gw_event.data.get("turn_seq")
                 if sent_text and my_turn_id is None and my_turn_seq is None:
                     my_turn_id, my_turn_seq = tid, tseq
+                    deadline.our_turn_started()
                     log.info("RESPONDING: turn_start → nuestro turno %s seq=%s", tid, tseq)
                     # Si había audio en tránsito de un turno anterior con seq
                     # menor, el descarte ya está hecho en receive(). Aquí
@@ -504,7 +597,7 @@ async def _responding(
                 )
                 if ours:
                     if grace_deadline is None:
-                        grace_deadline = loop.time() + TURN_END_GRACE_S
+                        grace_deadline = clock() + grace_s
                 else:
                     log.info("RESPONDING: turn_end ajeno %r ignorado", tid)
 
@@ -525,6 +618,7 @@ async def _responding(
                     continue
                 data = {k: v for k, v in gw_event.data.items() if k != "type"}
                 bus.publish(VoiceEvent(type="tool_call", data=data))
+                deadline.progress()
                 log.info(
                     "RESPONDING: tool_call %s %s",
                     data.get("phase"), data.get("name"),
@@ -547,9 +641,7 @@ async def _responding(
             else:
                 log.debug("RESPONDING: evento desconocido de gateway: %r", gw_event.type)
 
-    receive_task = asyncio.create_task(
-        asyncio.wait_for(_receive_loop(), timeout=30.0)
-    )
+    receive_task = asyncio.create_task(_receive_loop())
     # Dos fuentes de cancelación, cada una esperada en UN solo sitio (issue
     # #93: antes la espera de la wake word creaba otro cancel_event.wait()
     # propio y luego hacía cancel_event.set() para que este lo viera).
@@ -572,7 +664,7 @@ async def _responding(
         real_exc: BaseException | None = None
         if receive_task.done() and not receive_task.cancelled():
             exc = receive_task.exception()
-            if exc is not None and not isinstance(exc, (asyncio.TimeoutError, _TurnCancelled)):
+            if exc is not None and not isinstance(exc, _TurnCancelled):
                 real_exc = exc
 
         woke = wake_task in done and wake_task.exception() is None
@@ -585,6 +677,10 @@ async def _responding(
                     "RESPONDING: cancel simultáneo con error del gateway; "
                     "se informa el error: %s", real_exc,
                 )
+            if isinstance(real_exc, _ResponseTimeout):
+                # Que el gateway deje de generar y no siga mandando audio de
+                # un turno que el cliente ya abandonó (issue #65).
+                await _safe_send_cancel(gateway)
             playback.reset()
             raise real_exc
 
@@ -599,10 +695,6 @@ async def _responding(
         if not receive_task.cancelled():
             exc = receive_task.exception()
             if exc is not None:
-                if isinstance(exc, asyncio.TimeoutError):
-                    log.warning("RESPONDING: timeout 30s")
-                    bus.publish(VoiceEvent(type="error", data={"message": "Timeout en estado RESPONDING"}))
-                    return
                 raise exc
     finally:
         # Issue #21: si la tarea externa fue cancelada durante el wait
@@ -650,8 +742,10 @@ def _log_error(state: str, exc: Exception, bus: EventBus) -> None:
             "fatal": exc.fatal,
         }))
         return
-    log.error("Error en estado %s: %s", state, exc)
-    bus.publish(VoiceEvent(type="error", data={"message": str(exc)}))
+    log.error("Error en estado %s: %r", state, exc)
+    # str() de algunas excepciones (TimeoutError()) es "": que la UI no
+    # muestre un error vacío.
+    bus.publish(VoiceEvent(type="error", data={"message": str(exc) or type(exc).__name__}))
 
 
 def _log_cancelled(state: str, bus: EventBus) -> None:
@@ -733,7 +827,7 @@ async def run(
 
         state = "RESPONDING"
         try:
-            await _responding(bus, gateway, playback, cancel_event)
+            await _responding(bus, gateway, playback, cancel_event, gateway_cfg=cfg.gateway)
         except _TurnCancelled:
             _log_cancelled(state, bus)
         except asyncio.CancelledError:

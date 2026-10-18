@@ -35,6 +35,13 @@ gateway:
   # red muertos. No cuenta como actividad para IDLE_TIMEOUT_S. 0 = sin ping.
   ping_interval_s: 20
   ping_timeout_s: 20
+  # Plazos de la respuesta (issue #65). Son de INACTIVIDAD: se reinician con
+  # cada transcripción, token o chunk de audio del turno, así que una
+  # respuesta larga pero activa no se corta. Al vencer se manda `cancel` al
+  # gateway y se muestra el error RESPONSE_TIMEOUT.
+  response_start_timeout_s: 30     # hasta que empieza la respuesta (transcripción)
+  turn_inactivity_timeout_s: 130   # con la respuesta en marcha (> 120 s del gateway)
+  turn_end_grace_s: 2              # audio en tránsito tras el turn_end
 
 device:
   id: "mi-dispositivo"

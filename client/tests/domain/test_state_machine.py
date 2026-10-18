@@ -887,8 +887,11 @@ async def _run_turn_end_grace_period_test() -> None:
     # (ver _idle()), así que RECORDING siempre cierra por timeout absoluto,
     # no por silencio. Lo dejamos corto para que el test quede casi todo el
     # margen para lo que realmente prueba: el cierre en RESPONDING.
+    # turn_end_grace_s corto (issue #65: antes 2 s fijos en el módulo).
     cfg = Config(
-        gateway=GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=5.0),
+        gateway=GatewayConfig(
+            host="127.0.0.1", client_key="test", connect_timeout_s=5.0, turn_end_grace_s=0.05,
+        ),
         device=DeviceConfig(id="test-device"),
         audio=AudioConfig(sample_rate=16000, frames_per_buffer=512, recording_timeout_s=0.2),
         oww=OWWConfig(),

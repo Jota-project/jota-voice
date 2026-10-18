@@ -288,6 +288,20 @@ class GatewayConfig:
     # 0 desactiva el ping. No cuenta como actividad para el gateway.
     ping_interval_s: float = 20.0
     ping_timeout_s: float = 20.0
+    # Issue #65: plazos de RESPONDING (antes fijos en state_machine.py). Son
+    # de INACTIVIDAD: se reinician con cada señal de progreso del turno, como
+    # el TURN_TIMEOUT_S del gateway. Al vencer se manda `cancel` al gateway y
+    # se publica un error RESPONSE_TIMEOUT. Ver state_machine._ResponseDeadline.
+    # - Hasta que empieza nuestro turno (transcripción/turn_start); esta
+    #   espera no la acota el gateway.
+    response_start_timeout_s: float = 30.0
+    # - Con nuestro turno en marcha: por encima de los 120 s del gateway, para
+    #   que su TURN_ERROR turn_timeout llegue antes y no cortar turnos con
+    #   herramientas largas (el cliente no ve tráfico mientras corren).
+    turn_inactivity_timeout_s: float = 130.0
+    # Margen tras el turn_end de NUESTRO turno para el audio TTS aún en
+    # tránsito (client-protocol.md §5).
+    turn_end_grace_s: float = 2.0
 
     @property
     def ws_url(self) -> str:
@@ -477,6 +491,13 @@ def _gateway_from_dict(d: Any, problems: list[str] | None = None) -> GatewayConf
         ),
         ping_interval_s=s.get_float("ping_interval_s", default.ping_interval_s, min=0),
         ping_timeout_s=s.get_float("ping_timeout_s", default.ping_timeout_s, min=0),
+        response_start_timeout_s=s.get_float(
+            "response_start_timeout_s", default.response_start_timeout_s, gt=0
+        ),
+        turn_inactivity_timeout_s=s.get_float(
+            "turn_inactivity_timeout_s", default.turn_inactivity_timeout_s, gt=0
+        ),
+        turn_end_grace_s=s.get_float("turn_end_grace_s", default.turn_end_grace_s, min=0),
     )
     if cfg.url and not cfg.url.startswith(("ws://", "wss://")):
         s._bad("url", cfg.url, "debe empezar por ws:// o wss://")

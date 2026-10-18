@@ -4,13 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+# _respond usa una gracia tras turn_end corta por config (issue #65).
 from tests.domain.test_gateway_session import _ev, _respond
-
-
-@pytest.fixture(autouse=True)
-def _short_grace(monkeypatch):
-    from domain import state_machine
-    monkeypatch.setattr(state_machine, "TURN_END_GRACE_S", 0.05, raising=False)
 
 
 @pytest.mark.asyncio

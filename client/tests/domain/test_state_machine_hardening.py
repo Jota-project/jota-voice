@@ -287,3 +287,163 @@ async def test_wake_word_en_responding_cancela_el_turno() -> None:
     playback.reset.assert_called()
     playback.drain.assert_not_awaited()
     assert bus._queues == [], "la suscripción de la wake word quedó registrada"
+
+
+# ---------------------------------------------------------------------------
+# Issue #65: plazos de RESPONDING en config, de inactividad (no un tope
+# total) y con `cancel` al gateway al vencer
+# ---------------------------------------------------------------------------
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_response_deadline_se_reinicia_con_cada_progreso() -> None:
+    clock = _FakeClock()
+    d = state_machine._ResponseDeadline(start_timeout_s=30, turn_timeout_s=130, clock=clock)
+    assert d.remaining() == 30
+    for _ in range(10):  # 10 × 20 s = 200 s en total, nunca 30 s sin progreso
+        clock.now += 20
+        assert d.remaining() > 0
+        d.progress()
+    assert d.remaining() == 30
+    clock.now += 31
+    assert d.remaining() < 0
+
+
+def test_response_deadline_pasa_al_plazo_del_turno_al_empezar_nuestro_turno() -> None:
+    clock = _FakeClock()
+    d = state_machine._ResponseDeadline(start_timeout_s=30, turn_timeout_s=130, clock=clock)
+    clock.now += 10
+    d.our_turn_started()
+    assert d.timeout_s == 130 and d.remaining() == 130
+    clock.now += 100
+    d.progress()
+    assert d.remaining() == 130
+
+
+def _streaming_gateway(events, clock: _FakeClock, step_s: float):
+    """receive() que avanza el reloj falso ``step_s`` antes de cada evento."""
+    async def _receive():
+        for ev in events:
+            clock.now += step_s
+            yield ev
+        await asyncio.Event().wait()  # el WS real no se cierra tras el turno
+
+    gateway = MagicMock(spec=GatewayClient)
+    gateway.receive = _receive
+    return gateway
+
+
+def _gcfg(**kw) -> GatewayConfig:
+    base = dict(host="h", client_key="k", turn_end_grace_s=0.01)
+    base.update(kw)
+    return GatewayConfig(**base)
+
+
+@pytest.mark.asyncio
+async def test_respuesta_larga_pero_activa_no_se_corta() -> None:
+    """Antes, asyncio.wait_for(_receive_loop(), 30) cortaba cualquier
+    respuesta de más de 30 s aunque siguiera llegando audio. Aquí la
+    respuesta dura 12 × 25 s = 300 s de reloj falso, con huecos < 30 s."""
+    clock = _FakeClock()
+    events = [
+        GatewayEvent(type="transcription", data={"text": "hola"}),
+        GatewayEvent(type="turn_start", data={"turn_id": "t-1", "turn_seq": 1}),
+        *[GatewayEvent(type="tts_chunk", data={"audio": b"\x01\x00", "turn_seq": 1})] * 9,
+        GatewayEvent(type="turn_end", data={"turn_id": "t-1"}),
+    ]
+    gateway = _streaming_gateway(events, clock, step_s=25)
+    bus = EventBus()
+    ended = bus.subscribe()
+    playback = MagicMock(spec=PlaybackEngine)
+    await asyncio.wait_for(state_machine._responding(
+        bus, gateway, playback, asyncio.Event(),
+        gateway_cfg=_gcfg(response_start_timeout_s=30, turn_inactivity_timeout_s=30),
+        clock=clock,
+    ), 2.0)
+    assert playback.play_chunk.await_count == 9
+    gateway.send_cancel.assert_not_awaited()
+    types = []
+    while not ended._q.empty():
+        types.append(ended._q.get_nowait().type)
+    assert "playback_ended" in types and "error" not in types
+
+
+@pytest.mark.asyncio
+async def test_hueco_largo_en_mitad_del_turno_vence_y_manda_cancel() -> None:
+    """Tras empezar nuestro turno el gateway calla: vence
+    turn_inactivity_timeout_s (aquí 0.01 s reales; el gateway falso no vuelve
+    a emitir nada, no hay carrera) y no el plazo de inicio (30 s)."""
+    events = [
+        GatewayEvent(type="transcription", data={"text": "hola"}),
+        GatewayEvent(type="turn_start", data={"turn_id": "t-1", "turn_seq": 1}),
+        GatewayEvent(type="tts_chunk", data={"audio": b"\x01\x00", "turn_seq": 1}),
+    ]
+    gateway = _streaming_gateway(events, _FakeClock(), step_s=0)
+    playback = MagicMock(spec=PlaybackEngine)
+    with pytest.raises(state_machine._ResponseTimeout) as info:
+        await asyncio.wait_for(state_machine._responding(
+            EventBus(), gateway, playback, asyncio.Event(),
+            gateway_cfg=_gcfg(response_start_timeout_s=30, turn_inactivity_timeout_s=0.01),
+        ), 2.0)
+    assert info.value.code == "RESPONSE_TIMEOUT"
+    assert info.value.extra["phase"] == "turn"
+    assert "0.01" in info.value.message
+    playback.play_chunk.assert_awaited_once()
+    gateway.send_cancel.assert_awaited_once()
+    playback.reset.assert_called()
+    playback.drain.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sin_transcripcion_vence_el_plazo_de_inicio_con_poco_tiempo_real() -> None:
+    """Gateway mudo tras `end` (p. ej. falsa wake word sin voz): vence
+    response_start_timeout_s (aquí 0.01 s reales; no es un sleep)."""
+    gateway, _ = _blocking_gateway()
+    with pytest.raises(state_machine._ResponseTimeout) as info:
+        await asyncio.wait_for(state_machine._responding(
+            EventBus(), gateway, MagicMock(spec=PlaybackEngine), asyncio.Event(),
+            gateway_cfg=_gcfg(response_start_timeout_s=0.01),
+        ), 2.0)
+    assert info.value.extra["phase"] == "start"
+    gateway.send_cancel.assert_awaited_once()
+
+
+def test_el_timeout_se_publica_como_error_claro() -> None:
+    bus = EventBus()
+    events = bus.subscribe()
+    exc = state_machine._ResponseTimeout(phase="turn", timeout_s=130)
+    state_machine._log_error("RESPONDING", exc, bus)
+    ev = events._q.get_nowait()
+    assert ev.type == "error"
+    assert ev.data["code"] == "RESPONSE_TIMEOUT" and ev.data["fatal"] is False
+    assert ev.data["timeout_s"] == 130 and ev.data["phase"] == "turn"
+    assert "130" in ev.data["message"]
+
+
+def test_gracia_tras_turn_end_y_plazos_en_config(tmp_path) -> None:
+    import yaml
+    from config import ConfigError, load_config
+
+    default = GatewayConfig(client_key="k")
+    assert (default.response_start_timeout_s, default.turn_inactivity_timeout_s,
+            default.turn_end_grace_s) == (30.0, 130.0, 2.0)
+    base = {"gateway": {"host": "h", "client_key": "k"}, "device": {"id": "d"}}
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({**base, "gateway": {
+        **base["gateway"], "response_start_timeout_s": 20,
+        "turn_inactivity_timeout_s": 200, "turn_end_grace_s": 0.5,
+    }}))
+    g = load_config(path).gateway
+    assert (g.response_start_timeout_s, g.turn_inactivity_timeout_s, g.turn_end_grace_s) == (20, 200, 0.5)
+    for key, bad in (("response_start_timeout_s", 0), ("turn_inactivity_timeout_s", -1),
+                     ("turn_end_grace_s", -1)):
+        path.write_text(yaml.safe_dump({**base, "gateway": {**base["gateway"], key: bad}}))
+        with pytest.raises(ConfigError, match=rf"gateway\.{key}"):
+            load_config(path)
