@@ -11,6 +11,7 @@ parec usa PulseAudio → OpenSL_ES_source → micrófono real.
 """
 
 import asyncio
+import functools
 import logging
 import os
 import subprocess
@@ -21,10 +22,16 @@ import numpy as np
 
 from config import AudioConfig
 from core.audio.framing import int16_to_float32
+from core.audio.offloop import call_off_loop
 from core.audio.preroll import PrerollBuffer
 from core.audio.vad import is_silence as _is_silence
 
 logger = logging.getLogger(__name__)
+
+# Tope de la parada completa fuera del loop: terminate + wait(2) [+ kill +
+# wait(2)] + join(2) suman ~6 s en el peor caso; esto es solo la red de
+# seguridad por si algo se cuelga fuera de esos timeouts.
+_STOP_TIMEOUT_S = 8.0
 
 
 class AudioCapture:
@@ -101,9 +108,7 @@ class AudioCapture:
                     # el hilo lector.
                     if self._proc is proc:
                         self._proc = None
-                        await asyncio.get_running_loop().run_in_executor(
-                            None, self._terminate_proc, proc
-                        )
+                        await self._off_loop(functools.partial(self._terminate_proc, proc))
                     return False
                 if proc.poll() is not None:
                     logger.warning(
@@ -139,7 +144,7 @@ class AudioCapture:
         """Detiene el proceso parec y el hilo lector.
 
         Las esperas (hasta 2 s por wait() de parec y 2 s por el join del
-        hilo, ~6 s en el peor caso) corren en el executor: en el hilo del
+        hilo, ~6 s en el peor caso) corren en un hilo daemon: en el hilo del
         loop congelaban OWW, gateway y display durante el apagado. El aviso
         de parada y la suelta de referencias son síncronos, así un start()
         en curso ve el stop al despertar y no arranca el hilo lector."""
@@ -150,9 +155,16 @@ class AudioCapture:
         thread, self._read_thread = self._read_thread, None
         if proc is None and thread is None:
             return
-        await asyncio.get_running_loop().run_in_executor(
-            None, self._stop_blocking, proc, thread
-        )
+        await self._off_loop(functools.partial(self._stop_blocking, proc, thread))
+
+    @staticmethod
+    async def _off_loop(fn) -> None:
+        """Hilo daemon con tope (core.audio.offloop), no el executor por
+        defecto: sus hilos no son daemon y retendrían la salida del proceso."""
+        try:
+            await call_off_loop(fn, _STOP_TIMEOUT_S, name="audio-capture-stop")
+        except (TimeoutError, asyncio.TimeoutError):
+            logger.error("AudioCapture: la parada de parec no terminó en %.1fs", _STOP_TIMEOUT_S)
 
     @classmethod
     def _stop_blocking(

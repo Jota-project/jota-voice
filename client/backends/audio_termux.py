@@ -8,12 +8,18 @@ import asyncio
 import logging
 
 from config import AudioConfig
+from core.audio.offloop import call_off_loop
 from platforms.termux.audio_capture_termux import AudioCapture
 from .notification_tone import synth_notification_tone
 
 log = logging.getLogger(__name__)
 
 _TTS_SAMPLE_RATE = 24000  # PCM16 mono del gateway
+
+# Tope por cada llamada de cierre a PyAudio/PortAudio (stop_stream, close,
+# terminate). Pasado este tiempo el driver se da por colgado y el recurso se
+# abandona: volver a tocarlo desde otro hilo no es seguro.
+_STREAM_CLOSE_TIMEOUT_S = 2.0
 
 
 def _require_pyaudio():
@@ -72,19 +78,41 @@ class TermuxBackend:
         self._enqueue_carry = b""
         async with self._lock:
             await self._capture.stop()
-            # Igual que en drain() y en AudioCapture.stop(): las llamadas a
-            # PortAudio, que pueden bloquear, van al executor y no al loop.
-            loop = asyncio.get_running_loop()
+            # Las llamadas a PortAudio, que pueden bloquear, van fuera del
+            # loop en hilos daemon con tope (B4): el executor por defecto usa
+            # hilos no daemon que retendrían la salida con el driver colgado.
             stream, self._stream = self._stream, None
             pa, self._pa = self._pa, None
-            if stream is not None:
-                try:
-                    await loop.run_in_executor(None, stream.stop_stream)
-                    await loop.run_in_executor(None, stream.close)
-                except Exception:
-                    pass
+            if stream is not None and not await self._close_stream(stream, "stop"):
+                # Stream abandonado: terminate() tocaría PortAudio en
+                # paralelo con el hilo colgado. Se deja para el SO.
+                return
             if pa is not None:
-                await loop.run_in_executor(None, pa.terminate)
+                await self._off_loop(pa.terminate, "stop terminate")
+
+    @staticmethod
+    async def _off_loop(fn, label: str) -> bool:
+        """Ejecuta una llamada de cierre fuera del loop. Devuelve False solo si
+        agotó el tiempo (driver colgado); un error normal se loguea."""
+        try:
+            await call_off_loop(fn, _STREAM_CLOSE_TIMEOUT_S, name="termux-audio-close")
+        except (TimeoutError, asyncio.TimeoutError):
+            log.error(
+                "TermuxBackend.%s: timeout (%.1fs), el driver no responde; se abandona",
+                label, _STREAM_CLOSE_TIMEOUT_S,
+            )
+            return False
+        except Exception as exc:
+            log.warning("TermuxBackend.%s: %s", label, exc)
+        return True
+
+    async def _close_stream(self, stream, label: str) -> bool:
+        """stop_stream() + close(), cada uno con su try: si stop_stream()
+        falla, close() se intenta igual. Si alguno se cuelga, el stream se
+        abandona sin más llamadas y devuelve False."""
+        if not await self._off_loop(stream.stop_stream, f"{label} stop_stream"):
+            return False
+        return await self._off_loop(stream.close, f"{label} close")
 
     def get_queue(self) -> asyncio.Queue[bytes]:
         return self._capture.get_queue()

@@ -448,6 +448,61 @@ def test_stop_cierra_portaudio_fuera_del_hilo_del_loop() -> None:
     assert all(t is not loop_thread for t in seen)
 
 
+def test_stop_usa_hilos_daemon_acotados() -> None:
+    """B4: el executor por defecto usa hilos no daemon que retienen la salida
+    del proceso si el driver se cuelga. stop() usa hilos daemon propios."""
+    be, _ = _backend_with_mock_capture()
+    pa = create_autospec(PyAudioSpec, instance=True)
+    stream = create_autospec(_FakeStream, instance=True)
+    daemons: list[bool] = []
+    for m in (stream.stop_stream, stream.close, pa.terminate):
+        m.side_effect = lambda: daemons.append(threading.current_thread().daemon)
+    be._pa = pa  # type: ignore[assignment]
+    be._stream = stream  # type: ignore[assignment]
+
+    asyncio.run(be.stop())
+
+    assert daemons == [True, True, True]
+
+
+def test_stop_cierra_aunque_stop_stream_falle() -> None:
+    """B4: si stop_stream() lanza, close() se intenta igual."""
+    be, _ = _backend_with_mock_capture()
+    pa = create_autospec(PyAudioSpec, instance=True)
+    stream = create_autospec(_FakeStream, instance=True)
+    stream.stop_stream.side_effect = OSError("Stream not open")
+    be._pa = pa  # type: ignore[assignment]
+    be._stream = stream  # type: ignore[assignment]
+
+    asyncio.run(be.stop())
+
+    stream.close.assert_called_once_with()
+    pa.terminate.assert_called_once_with()
+
+
+def test_stop_no_se_cuelga_si_stop_stream_no_vuelve(monkeypatch) -> None:
+    """B4: con el driver colgado, stop() se rinde tras un tope y abandona el
+    stream: ni close() ni terminate() concurrentes sobre PortAudio."""
+    monkeypatch.setattr(audio_termux, "_STREAM_CLOSE_TIMEOUT_S", 0.01)
+    be, capture = _backend_with_mock_capture()
+    pa = create_autospec(PyAudioSpec, instance=True)
+    stream = create_autospec(_FakeStream, instance=True)
+    release = threading.Event()
+    stream.stop_stream.side_effect = lambda: release.wait(5.0)
+    be._pa = pa  # type: ignore[assignment]
+    be._stream = stream  # type: ignore[assignment]
+
+    try:
+        asyncio.run(asyncio.wait_for(be.stop(), timeout=5.0))
+    finally:
+        release.set()
+
+    capture.stop.assert_awaited_once_with()
+    stream.close.assert_not_called()
+    pa.terminate.assert_not_called()
+    assert be._stream is None and be._pa is None
+
+
 def test_stop_tolera_excepcion_al_cerrar_stream() -> None:
     """Un stream ya roto (p. ej. dispositivo desaparecido) no debe impedir
     terminar PyAudio ni dejar referencias colgando."""

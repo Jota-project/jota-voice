@@ -14,6 +14,7 @@ import threading
 import numpy as np
 
 from config import AudioConfig
+from core.audio.offloop import call_off_loop
 from core.audio.preroll import PrerollBuffer
 from core.audio.vad import is_silence as _is_silence
 from .notification_tone import synth_notification_tone
@@ -30,36 +31,8 @@ _STREAM_CLOSE_TIMEOUT_S = 2.0
 
 
 async def _call_off_loop(fn, timeout: float):
-    """Ejecuta ``fn()`` en un hilo daemon propio y espera como mucho ``timeout``.
-
-    No se usa el executor por defecto a propósito: un hilo colgado en el
-    driver se quedaría en ese pool y ``asyncio.run`` lo espera al salir
-    (``shutdown_default_executor``), así que el apagado se colgaría igual.
-    Un hilo daemon no retiene la salida del proceso. Lanza TimeoutError si
-    ``fn`` no vuelve a tiempo, o la excepción de ``fn``."""
-    loop = asyncio.get_running_loop()
-    fut: asyncio.Future = loop.create_future()
-
-    def _resolve(exc: BaseException | None, result) -> None:
-        if fut.done():
-            return
-        if exc is not None:
-            fut.set_exception(exc)
-        else:
-            fut.set_result(result)
-
-    def _runner() -> None:
-        try:
-            result, exc = fn(), None
-        except BaseException as e:  # noqa: BLE001 - se reenvía al loop
-            result, exc = None, e
-        try:
-            loop.call_soon_threadsafe(_resolve, exc, result)
-        except RuntimeError:
-            pass  # el loop ya cerró: nadie espera el resultado
-
-    threading.Thread(target=_runner, daemon=True, name="sounddevice-close").start()
-    return await asyncio.wait_for(fut, timeout)
+    """Ver core.audio.offloop.call_off_loop (hilo daemon con tope)."""
+    return await call_off_loop(fn, timeout, name="sounddevice-close")
 
 
 # Streams abandonados porque el driver no respondió a stop()/abort()/close()
