@@ -502,6 +502,18 @@ class GatewayClient:
         self._last_send_at = time.monotonic()
 
     async def send_audio(self, float32_bytes: bytes) -> None:
+        """Envía un frame de micrófono tal cual: PCM Float32 LE, 16 kHz, mono.
+
+        Asimetría deliberada con la bajada (issue #84): el TTS llega como
+        ``[0xA1][turn_seq uint16 BE][PCM16 24 kHz]`` (client-protocol.md §6)
+        y la subida va SIN cabecera ni turn_seq (§3 "Header: ninguno", §12
+        "bytes PCM Float32 16 kHz sin header"). Es lo que exige el gateway:
+        una cabecera se interpretaría como muestras de audio. Tampoco hace
+        falta correlación de turno en la subida, ni con sesión persistente:
+        el audio del micrófono existe antes de que haya turno (el gateway
+        asigna turn_seq en turn_start, tras ``send``) y el barge-in se
+        resuelve con ``interrupted`` y el turn_seq de la bajada (§7).
+        """
         await self._send(float32_bytes)
 
     async def send_end(self) -> None:

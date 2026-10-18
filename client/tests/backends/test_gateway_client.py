@@ -889,6 +889,22 @@ async def test_send_tras_cierre_lanza_gateway_disconnected():
 
 
 @pytest.mark.asyncio
+async def test_send_audio_envia_float32_crudo_sin_cabecera():
+    """Issue #84: la subida NO lleva cabecera ni turn_seq, a diferencia de la
+    bajada TTS ([0xA1][turn_seq][PCM16]). Lo fija el protocolo del gateway
+    (client-protocol.md §3 y §12: "Header: ninguno"); una cabecera aquí se
+    interpretaría como muestras de audio."""
+    import numpy as np
+
+    client = GatewayClient(GatewayConfig(host="h", client_key="k"))
+    ws = make_ws()
+    client._ws = ws
+    frame = np.array([0.0, 0.5, -0.5, 1.0], dtype="<f4").tobytes()
+    await client.send_audio(frame)
+    ws.send.assert_awaited_once_with(frame)
+
+
+@pytest.mark.asyncio
 async def test_send_keepalive_es_json_ignorado_por_el_gateway():
     client = GatewayClient(GatewayConfig(host="h", client_key="k"))
     ws = make_ws()
