@@ -236,10 +236,14 @@ class AudioCapture:
     def _read_loop(self, proc: subprocess.Popen) -> None:
         """Lee frames de parec y los encola en asyncio."""
         bytes_per_frame = self._cfg.frames_per_buffer * 2  # int16 = 2 bytes/sample
+        stdout = proc.stdout
+        if stdout is None:  # Popen siempre se crea con stdout=PIPE
+            logger.warning("AudioCapture._read_loop: parec sin stdout")
+            return
         _first = True
         while not self._stop_event.is_set():
             try:
-                in_data = proc.stdout.read(bytes_per_frame)
+                in_data = stdout.read(bytes_per_frame)
             except Exception as exc:
                 logger.warning("AudioCapture._read_loop: error leyendo parec: %s", exc)
                 break
@@ -261,7 +265,8 @@ class AudioCapture:
         (issue #9: antes ambos hacían `await q.get()` sobre la misma cola)."""
         with self._lock:
             self._preroll.append(float32_bytes)
-        if self._loop is None or self._loop.is_closed():
+        loop, queue, oww_queue = self._loop, self._queue, self._oww_queue
+        if loop is None or loop.is_closed() or queue is None or oww_queue is None:
             return
-        self._loop.call_soon_threadsafe(self._queue.put_nowait, float32_bytes)
-        self._loop.call_soon_threadsafe(self._oww_queue.put_nowait, float32_bytes)
+        loop.call_soon_threadsafe(queue.put_nowait, float32_bytes)
+        loop.call_soon_threadsafe(oww_queue.put_nowait, float32_bytes)

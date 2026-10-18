@@ -252,10 +252,11 @@ class SounddeviceBackend:
         (issue #9: antes ambos hacían `await q.get()` sobre la misma cola)."""
         with self._lock:
             self._preroll.append(chunk)
-        if self._loop is None or self._loop.is_closed():
+        loop, capture_q, oww_q = self._loop, self._capture_q, self._oww_q
+        if loop is None or loop.is_closed() or capture_q is None or oww_q is None:
             return
-        self._loop.call_soon_threadsafe(self._capture_q.put_nowait, chunk)
-        self._loop.call_soon_threadsafe(self._oww_q.put_nowait, chunk)
+        loop.call_soon_threadsafe(capture_q.put_nowait, chunk)
+        loop.call_soon_threadsafe(oww_q.put_nowait, chunk)
 
     def get_queue(self) -> asyncio.Queue[bytes]:
         if self._capture_q is None:
