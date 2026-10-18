@@ -12,6 +12,8 @@ import threading
 from config import AudioConfig
 from backends.audio_termux import TermuxBackend
 
+from tests.fakes.waiting import wait_until
+
 
 def _cfg(**kwargs) -> AudioConfig:
     base = dict(
@@ -229,7 +231,7 @@ def test_stop_no_close_stream_during_concurrent_play() -> None:
         write_entered.set()
         # Bloquea hasta que el test lo libere: simula un write() lento
         # (por ejemplo, PortAudio con buffer alto bajo carga).
-        assert release_write.wait(timeout=2.0), "timeout esperando liberación de write"
+        assert release_write.wait(timeout=5.0), "timeout esperando liberación de write"
         return original_write(data, num_frames)
 
     stream.write = blocking_write  # type: ignore[method-assign]
@@ -238,13 +240,19 @@ def test_stop_no_close_stream_during_concurrent_play() -> None:
         # _play() toma self._lock y entra en run_in_executor con write() bloqueado.
         play_task = asyncio.create_task(be.play_chunk(bytes([1, 2])))
         await asyncio.get_running_loop().run_in_executor(
-            None, write_entered.wait, 2.0
+            None, write_entered.wait, 5.0
         )
         # _play() ahora está dentro de write() con self._lock retenido.
         # Lanzar stop() concurrentemente: si no adquiere el lock, cerrará
         # el stream a la primera.
         stop_task = asyncio.create_task(be.stop())
-        await asyncio.sleep(0.05)  # tiempo para que stop() intente y avance
+        # Esperar a que stop() quede bloqueado en el lock (o termine, si no
+        # lo adquiere) en vez de dormir 0.05s y confiar en que avance
+        # (issue #76): con la CPU cargada el sleep no probaba nada.
+        await wait_until(
+            lambda: stop_task.done() or bool(getattr(be._lock, "_waiters", None)),
+            message="stop() bloqueado en el lock o terminado",
+        )
         assert be._stream is not None, (
             "stop() cerró el stream mientras _play() estaba en write(). "
             "stop() debe adquirir self._lock para serializar con _play()/drain() "

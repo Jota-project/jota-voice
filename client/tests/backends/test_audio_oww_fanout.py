@@ -23,6 +23,8 @@ from config import AudioConfig, OWWConfig
 from backends.audio_sounddevice import SounddeviceBackend
 from backends.oww_client import OWWClient
 
+from tests.fakes.waiting import wait_until
+
 
 def _cfg() -> AudioConfig:
     return AudioConfig(
@@ -65,9 +67,15 @@ async def _test_oww_and_recording_consumers_reciben_todos_los_frames() -> None:
 
     send_task = asyncio.create_task(client._send_audio_loop(be))
     try:
-        await asyncio.wait_for(_recording_consumer(), timeout=1.0)
-        # Deja que el loop de OWW procese los frames ya encolados en su cola.
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(_recording_consumer(), timeout=5.0)
+        # Espera a que el loop de OWW procese los frames ya encolados en su
+        # cola, en vez de un sleep(0.05) fijo (issue #76). Si OWW perdiera
+        # frames, la espera agota el timeout de seguridad y el assert de
+        # abajo da el detalle.
+        try:
+            await wait_until(lambda: len(sent_to_oww) >= n_frames, timeout=2.0)
+        except AssertionError:
+            pass
     finally:
         send_task.cancel()
         try:
