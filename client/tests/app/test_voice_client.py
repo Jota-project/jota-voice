@@ -55,6 +55,9 @@ class _SpyMenubarBackend:
     def set_commands(self, cmds) -> None:
         self.commands = cmds
 
+    def set_agent(self, agent: str) -> None:
+        pass
+
     def run_forever(self) -> None:
         self.run_forever_called = True
 

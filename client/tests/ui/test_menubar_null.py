@@ -18,6 +18,7 @@ def test_null_methods_return_none(caplog):
         assert b.set_status_text("hola") is None
         assert b.set_listening_paused(True) is None
         assert b.set_errors_count(3) is None
+        assert b.set_agent("jarvis") is None
         cmds = MenubarCommands(
             on_toggle_pause=lambda: None,
             on_open_logs=lambda: None,
