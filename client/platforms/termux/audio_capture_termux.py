@@ -39,6 +39,10 @@ class AudioCapture:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._read_thread: Optional[threading.Thread] = None
+        # Generación de arranque: start() y stop() la incrementan. Un start()
+        # que despierta con otra generación sabe que lo pararon (y quizá
+        # llegó otro start() después) y se retira sin tocar el estado nuevo.
+        self._gen = 0
 
         self._preroll = PrerollBuffer(
             seconds=cfg.preroll_seconds,
@@ -50,8 +54,13 @@ class AudioCapture:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def start(self) -> None:
-        """Arranca parec y el hilo lector. Reintenta con backoff si parec muere."""
+    async def start(self) -> bool:
+        """Arranca parec y el hilo lector. Reintenta con backoff si parec muere.
+
+        Devuelve True si la captura quedó en marcha y False si la pararon
+        durante el arranque (stop() mientras se esperaba a parec)."""
+        self._gen += 1
+        gen = self._gen
         self._loop = asyncio.get_running_loop()
         self._queue = asyncio.Queue()
         self._oww_queue = asyncio.Queue()
@@ -73,7 +82,7 @@ class AudioCapture:
         # Bucle de reintento: si parec muere (PulseAudio aún no listo, HAL no
         # inicializado, etc.) re-lanzarlo hasta que funcione o nos paren.
         backoff = 1.0
-        while not self._stop_event.is_set():
+        while not self._stop_event.is_set() and gen == self._gen:
             try:
                 proc = subprocess.Popen(
                     cmd,
@@ -84,31 +93,36 @@ class AudioCapture:
                 self._proc = proc
                 # Verificar que arrancó de verdad (no murió instantáneo)
                 await asyncio.sleep(0.5)
-                if self._stop_event.is_set():
-                    # stop() llegó durante la espera (ahora cede el loop). Si
-                    # ya se llevó el proceso, él lo mata; si no, lo hacemos
-                    # aquí. En ningún caso se arranca el hilo lector.
+                if self._stop_event.is_set() or gen != self._gen:
+                    # stop() llegó durante la espera (ahora cede el loop), y
+                    # quizá otro start() después. Si stop() ya se llevó el
+                    # proceso, él lo mata; si no, lo hacemos aquí. Nunca se
+                    # toca el proceso de un start() posterior ni se arranca
+                    # el hilo lector.
                     if self._proc is proc:
                         self._proc = None
                         await asyncio.get_running_loop().run_in_executor(
                             None, self._terminate_proc, proc
                         )
-                    return
+                    return False
                 if proc.poll() is not None:
                     logger.warning(
                         "AudioCapture: parec murió al arrancar (rc=%s), reintentando en %.1fs",
                         proc.returncode, backoff,
                     )
-                    self._proc = None
+                    if self._proc is proc:
+                        self._proc = None
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 10.0)
                     continue
                 backoff = 1.0
+                # El proceso va como argumento: el hilo no relee self._proc,
+                # que stop() pone a None mientras el hilo sigue leyendo.
                 self._read_thread = threading.Thread(
-                    target=self._read_loop, daemon=True, name="audio-capture"
+                    target=self._read_loop, args=(proc,), daemon=True, name="audio-capture"
                 )
                 self._read_thread.start()
-                return
+                return True
             except FileNotFoundError:
                 logger.error("AudioCapture: parec no encontrado en PATH")
                 raise
@@ -119,6 +133,7 @@ class AudioCapture:
                 )
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 10.0)
+        return False
 
     async def stop(self) -> None:
         """Detiene el proceso parec y el hilo lector.
@@ -130,6 +145,7 @@ class AudioCapture:
         en curso ve el stop al despertar y no arranca el hilo lector."""
         logger.debug("AudioCapture detenido")
         self._stop_event.set()
+        self._gen += 1
         proc, self._proc = self._proc, None
         thread, self._read_thread = self._read_thread, None
         if proc is None and thread is None:
@@ -205,13 +221,13 @@ class AudioCapture:
     # Hilo lector
     # ------------------------------------------------------------------
 
-    def _read_loop(self) -> None:
+    def _read_loop(self, proc: subprocess.Popen) -> None:
         """Lee frames de parec y los encola en asyncio."""
         bytes_per_frame = self._cfg.frames_per_buffer * 2  # int16 = 2 bytes/sample
         _first = True
         while not self._stop_event.is_set():
             try:
-                in_data = self._proc.stdout.read(bytes_per_frame)
+                in_data = proc.stdout.read(bytes_per_frame)
             except Exception as exc:
                 logger.warning("AudioCapture._read_loop: error leyendo parec: %s", exc)
                 break

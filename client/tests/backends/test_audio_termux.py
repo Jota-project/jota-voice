@@ -351,6 +351,18 @@ def test_start_sin_pyaudio_propaga_runtimeerror(no_pyaudio) -> None:
     capture.start.assert_not_awaited()
 
 
+def test_start_no_inicializa_pyaudio_si_pararon_la_captura(fake_pyaudio) -> None:
+    """B1: si AudioCapture.start() devuelve False (la pararon durante el
+    arranque), TermuxBackend.start() no crea PyAudio."""
+    be, capture = _backend_with_mock_capture()
+    capture.start.return_value = False
+
+    asyncio.run(be.start())
+
+    fake_pyaudio.cls.assert_not_called()
+    assert be._pa is None
+
+
 def test_start_para_la_captura_si_pyaudio_no_inicializa(fake_pyaudio) -> None:
     """Si PyAudio() lanza (PortAudio sin dispositivos, p. ej.) con la
     captura ya arrancada, start() la para antes de propagar el error."""

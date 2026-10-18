@@ -46,7 +46,11 @@ class TermuxBackend:
         # pyaudio se comprueba ANTES de arrancar la captura: si faltaba, parec
         # y su hilo lector quedaban vivos sin nadie que los parase.
         pyaudio = _require_pyaudio()
-        await self._capture.start()
+        if not await self._capture.start():
+            # Nos pararon durante el arranque: no inicializar PyAudio para
+            # un backend que ya se está apagando.
+            log.debug("TermuxBackend: captura parada durante el arranque")
+            return
         try:
             self._pa = pyaudio.PyAudio()
         except BaseException:
