@@ -17,10 +17,13 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, Awaitable, Callable
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
+from app.playback_engine import PlaybackEngine
+from backends.audio_base import AudioBackend
+from backends.gateway_client import GatewayClient
 from config import AudioConfig, Config, DeviceConfig, GatewayConfig
 from domain.event_bus import EventBus
 
@@ -47,7 +50,7 @@ def _audio_mock() -> MagicMock:
     en wait_for(q.get(), timeout=0.1) indefinidamente hasta que el bucle de
     prueba lo cancele). recording_timeout_s alto (60s) garantiza que la única
     vía de salida del capture_task es la cancelación explícita."""
-    audio = MagicMock()
+    audio = MagicMock(spec=AudioBackend)
     q: asyncio.Queue[bytes] = asyncio.Queue()  # vacía
     audio.get_queue.return_value = q
     audio.get_preroll.return_value = b""
@@ -56,24 +59,11 @@ def _audio_mock() -> MagicMock:
 
 
 def _gateway_mock() -> MagicMock:
-    gateway = MagicMock()
-    gateway.connect = AsyncMock()
-    gateway.disconnect = AsyncMock()
-    gateway.send_audio = AsyncMock()
-    gateway.send_end = AsyncMock()
-    gateway.send_text = AsyncMock()
-    gateway.send_cancel = AsyncMock()
-    return gateway
+    return MagicMock(spec=GatewayClient)
 
 
 def _playback_mock() -> MagicMock:
-    playback = MagicMock()
-    playback.push_token = MagicMock()
-    playback.play_chunk = AsyncMock()
-    playback.play_notification = AsyncMock()
-    playback.drain = AsyncMock()
-    playback.reset = MagicMock()
-    return playback
+    return MagicMock(spec=PlaybackEngine)
 
 
 def _blocking_receive_gen():
@@ -125,10 +115,10 @@ def test_no_orphaned_child_tasks_after_external_cancel(
     recording_timeout_s (60s) sin que nadie los await-e. Esto es exactamente
     lo que pasa en producción cuando SIGTERM dispara shutdown durante un turno.
 
-    Verificación: tras outer.cancel() y asyncio.sleep(0.3) (suficiente para
-    que asyncio propague cancelaciones, pero muy inferior a
-    recording_timeout_s=60s), NO debe haber tasks pendientes distintas a la
-    tarea externa (que ya está done) y a la main task.
+    Verificación: en cuanto la tarea externa termina tras outer.cancel(),
+    NO debe quedar ninguna task hija pendiente (con el fix, su finally las
+    cancela Y las espera antes de terminar). Sin esperas reales (issue #76):
+    sin el fix las hijas seguirían vivas hasta recording_timeout_s=60s.
     """
 
     async def _driver() -> None:
@@ -142,14 +132,26 @@ def test_no_orphaned_child_tasks_after_external_cancel(
         outer = asyncio.create_task(
             coro_factory(cfg, bus, audio, gateway, playback, cancel_event)
         )
-        # Snapshot DESPUÉS de crear outer pero ANTES de que asyncio.sleep ceda
-        # el control y los tasks hijos se creen. Así capturamos solo [main, outer]
-        # y todo lo creado después (capture_task, cancel_task, etc.) se detecta
-        # como nuevo.
+        # Snapshot DESPUÉS de crear outer pero ANTES de ceder el control y que
+        # los tasks hijos se creen. Así capturamos solo [main, outer] y todo
+        # lo creado después (capture_task, cancel_task, etc.) se detecta como
+        # nuevo.
         initial_tasks = set(asyncio.all_tasks())
+        main_task = asyncio.current_task()
 
-        # Dejar que asyncio.wait entre en espera (los tasks hijos ya están creados)
-        await asyncio.sleep(0.05)
+        def _children() -> list[asyncio.Task]:
+            return [
+                t for t in asyncio.all_tasks() - initial_tasks
+                if t is not outer and t is not main_task and not t.done()
+            ]
+
+        # Ceder el loop hasta que outer haya creado sus hijas y esté
+        # esperando en asyncio.wait (≥2 hijas vivas en ambos estados).
+        for _ in range(200):
+            if len(_children()) >= 2:
+                break
+            await asyncio.sleep(0)
+        assert len(_children()) >= 2, f"{label}: no llegó a crear sus tasks hijas"
         assert not outer.done(), (
             f"{label}: la tarea externa terminó antes de poder cancelarla"
         )
@@ -164,21 +166,9 @@ def test_no_orphaned_child_tasks_after_external_cancel(
         except asyncio.CancelledError:
             pass  # comportamiento esperado tras outer.cancel()
 
-        # Esperar para que el bloque finally (si existe) pueda cancelar/drenar.
-        # 0.3s es mucho mayor que el tiempo que tarda asyncio en propagar
-        # CancelledError, pero muy inferior a recording_timeout_s=60s.
-        for _ in range(3):
-            await asyncio.sleep(0)
-        await asyncio.sleep(0.3)
-
-        # Cualquier task creada durante el test que siga not done es huérfana
-        main_task = asyncio.current_task()
-        all_now = set(asyncio.all_tasks())
-        newly = all_now - initial_tasks
-        orphans = [
-            t for t in newly
-            if not t.done() and t is not outer and t is not main_task
-        ]
+        # Cualquier task creada durante el test que siga viva al terminar
+        # outer es huérfana: el finally de outer debía esperarlas.
+        orphans = _children()
 
         assert not orphans, (
             f"{label}: {len(orphans)} task(s) huérfana(s) tras cancel externo "
