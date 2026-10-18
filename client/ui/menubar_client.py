@@ -1,6 +1,6 @@
 """MenubarClient — suscriptor del EventBus que traduce VoiceEvent a
-llamadas sobre un MenubarBackend inyectado, y drena una queue.Queue
-thread-safe para los comandos que la UI envía hacia asyncio.
+llamadas sobre un MenubarBackend inyectado, y reenvía al loop de asyncio
+los comandos que la UI encola en una queue.Queue thread-safe.
 """
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import logging
 import os
 import queue
 import signal
+import threading
 
 from domain.event_bus import EventBus, VoiceEvent
 
@@ -36,45 +37,41 @@ class MenubarClient:
         loop: asyncio.AbstractEventLoop,
         stop_event: asyncio.Event,
     ) -> None:
-        """Loop suscrito al bus. Se cancela externamente (asyncio.CancelledError).
+        """Loop suscrito al bus. Termina al cerrarse el bus o al cancelarlo.
 
-        El bus publica eventos asyncio-safe; la ui_queue es thread-safe
-        (queue.Queue) y la drenamos desde un executor para no bloquear el
-        loop mientras la UI está inactiva.
+        Los comandos de la UI llegan por ``ui_queue`` (queue.Queue, la
+        escribe el hilo de Cocoa). Un hilo daemon propio bloquea en
+        ``ui_queue.get()`` y reenvía cada comando al loop con
+        ``call_soon_threadsafe`` (issue #100): sin sondeo periódico y sin
+        ocupar para siempre un hilo del executor por defecto, que comparten
+        las operaciones bloqueantes de audio/HTTP. Al salir se encola un
+        centinela que desbloquea y termina ese hilo.
         """
         self._loop = loop
+        stop_sentinel = object()
 
-        def _get_nowait_or_none():
-            # Timeout corto para que el hilo del executor vuelva
-            # periódicamente y la cancelación de _drain_queue pueda
-            # entregarse: un ui_queue.get() sin timeout bloquearía el
-            # hilo del executor para siempre si no llega ningún comando,
-            # e impediría que `drain_task.cancel()` surta efecto (asyncio
-            # no puede interrumpir una llamada bloqueante ya en curso).
-            try:
-                return ui_queue.get(timeout=0.2)
-            except queue.Empty:
-                return None
-
-        async def _drain_queue() -> None:
+        def _forward_commands() -> None:
             while True:
-                cmd = await loop.run_in_executor(None, _get_nowait_or_none)
-                if cmd is None:
-                    continue
-                self._dispatch_command(cmd, pause_event)
+                cmd = ui_queue.get()
+                if cmd is stop_sentinel:
+                    return
+                try:
+                    loop.call_soon_threadsafe(self._dispatch_command, cmd, pause_event)
+                except RuntimeError:
+                    log.debug("MenubarClient: loop cerrado; comando %r descartado", cmd)
+                    return
 
-        drain_task = asyncio.create_task(_drain_queue())
+        forwarder = threading.Thread(
+            target=_forward_commands, name="menubar-ui-commands", daemon=True
+        )
+        forwarder.start()
 
         try:
             async for event in bus.subscribe():
                 await self._handle(event)
         finally:
             self._cancel_pending_idle()
-            drain_task.cancel()
-            try:
-                await drain_task
-            except asyncio.CancelledError:
-                pass
+            ui_queue.put_nowait(stop_sentinel)
 
     def _dispatch_command(self, cmd: str, pause_event: asyncio.Event) -> None:
         """Ejecuta en el loop de asyncio un comando que la UI encoló.

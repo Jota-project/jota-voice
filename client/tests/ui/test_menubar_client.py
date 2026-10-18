@@ -493,3 +493,78 @@ def test_only_queue_commands_are_dispatched(caplog):
         _run(scenario())
 
     assert not any("requested" in r.getMessage() for r in caplog.records)
+
+
+class _RecordingQueue(queue.Queue):
+    """queue.Queue que registra los timeouts con los que se llama a get()."""
+
+    def __init__(self):
+        super().__init__()
+        self.get_timeouts: list = []
+
+    def get(self, block=True, timeout=None):
+        self.get_timeouts.append(timeout)
+        return super().get(block, timeout)
+
+
+def _forwarder_threads():
+    import threading
+
+    return [t for t in threading.enumerate() if t.name == "menubar-ui-commands"]
+
+
+def test_ui_queue_drained_without_polling_nor_default_executor():
+    """Issue #100: antes se sondeaba ui_queue cada 200 ms con
+    run_in_executor(None, ...), ocupando para siempre un hilo del executor
+    por defecto (compartido con audio/HTTP). Ahora un hilo propio bloquea en
+    get() sin timeout y reenvía con call_soon_threadsafe; al terminar run()
+    el hilo se desbloquea y sale."""
+    bus = EventBus()
+    backend = FakeBackend()
+    client = MenubarClient(backend)
+    ui_queue = _RecordingQueue()
+    pause = asyncio.Event()
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+
+        def _no_executor(*_args, **_kwargs):
+            raise AssertionError("MenubarClient no debe usar el executor por defecto")
+
+        loop.run_in_executor = _no_executor
+        stop = asyncio.Event()
+        task = asyncio.create_task(client.run(bus, ui_queue, pause, loop, stop))
+        await _subscribed(bus)
+        ui_queue.put_nowait("toggle_pause")
+        await wait_until(lambda: pause.is_set(), message="toggle_pause procesado")
+        assert len(_forwarder_threads()) == 1
+        bus.close()
+        await asyncio.wait_for(task, timeout=5.0)
+        await wait_until(lambda: not _forwarder_threads(), message="hilo reenviador terminado")
+
+    _run(scenario())
+
+    assert ui_queue.get_timeouts, "get() nunca se llamó"
+    assert all(t is None for t in ui_queue.get_timeouts), ui_queue.get_timeouts
+    assert backend.calls == [("set_listening_paused", (True,))]
+
+
+def test_forwarder_thread_exits_when_run_is_cancelled():
+    bus = EventBus()
+    client = MenubarClient(FakeBackend())
+    ui_queue: queue.Queue = queue.Queue()
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        task = asyncio.create_task(
+            client.run(bus, ui_queue, asyncio.Event(), loop, asyncio.Event())
+        )
+        await _subscribed(bus)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        await wait_until(lambda: not _forwarder_threads(), message="hilo reenviador terminado")
+
+    _run(scenario())
