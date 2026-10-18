@@ -42,6 +42,12 @@ log = logging.getLogger(__name__)
 # State helpers
 # ---------------------------------------------------------------------------
 
+# Margen tras el turn_end de NUESTRO turno para el audio TTS que aún está en
+# tránsito (client-protocol.md §5: "El audio TTS puede seguir llegando
+# brevemente después").
+TURN_END_GRACE_S = 2.0
+
+
 class _TurnCancelled(Exception):
     """Lanzada cuando cancel_event gana la race en RECORDING o RESPONDING."""
 
@@ -395,10 +401,33 @@ async def _responding(
         # conexión WS tras el turno (puede haber más turnos en la misma
         # sesión). Sin este margen, el loop dependería siempre del timeout
         # externo de 30s para cortar, aunque la respuesta ya haya terminado.
-        TURN_END_GRACE_S = 2.0
         gen = gateway.receive()
         loop = asyncio.get_running_loop()
         grace_deadline: float | None = None
+        # Revisión Fase R: en sesión persistente pueden llegar mensajes de
+        # OTROS turnos (un push del agente que empezó antes de nuestro
+        # `send`). Nuestro turno es el del primer turn_start visto después de
+        # enviar la transcripción; solo su turn_end lo termina, y los tokens
+        # y el audio de otros turnos se ignoran.
+        sent_text = False
+        my_turn_id: object = None
+        my_turn_seq: object = None
+        foreign_ids: set = set()
+        foreign_seqs: set = set()
+
+        def _is_foreign(turn_id: object = None, turn_seq: object = None) -> bool:
+            if turn_id is not None:
+                if turn_id in foreign_ids:
+                    return True
+                if my_turn_id is None or turn_id != my_turn_id:
+                    return True
+            if turn_seq is not None:
+                if turn_seq in foreign_seqs:
+                    return True
+                if my_turn_seq is None or turn_seq != my_turn_seq:
+                    return True
+            # Sin identificadores (gateways antiguos, fakes): se acepta.
+            return False
 
         while True:
             try:
@@ -419,17 +448,24 @@ async def _responding(
                 bus.publish(VoiceEvent(type="transcription", data={"text": text}))
                 log.info("RESPONDING: transcription → %r", text)
                 await gateway.send_text(text)
+                sent_text = True
 
             elif gw_event.type == "transcription_partial":
                 text = gw_event.data.get("text", "")
                 bus.publish(VoiceEvent(type="transcription_partial", data={"text": text}))
 
             elif gw_event.type == "llm_token":
+                if _is_foreign(turn_id=gw_event.data.get("turn_id")):
+                    log.debug("RESPONDING: token de otro turno ignorado")
+                    continue
                 content = gw_event.data.get("content", "")
                 playback.push_token(content)
                 bus.publish(VoiceEvent(type="llm_token", data={"content": content}))
 
             elif gw_event.type == "tts_chunk":
+                if _is_foreign(turn_seq=gw_event.data.get("turn_seq")):
+                    log.debug("RESPONDING: audio de otro turno ignorado")
+                    continue
                 if not playback_started:
                     bus.publish(VoiceEvent(type="playback_started", data={}))
                     playback_started = True
@@ -443,12 +479,23 @@ async def _responding(
                 # Issue #24: turn_start del gateway resetea el estado de
                 # turno. _current_turn_seq ya está actualizado en GatewayClient.
                 # Aquí solo reseteamos la grabación_local (cursor/buffer/playback).
-                log.info("RESPONDING: turn_start → turno %s seq=%s",
-                         gw_event.data.get("turn_id"), gw_event.data.get("turn_seq"))
-                # Si había audio en tránsito de un turno anterior con seq menor,
-                # el descarte ya está hecho en receive(). Aquí limpiamos
-                # el buffer de playback por si acaso.
-                playback.reset()
+                tid = gw_event.data.get("turn_id")
+                tseq = gw_event.data.get("turn_seq")
+                if sent_text and my_turn_id is None and my_turn_seq is None:
+                    my_turn_id, my_turn_seq = tid, tseq
+                    log.info("RESPONDING: turn_start → nuestro turno %s seq=%s", tid, tseq)
+                    # Si había audio en tránsito de un turno anterior con seq
+                    # menor, el descarte ya está hecho en receive(). Aquí
+                    # limpiamos el buffer de playback por si acaso.
+                    playback.reset()
+                else:
+                    # Push del agente (antes de nuestro send) u otro turno:
+                    # sus tokens/audio/turn_end no son nuestros.
+                    if tid is not None:
+                        foreign_ids.add(tid)
+                    if tseq is not None:
+                        foreign_seqs.add(tseq)
+                    log.info("RESPONDING: turn_start ajeno %s seq=%s ignorado", tid, tseq)
 
             elif gw_event.type == "interrupted":
                 # Issue #24: barge-in real del gateway (no basado en wake
@@ -459,7 +506,18 @@ async def _responding(
                 raise _TurnCancelled()
 
             elif gw_event.type == "turn_end":
-                grace_deadline = loop.time() + TURN_END_GRACE_S
+                tid = gw_event.data.get("turn_id")
+                # Solo el turn_end del turno abierto tras nuestro send. Un
+                # push que acaba mientras tanto (cuyo turn_start vimos en
+                # IDLE o no vimos) ya no corta RESPONDING antes de tiempo.
+                ours = (my_turn_id is not None or my_turn_seq is not None) and (
+                    tid is None or tid == my_turn_id
+                )
+                if ours:
+                    if grace_deadline is None:
+                        grace_deadline = loop.time() + TURN_END_GRACE_S
+                else:
+                    log.info("RESPONDING: turn_end ajeno %r ignorado", tid)
 
             elif gw_event.type == "status":
                 # Issue #18 — informativo: el gateway reporta degradación

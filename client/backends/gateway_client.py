@@ -548,8 +548,10 @@ class GatewayClient:
                             "(current=%d, got=%r)",
                             self._current_turn_seq, new_seq,
                         )
-                if event_type in ("done", "turn_end"):
-                    return
+                # Revisión Fase R: turn_end se entrega como evento (antes
+                # terminaba el generador). Con sesión persistente puede ser el
+                # fin de un push ajeno, y tras el nuestro aún llega audio
+                # (client-protocol §5): decide _responding, que conoce su turno.
                 if event_type == "token":
                     event_type = "llm_token"
                     # El protocolo actual manda el texto en `text`

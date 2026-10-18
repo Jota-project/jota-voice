@@ -91,6 +91,9 @@ class FakeGateway:
             if script is None:
                 await asyncio.Event().wait()  # sesión viva y en silencio
             for item in script:
+                if isinstance(item, tuple) and item[0] == "sleep":
+                    await asyncio.sleep(item[1])
+                    continue
                 if isinstance(item, tuple) and item[0] == "close":
                     raise self.close(item[1], item[2] if len(item) > 2 else "")
                 if item == "block":
@@ -618,3 +621,80 @@ async def test_supervisor_con_gateway_real_http_403_no_reintenta_y_avisa(monkeyp
     assert gw.fatal_error is not None and gw.fatal_error.kind == "http_rejected"
     errs = [e for e in got if e.type == "error"]
     assert len(errs) == 1 and errs[0].data["kind"] == "http_rejected"
+
+
+
+# ---------------------------------------------------------------------------
+# Revisión Fase R, punto 2: el turno solo termina con SU turn_end, y el
+# audio que llega tras turn_end (gracia) se reproduce.
+# ---------------------------------------------------------------------------
+
+
+def _ev(t, **d):
+    return GatewayEvent(t, d)
+
+
+async def _respond(script, monkeypatch=None):
+    from domain.state_machine import _responding
+
+    bus = EventBus()
+    gw = FakeGateway(sessions=[script + ["block"]])
+    pb = _playback()
+    pb.push_token = MagicMock()
+    pb.reset = MagicMock()
+    published = asyncio.create_task(_collect_until(bus, lambda e, _: e.type == "playback_ended", 5.0))
+    await asyncio.sleep(0)
+    await asyncio.wait_for(_responding(bus, gw, pb, asyncio.Event()), 5.0)
+    return gw, pb, await published
+
+
+@pytest.mark.asyncio
+async def test_turn_end_de_un_push_no_termina_nuestro_turno(monkeypatch):
+    from domain import state_machine
+    monkeypatch.setattr(state_machine, "TURN_END_GRACE_S", 0.05, raising=False)
+    gw, pb, got = await _respond([
+        _ev("transcription", text="hola"),
+        _ev("turn_end", turn_id="t-3"),            # push que acaba ahora
+        ("sleep", 0.2),                            # > gracia: antes cortaba aquí
+        _ev("turn_start", turn_id="t-4", turn_seq=4),
+        _ev("llm_token", turn_id="t-4", content="Buenas"),
+        _ev("tts_chunk", audio=b"\x01\x00", turn_seq=4),
+        _ev("turn_end", turn_id="t-4"),
+    ])
+    assert ("send", "hola") in gw.sent
+    pb.push_token.assert_called_once_with("Buenas")
+    assert pb.play_chunk.await_count == 1
+    assert got[-1].type == "playback_ended"
+
+
+@pytest.mark.asyncio
+async def test_tokens_y_audio_de_otro_turno_se_ignoran(monkeypatch):
+    from domain import state_machine
+    monkeypatch.setattr(state_machine, "TURN_END_GRACE_S", 0.05, raising=False)
+    gw, pb, got = await _respond([
+        _ev("llm_token", turn_id="t-3", content="push"),   # push en curso
+        _ev("tts_chunk", audio=b"\x09\x00", turn_seq=3),
+        _ev("transcription", text="hola"),
+        _ev("turn_start", turn_id="t-4", turn_seq=4),
+        _ev("llm_token", turn_id="t-4", content="mio"),
+        _ev("tts_chunk", audio=b"\x01\x00", turn_seq=4),
+        _ev("turn_end", turn_id="t-4"),
+    ])
+    pb.push_token.assert_called_once_with("mio")
+    assert pb.play_chunk.await_args_list[0].args[0] == b"\x01\x00"
+    assert pb.play_chunk.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_audio_tardio_tras_turn_end_se_reproduce():
+    """client-protocol §5: el audio TTS puede seguir llegando tras turn_end.
+    Antes receive() retornaba en turn_end y ese audio se perdía (#8)."""
+    gw, pb, got = await _respond([
+        _ev("transcription", text="hola"),
+        _ev("turn_start", turn_id="t-1", turn_seq=1),
+        _ev("tts_chunk", audio=b"\x01\x00", turn_seq=1),
+        _ev("turn_end", turn_id="t-1"),
+        _ev("tts_chunk", audio=b"\x02\x00", turn_seq=1),
+    ])
+    assert pb.play_chunk.await_count == 2
+    assert got[-1].type == "playback_ended"

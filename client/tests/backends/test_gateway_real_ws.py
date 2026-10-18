@@ -227,6 +227,8 @@ async def test_real_lector_lento_no_corta_por_ping():
         await gw.connect()
         n = 0
         async for ev in gw.receive():
+            if ev.type == "turn_end":
+                break
             n += 1
             await asyncio.sleep(0.03)  # "reproduce" cada fragmento
         assert n == 50

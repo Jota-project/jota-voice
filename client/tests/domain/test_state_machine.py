@@ -937,6 +937,9 @@ async def _run_turn_end_grace_period_test() -> None:
 
     async def _receive_then_hang():
         yield GatewayEvent(type="transcription", data={"text": "hola"})
+        # Revisión Fase R: solo termina el turn_end del turno abierto tras
+        # nuestro send (su turn_start), como hace el gateway real (§5).
+        yield GatewayEvent(type="turn_start", data={"turn_id": "t-1", "turn_seq": 1})
         yield GatewayEvent(type="tts_chunk", data={"audio": b"\x00\x01" * 100})
         yield GatewayEvent(type="turn_end", data={"turn_id": "t-1"})
         await asyncio.Event().wait()  # el WS real nunca cierra tras el turno

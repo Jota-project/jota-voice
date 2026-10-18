@@ -175,7 +175,11 @@ async def _test_receive_termina_en_turn_end_sin_esperar_done() -> None:
 
     events = [ev async for ev in client.receive()]
 
-    assert [e.type for e in events] == ["pipeline_event"]
+    # Revisión Fase R: receive() ya no termina en turn_end; lo entrega como
+    # evento (con su turn_id) y sigue leyendo — quien decide si es el fin de
+    # SU turno es _responding, y el audio tardío tras turn_end no se pierde.
+    assert [e.type for e in events] == ["pipeline_event", "turn_end", "pipeline_event"]
+    assert events[1].data["turn_id"] == "t-1"
 
 
 def test_receive_termina_en_turn_end_sin_esperar_done() -> None:
