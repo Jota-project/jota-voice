@@ -27,6 +27,16 @@ def _closed_ok(code: int = 1000, reason: str = "") -> ConnectionClosedOK:
     return ConnectionClosedOK(Close(code, reason), Close(code, reason), True)
 
 
+@pytest.fixture(autouse=True)
+def _sin_credenciales_cf(monkeypatch):
+    """connect() lee CF_ACCESS_CLIENT_ID/SECRET del entorno real (issue #39):
+    sin limpiarlas, el resultado dependería de la máquina o de otro test que
+    las hubiera dejado puestas (p. ej. vía un .env cargado por load_config).
+    Los tests que las necesitan las ponen con monkeypatch.setenv."""
+    monkeypatch.delenv("CF_ACCESS_CLIENT_ID", raising=False)
+    monkeypatch.delenv("CF_ACCESS_CLIENT_SECRET", raising=False)
+
+
 from config import GatewayConfig, AudioConfig, DeviceConfig, Config
 from backends.gateway_client import (
     GatewayClient,
@@ -128,6 +138,25 @@ def test_cloudflare_access_headers_con_solo_una_variable(monkeypatch) -> None:
     monkeypatch.setenv("CF_ACCESS_CLIENT_ID", "abc123")
     monkeypatch.delenv("CF_ACCESS_CLIENT_SECRET", raising=False)
     assert _cloudflare_access_headers() == {}
+
+
+@pytest.mark.asyncio
+async def test_connect_sin_credenciales_cf_no_manda_cabeceras(ws_connect) -> None:
+    connect = ws_connect(AsyncMock(return_value=_ws_with_recv([_READY])))
+    await GatewayClient(GatewayConfig(host="h", client_key="k", connect_timeout_s=1.0)).connect()
+    assert connect.call_args.kwargs["additional_headers"] is None
+
+
+@pytest.mark.asyncio
+async def test_connect_con_credenciales_cf_las_manda_en_el_upgrade(monkeypatch, ws_connect) -> None:
+    monkeypatch.setenv("CF_ACCESS_CLIENT_ID", "abc123")
+    monkeypatch.setenv("CF_ACCESS_CLIENT_SECRET", "secret456")
+    connect = ws_connect(AsyncMock(return_value=_ws_with_recv([_READY])))
+    await GatewayClient(GatewayConfig(host="h", client_key="k", connect_timeout_s=1.0)).connect()
+    assert connect.call_args.kwargs["additional_headers"] == {
+        "CF-Access-Client-Id": "abc123",
+        "CF-Access-Client-Secret": "secret456",
+    }
 
 
 async def _test_receive_termina_en_turn_end_sin_esperar_done() -> None:

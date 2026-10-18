@@ -171,7 +171,7 @@ def test_enqueue_and_wait_queues_audio_before_starting_stream() -> None:
     assert qsize_at_ensure == [1]
 
 
-def test_enqueue_and_wait_sleeps_solo_la_duracion_real() -> None:
+def test_enqueue_and_wait_sleeps_solo_la_duracion_real(monkeypatch) -> None:
     """Bug: se dormía duration + 0.05s tras encolar cada chunk. Como el
     callback de PortAudio consume el chunk en su duración real (sin ese
     margen extra), esos 50ms de más hacían que el productor entregara el
@@ -187,13 +187,11 @@ def test_enqueue_and_wait_sleeps_solo_la_duracion_real() -> None:
 
     import backends.audio_sounddevice as mod
 
-    original_sleep = mod.asyncio.sleep
-    mod.asyncio.sleep = fake_sleep
-    try:
-        audio = bytes(range(1, 1 + 240))  # 120 samples int16 → 120/24000s
-        asyncio.run(be.play_chunk(audio))
-    finally:
-        mod.asyncio.sleep = original_sleep
+    # mod.asyncio ES el módulo asyncio global: parchearlo a mano con
+    # try/finally afectaba a todo el proceso; monkeypatch lo acota al test.
+    monkeypatch.setattr(mod.asyncio, "sleep", fake_sleep)
+    audio = bytes(range(1, 1 + 240))  # 120 samples int16 → 120/24000s
+    asyncio.run(be.play_chunk(audio))
 
     expected_duration = len(audio) / (24000 * 2)
     assert slept == [pytest.approx(expected_duration)]

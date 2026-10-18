@@ -19,11 +19,19 @@ from app.voice_client import _setup_logging
 
 @pytest.fixture(autouse=True)
 def _restore_logging():
-    """basicConfig altera estado global; guardar/restaurar niveles."""
-    saved_root = logging.getLogger().level
+    """basicConfig altera estado global; guardar/restaurar niveles y
+    handlers del raíz (si el raíz no tiene handlers, p. ej. con
+    ``-p no:logging``, basicConfig le añade un StreamHandler que se
+    quedaba puesto para el resto de la sesión)."""
+    root = logging.getLogger()
+    saved_root = root.level
+    saved_handlers = list(root.handlers)
     saved_websockets = logging.getLogger("websockets").level
     yield
-    logging.getLogger().setLevel(saved_root)
+    for h in list(root.handlers):
+        if h not in saved_handlers:
+            root.removeHandler(h)
+    root.setLevel(saved_root)
     logging.getLogger("websockets").setLevel(saved_websockets)
 
 
