@@ -7,10 +7,18 @@ lógica de alineamiento a muestras int16.
 from __future__ import annotations
 
 import asyncio
+import logging
+import sys
 import threading
+import types
+from unittest.mock import MagicMock, create_autospec
+
+import pytest
 
 from config import AudioConfig
+from backends import audio_termux
 from backends.audio_termux import TermuxBackend
+from platforms.termux.audio_capture_termux import AudioCapture
 
 
 def _cfg(**kwargs) -> AudioConfig:
@@ -273,3 +281,248 @@ def test_stop_idempotent() -> None:
 
     assert be._stream is None
     assert be._pa is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #35 — huecos de cobertura: import lazy de pyaudio, start(), apertura
+# perezosa del stream de salida, cierre con excepciones y delegación en
+# AudioCapture. Sin PyAudio ni parec reales: pyaudio se stubbea en
+# sys.modules y AudioCapture se sustituye por un mock con autospec.
+# ---------------------------------------------------------------------------
+
+
+class _PaSpec:
+    """Superficie de pyaudio.PyAudio que usa TermuxBackend (spec de mocks)."""
+
+    def open(self, format, channels, rate, output):  # noqa: A002, ARG002
+        ...
+
+    def terminate(self) -> None:
+        ...
+
+
+_PA_INT16 = 8  # valor real de pyaudio.paInt16
+
+
+def _install_fake_pyaudio(monkeypatch) -> tuple[MagicMock, MagicMock]:
+    """Instala un módulo `pyaudio` falso. Devuelve (clase PyAudio, instancia)."""
+    pa_cls = create_autospec(_PaSpec)
+    pa_instance = pa_cls.return_value
+    pa_instance.open.side_effect = lambda **_: create_autospec(_FakeStream, instance=True)
+    fake = types.ModuleType("pyaudio")
+    fake.PyAudio = pa_cls  # type: ignore[attr-defined]
+    fake.paInt16 = _PA_INT16  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "pyaudio", fake)
+    return pa_cls, pa_instance
+
+
+def _backend_with_mock_capture() -> tuple[TermuxBackend, MagicMock]:
+    be = TermuxBackend(_cfg())
+    capture = create_autospec(AudioCapture, instance=True)
+    be._capture = capture  # type: ignore[assignment]
+    return be, capture
+
+
+def test_require_pyaudio_sin_modulo_lanza_runtimeerror_con_instrucciones(monkeypatch) -> None:
+    """Fuera de Termux pyaudio no existe: el error debe ser explícito y
+    decir cómo instalarlo, encadenando el ImportError original."""
+    monkeypatch.setitem(sys.modules, "pyaudio", None)  # fuerza ImportError
+
+    with pytest.raises(RuntimeError, match="pkg install portaudio") as excinfo:
+        audio_termux._require_pyaudio()
+
+    assert isinstance(excinfo.value.__cause__, ImportError)
+
+
+def test_construir_backend_no_importa_pyaudio(monkeypatch) -> None:
+    """El import es lazy: instanciar el backend (p. ej. desde el registry
+    en una plataforma sin pyaudio) no debe fallar."""
+    monkeypatch.setitem(sys.modules, "pyaudio", None)
+
+    be = TermuxBackend(_cfg())
+
+    assert be._pa is None
+    assert be._stream is None
+
+
+def test_start_arranca_captura_e_inicializa_pyaudio(monkeypatch) -> None:
+    pa_cls, pa_instance = _install_fake_pyaudio(monkeypatch)
+    be, capture = _backend_with_mock_capture()
+
+    asyncio.run(be.start())
+
+    capture.start.assert_awaited_once_with()
+    pa_cls.assert_called_once_with()
+    assert be._pa is pa_instance
+    # El stream de salida NO se abre en start(): es perezoso.
+    pa_instance.open.assert_not_called()
+    assert be._stream is None
+
+
+def test_start_sin_pyaudio_propaga_runtimeerror(monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "pyaudio", None)
+    be, _ = _backend_with_mock_capture()
+
+    with pytest.raises(RuntimeError, match="pyaudio"):
+        asyncio.run(be.start())
+
+    assert be._pa is None
+
+
+def test_play_abre_stream_perezoso_una_sola_vez_con_formato_tts(monkeypatch) -> None:
+    """El primer chunk abre el stream de salida (PCM16 mono 24 kHz, el
+    formato TTS del gateway); los siguientes reutilizan el mismo."""
+    _, pa_instance = _install_fake_pyaudio(monkeypatch)
+    be, _ = _backend_with_mock_capture()
+
+    async def _run() -> None:
+        await be.start()
+        await be.play_chunk(bytes([1, 2]))
+        await be.play_chunk(bytes([3, 4]))
+
+    asyncio.run(_run())
+
+    pa_instance.open.assert_called_once_with(
+        format=_PA_INT16, channels=1, rate=24000, output=True
+    )
+    stream = be._stream
+    assert stream is not None
+    assert [c.args[0] for c in stream.write.call_args_list] == [bytes([1, 2]), bytes([3, 4])]
+
+
+def test_play_antes_de_start_es_noop() -> None:
+    """Sin PyAudio inicializado (_pa None) play_chunk no debe abrir nada
+    ni lanzar: el audio simplemente se descarta."""
+    be, _ = _backend_with_mock_capture()
+
+    asyncio.run(be.play_chunk(bytes([1, 2, 3, 4])))
+
+    assert be._stream is None
+    assert be._enqueue_carry == b""
+
+
+def test_stop_para_captura_cierra_stream_y_termina_pyaudio() -> None:
+    be, capture = _backend_with_mock_capture()
+    pa = create_autospec(_PaSpec, instance=True)
+    stream = create_autospec(_FakeStream, instance=True)
+    be._pa = pa  # type: ignore[assignment]
+    be._stream = stream  # type: ignore[assignment]
+
+    asyncio.run(be.stop())
+
+    capture.stop.assert_awaited_once_with()
+    stream.stop_stream.assert_called_once_with()
+    stream.close.assert_called_once_with()
+    pa.terminate.assert_called_once_with()
+    assert be._stream is None
+    assert be._pa is None
+
+
+def test_stop_tolera_excepcion_al_cerrar_stream() -> None:
+    """Un stream ya roto (p. ej. dispositivo desaparecido) no debe impedir
+    terminar PyAudio ni dejar referencias colgando."""
+    be, _ = _backend_with_mock_capture()
+    pa = create_autospec(_PaSpec, instance=True)
+    stream = create_autospec(_FakeStream, instance=True)
+    stream.close.side_effect = OSError("Stream closed")
+    be._pa = pa  # type: ignore[assignment]
+    be._stream = stream  # type: ignore[assignment]
+
+    asyncio.run(be.stop())
+
+    pa.terminate.assert_called_once_with()
+    assert be._stream is None
+    assert be._pa is None
+
+
+def test_drain_cierra_stream_y_el_siguiente_play_abre_otro(monkeypatch) -> None:
+    _, pa_instance = _install_fake_pyaudio(monkeypatch)
+    be, _ = _backend_with_mock_capture()
+
+    async def _run() -> tuple[MagicMock, MagicMock]:
+        await be.start()
+        await be.play_chunk(bytes([1, 2]))
+        first = be._stream
+        await be.drain()
+        assert be._stream is None
+        await be.play_chunk(bytes([3, 4]))
+        return first, be._stream
+
+    first, second = asyncio.run(_run())
+
+    first.stop_stream.assert_called_once_with()
+    first.close.assert_called_once_with()
+    assert second is not None and second is not first
+    assert pa_instance.open.call_count == 2
+
+
+def test_drain_error_cerrando_stream_loguea_y_limpia(caplog) -> None:
+    be, _ = _backend_with_mock_capture()
+    be._pa = create_autospec(_PaSpec, instance=True)  # type: ignore[assignment]
+    stream = create_autospec(_FakeStream, instance=True)
+    stream.stop_stream.side_effect = OSError("boom")
+    be._stream = stream  # type: ignore[assignment]
+
+    with caplog.at_level(logging.WARNING, logger="backends.audio_termux"):
+        asyncio.run(be.drain())
+
+    assert be._stream is None
+    assert any("error cerrando stream" in r.getMessage() for r in caplog.records)
+
+
+def test_drain_sin_stream_es_noop() -> None:
+    be, _ = _backend_with_mock_capture()
+
+    asyncio.run(be.drain())
+
+    assert be._stream is None
+
+
+def test_play_drain_stop_concurrentes_no_hacen_deadlock(monkeypatch) -> None:
+    """El asyncio.Lock compartido por _play/drain/stop no debe bloquearse
+    (p. ej. por adquisición reentrante) cuando se intercalan."""
+    _install_fake_pyaudio(monkeypatch)
+    be, capture = _backend_with_mock_capture()
+
+    async def _run() -> None:
+        await be.start()
+        await asyncio.wait_for(
+            asyncio.gather(
+                be.play_chunk(bytes([1, 2])),
+                be.drain(),
+                be.play_chunk(bytes([3, 4])),
+                be.play_notification(),
+                be.stop(),
+            ),
+            timeout=2.0,
+        )
+
+    asyncio.run(_run())
+
+    capture.stop.assert_awaited_once_with()
+    assert be._pa is None
+    assert be._stream is None
+
+
+def test_accesores_delegan_en_audio_capture() -> None:
+    be, capture = _backend_with_mock_capture()
+    q: asyncio.Queue[bytes] = asyncio.Queue()
+    oww_q: asyncio.Queue[bytes] = asyncio.Queue()
+    capture.get_queue.return_value = q
+    capture.get_oww_queue.return_value = oww_q
+    capture.get_preroll.return_value = b"preroll"
+    capture.is_silence.return_value = True
+
+    assert be.get_queue() is q
+    assert be.get_oww_queue() is oww_q
+    assert be.get_preroll() == b"preroll"
+    assert be.is_silence(b"\x00\x00") is True
+    capture.is_silence.assert_called_once_with(b"\x00\x00")
+
+
+def test_reset_delega_en_audio_capture() -> None:
+    be, capture = _backend_with_mock_capture()
+
+    be.reset()
+
+    capture.reset.assert_called_once_with()
