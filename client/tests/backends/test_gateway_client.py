@@ -952,3 +952,16 @@ def test_receive_sin_conexion_lanza_gateway_disconnected():
                 pass
 
     asyncio.run(_t())
+
+
+@pytest.mark.asyncio
+async def test_receive_token_expone_el_texto_como_content():
+    """#2: el gateway manda {"type":"token","text":...} (client-protocol §5),
+    pero _receive_loop lee data["content"] (formato antiguo): los tokens
+    llegaban vacíos a playback y al bus."""
+    client = GatewayClient(GatewayConfig(host="h", client_key="k"))
+    client._ws = _FakeWS([json.dumps({"type": "token", "turn_id": "t-1", "text": "Hola"})])
+    events = [ev async for ev in client.receive()]
+    assert events[0].type == "llm_token"
+    assert events[0].data["content"] == "Hola"
+    assert events[0].data["text"] == "Hola"

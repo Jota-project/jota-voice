@@ -532,6 +532,11 @@ class GatewayClient:
                     return
                 if event_type == "token":
                     event_type = "llm_token"
+                    # El protocolo actual manda el texto en `text`
+                    # (client-protocol.md §5); el consumidor lee `content`
+                    # (formato anterior a gateway v1.8, issue #2).
+                    if "content" not in data:
+                        data = {**data, "content": data.get("text", "")}
                 yield GatewayEvent(type=event_type, data=data)
         except websockets.exceptions.ConnectionClosed as exc:
             # Issue #118: CUALQUIER cierre (también 1000/1001, que websockets
