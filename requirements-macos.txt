@@ -1,1 +1,8 @@
+# Dependencias de escritorio (macOS), además de client/requirements.txt.
+# Las lee install/macos/03-venv.sh.
+# numpy y sounddevice NO van en client/requirements.txt: en Termux numpy
+# viene de `pkg install python-numpy` (venv con --system-site-packages) y
+# el instalador hace `pip install --upgrade`, que compilaría desde source en ARM.
+numpy>=1.26
+sounddevice>=0.4.6
 pyobjc-framework-Cocoa>=10.0
