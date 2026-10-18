@@ -1,0 +1,7 @@
+# Dependencias para correr la suite de tests (desarrollo y CI).
+#   pip install -r client/requirements-dev.txt
+# La config de pytest (timeout global, asyncio_mode) está en client/pytest.ini.
+pytest>=8.0
+# >=1.0: la suite no usa el fixture event_loop (eliminado en 1.x).
+pytest-asyncio>=1.0
+pytest-timeout>=2.0

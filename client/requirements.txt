@@ -2,6 +2,9 @@
 #   pkg install python-numpy portaudio
 # (python-numpy via pkg para evitar compilar desde source en ARM)
 # (portaudio via pkg para que pyaudio pueda compilar con pip)
+# numpy es dependencia real del cliente pero NO se declara aquí: en Termux la
+# aporta pkg y en escritorio (numpy + sounddevice) va en requirements-macos.txt
+# de la raíz. Dependencias de test: client/requirements-dev.txt.
 pyaudio>=0.2.14
 websockets>=12.0
 pyyaml>=6.0

@@ -7,16 +7,47 @@ import stat
 import tempfile
 from pathlib import Path
 
+from unittest.mock import patch
+
 from config import ControlConfig
 
+from tests.fakes.waiting import wait_until
+
 HEADER = "X-Jota-Control-Token"
+
+
+async def _start_server(cfg: ControlConfig, cancel_event: asyncio.Event):
+    """Arranca control_server.run y espera a que esté escuchando.
+
+    Issue #76: antes cada test usaba un puerto fijo (18765-18774) y dormía
+    0.05s confiando en que el servidor ya hubiera hecho bind. Con la CPU
+    cargada el connect podía llegar antes (connection refused), y dos
+    suites en paralelo (worktrees, CI) chocaban por los mismos puertos.
+    Ahora cfg.port=0 (puerto efímero) y se espía asyncio.start_server para
+    saber cuándo está escuchando y en qué puerto. Devuelve (task, port).
+    """
+    from app import control_server
+
+    started: list = []
+    real_start_server = asyncio.start_server
+
+    async def _spy(*args, **kwargs):
+        server = await real_start_server(*args, **kwargs)
+        started.append(server)
+        return server
+
+    with patch.object(asyncio, "start_server", _spy):
+        task = asyncio.create_task(control_server.run(cfg, cancel_event))
+        await wait_until(lambda: bool(started) or task.done(), message="control server escuchando")
+    assert started, f"control_server.run terminó sin escuchar: {task!r}"
+    return task, started[0].sockets[0].getsockname()[1]
 
 
 async def _send(port: int, request: bytes) -> bytes:
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
     writer.write(request)
     await writer.drain()
-    response = await asyncio.wait_for(reader.read(1024), timeout=2.0)
+    response = await asyncio.wait_for(reader.read(1024), timeout=5.0)
     writer.close()
     try:
         await writer.wait_closed()
@@ -48,13 +79,12 @@ async def _test_post_cancel_con_token_correcto_activa_evento() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         token_path = os.path.join(tmp, "token")
         cancel_event = asyncio.Event()
-        cfg = ControlConfig(port=18765, token_path=token_path)
+        cfg = ControlConfig(port=0, token_path=token_path)
 
-        server_task = asyncio.create_task(control_server.run(cfg, cancel_event))
-        await asyncio.sleep(0.05)
+        server_task, port = await _start_server(cfg, cancel_event)
         token = Path(token_path).read_text().strip()
 
-        response = await _send(18765, _cancel_request(token))
+        response = await _send(port, _cancel_request(token))
 
         assert b"200" in response, f"Esperaba 200, got: {response[:100]!r}"
         assert cancel_event.is_set(), "cancel_event debería estar activado"
@@ -72,12 +102,11 @@ async def _test_post_cancel_sin_header_rechaza_401() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         token_path = os.path.join(tmp, "token")
         cancel_event = asyncio.Event()
-        cfg = ControlConfig(port=18771, token_path=token_path)
+        cfg = ControlConfig(port=0, token_path=token_path)
 
-        server_task = asyncio.create_task(control_server.run(cfg, cancel_event))
-        await asyncio.sleep(0.05)
+        server_task, port = await _start_server(cfg, cancel_event)
 
-        response = await _send(18771, _cancel_request(None))
+        response = await _send(port, _cancel_request(None))
 
         assert b"401" in response, f"Esperaba 401, got: {response[:100]!r}"
         assert not cancel_event.is_set(), "cancel_event NO debería activarse sin header"
@@ -95,14 +124,13 @@ async def _test_post_cancel_con_token_incorrecto_rechaza_401() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         token_path = os.path.join(tmp, "token")
         cancel_event = asyncio.Event()
-        cfg = ControlConfig(port=18772, token_path=token_path)
+        cfg = ControlConfig(port=0, token_path=token_path)
 
-        server_task = asyncio.create_task(control_server.run(cfg, cancel_event))
-        await asyncio.sleep(0.05)
+        server_task, port = await _start_server(cfg, cancel_event)
         # Aseguramos que el token real ya existe, pero mandamos otro distinto
         Path(token_path).read_text()
 
-        response = await _send(18772, _cancel_request("token-equivocado"))
+        response = await _send(port, _cancel_request("token-equivocado"))
 
         assert b"401" in response, f"Esperaba 401, got: {response[:100]!r}"
         assert not cancel_event.is_set(), "cancel_event NO debería activarse con token incorrecto"
@@ -123,10 +151,9 @@ async def _test_post_cancel_con_header_no_ascii_rechaza_401() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         token_path = os.path.join(tmp, "token")
         cancel_event = asyncio.Event()
-        cfg = ControlConfig(port=18773, token_path=token_path)
+        cfg = ControlConfig(port=0, token_path=token_path)
 
-        server_task = asyncio.create_task(control_server.run(cfg, cancel_event))
-        await asyncio.sleep(0.05)
+        server_task, port = await _start_server(cfg, cancel_event)
 
         request = (
             b"POST /cancel HTTP/1.1\r\n"
@@ -135,7 +162,7 @@ async def _test_post_cancel_con_header_no_ascii_rechaza_401() -> None:
             b"Content-Length: 0\r\n"
             b"\r\n"
         )
-        response = await _send(18773, request)
+        response = await _send(port, request)
 
         assert b"401" in response, f"Esperaba 401, got: {response[:100]!r}"
         assert not cancel_event.is_set()
@@ -174,13 +201,12 @@ async def _test_endpoint_desconocido_con_token_correcto_retorna_404() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         token_path = os.path.join(tmp, "token")
         cancel_event = asyncio.Event()
-        cfg = ControlConfig(port=18766, token_path=token_path)
+        cfg = ControlConfig(port=0, token_path=token_path)
 
-        server_task = asyncio.create_task(control_server.run(cfg, cancel_event))
-        await asyncio.sleep(0.05)
+        server_task, port = await _start_server(cfg, cancel_event)
         token = Path(token_path).read_text().strip()
 
-        response = await _send(18766, _unknown_request(token))
+        response = await _send(port, _unknown_request(token))
 
         assert b"404" in response, f"Esperaba 404, got: {response[:100]!r}"
         assert not cancel_event.is_set(), "cancel_event NO debería activarse"
@@ -197,13 +223,15 @@ async def _test_puerto_ocupado_no_crashea() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         token_path = os.path.join(tmp, "token")
-        # Ocupar el puerto manualmente
-        blocker = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 18767)
+        # Ocupar un puerto libre cualquiera (no uno fijo: otra suite en
+        # paralelo podría tenerlo ya) y pedir al servidor ese mismo.
+        blocker = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+        busy_port = blocker.sockets[0].getsockname()[1]
         cancel_event = asyncio.Event()
-        cfg = ControlConfig(port=18767, token_path=token_path)
+        cfg = ControlConfig(port=busy_port, token_path=token_path)
 
         # Debe retornar sin excepción
-        await asyncio.wait_for(control_server.run(cfg, cancel_event), timeout=2.0)
+        await asyncio.wait_for(control_server.run(cfg, cancel_event), timeout=5.0)
 
         blocker.close()
         await blocker.wait_closed()
@@ -216,17 +244,16 @@ async def _test_rate_limit_devuelve_429_tras_exceder_limite() -> None:
         token_path = os.path.join(tmp, "token")
         cancel_event = asyncio.Event()
         cfg = ControlConfig(
-            port=18768,
+            port=0,
             token_path=token_path,
             rate_limit_max_requests=2,
             rate_limit_window_s=10.0,
         )
 
-        server_task = asyncio.create_task(control_server.run(cfg, cancel_event))
-        await asyncio.sleep(0.05)
+        server_task, port = await _start_server(cfg, cancel_event)
         token = Path(token_path).read_text().strip()
 
-        responses = [await _send(18768, _cancel_request(token)) for _ in range(3)]
+        responses = [await _send(port, _cancel_request(token)) for _ in range(3)]
 
         assert b"200" in responses[0], f"1ª petición esperaba 200, got: {responses[0][:100]!r}"
         assert b"200" in responses[1], f"2ª petición esperaba 200, got: {responses[1][:100]!r}"
@@ -245,10 +272,9 @@ async def _test_token_se_autogenera_con_permisos_600() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         token_path = os.path.join(tmp, "control_token")
         cancel_event = asyncio.Event()
-        cfg = ControlConfig(port=18769, token_path=token_path)
+        cfg = ControlConfig(port=0, token_path=token_path)
 
-        server_task = asyncio.create_task(control_server.run(cfg, cancel_event))
-        await asyncio.sleep(0.05)
+        server_task, port = await _start_server(cfg, cancel_event)
 
         assert os.path.isfile(token_path), "El fichero de token debería haberse autogenerado"
         mode = stat.S_IMODE(os.stat(token_path).st_mode)
@@ -271,12 +297,11 @@ async def _test_token_existente_se_reutiliza_tal_cual() -> None:
         Path(token_path).write_text("token-fijo-de-prueba")
         os.chmod(token_path, 0o600)
         cancel_event = asyncio.Event()
-        cfg = ControlConfig(port=18770, token_path=token_path)
+        cfg = ControlConfig(port=0, token_path=token_path)
 
-        server_task = asyncio.create_task(control_server.run(cfg, cancel_event))
-        await asyncio.sleep(0.05)
+        server_task, port = await _start_server(cfg, cancel_event)
 
-        response = await _send(18770, _cancel_request("token-fijo-de-prueba"))
+        response = await _send(port, _cancel_request("token-fijo-de-prueba"))
 
         assert b"200" in response, f"Esperaba 200, got: {response[:100]!r}"
         assert cancel_event.is_set()
@@ -380,13 +405,12 @@ async def _test_control_server_con_token_vacio_rechaza_peticiones() -> None:
         token_path.write_text("")  # bypass latente
         os.chmod(token_path, 0o600)
         cancel_event = asyncio.Event()
-        cfg = ControlConfig(port=18774, token_path=token_path)
+        cfg = ControlConfig(port=0, token_path=token_path)
 
-        server_task = asyncio.create_task(control_server.run(cfg, cancel_event))
-        await asyncio.sleep(0.05)
+        server_task, port = await _start_server(cfg, cancel_event)
 
         # Petición sin token: debe ser 401, no 200
-        response = await _send(18774, _cancel_request(None))
+        response = await _send(port, _cancel_request(None))
         assert b"401" in response, (
             f"Bypass de auth: con token vacío, petición sin token devuelve "
             f"{response[:100]!r} en vez de 401"
@@ -396,7 +420,7 @@ async def _test_control_server_con_token_vacio_rechaza_peticiones() -> None:
         )
 
         # Petición con token vacío explícito: también 401
-        response_empty = await _send(18774, _cancel_request(""))
+        response_empty = await _send(port, _cancel_request(""))
         assert b"401" in response_empty, (
             f"Bypass de auth: token vacío explícito devuelve "
             f"{response_empty[:100]!r} en vez de 401"
@@ -405,7 +429,7 @@ async def _test_control_server_con_token_vacio_rechaza_peticiones() -> None:
         # El token nuevo en disco SÍ funciona (control server lo regeneró)
         new_token = token_path.read_text().strip()
         assert new_token, "El servidor debió regenerar el token"
-        response_ok = await _send(18774, _cancel_request(new_token))
+        response_ok = await _send(port, _cancel_request(new_token))
         assert b"200" in response_ok, (
             f"Con el token regenerado, la petición con ese token debe pasar: "
             f"{response_ok[:100]!r}"
