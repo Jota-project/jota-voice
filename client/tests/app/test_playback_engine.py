@@ -18,6 +18,7 @@ from backends.audio_base import AudioBackend
 
 from domain.event_bus import EventBus, VoiceEvent
 from app.playback_engine import PlaybackEngine
+from tests.fakes.waiting import wait_until
 
 
 
@@ -175,3 +176,66 @@ class TestPlayChunk(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("Primer", e.data["chunk_text"])
             self.assertNotIn("Primer", e.data["cumulative_text"])
         self.assertEqual(self._display(captured)[0].data["cumulative_text"], "Nuevo")
+
+
+class TestResetConcurrente(unittest.IsolatedAsyncioTestCase):
+    """Issue #89: reset() es síncrono (lo llama state_machine sin await) y no
+    puede tomar el asyncio.Lock de play_chunk/play_notification/drain. Lo que
+    estuviera esperando ese lock cuando llega un reset() pertenece al turno
+    anterior y no debe llegar al backend."""
+
+    async def _blocked_engine(self):
+        engine, _, _ = _make_engine()
+        release = asyncio.Event()
+        played: list[bytes] = []
+
+        async def _play(audio: bytes) -> None:
+            played.append(audio)
+            await release.wait()
+
+        engine._audio.play_chunk.side_effect = _play
+        return engine, release, played
+
+    async def test_chunk_en_espera_se_descarta_tras_reset(self) -> None:
+        engine, release, played = await self._blocked_engine()
+        first, second = b"\x01\x00" * 10, b"\x02\x00" * 10
+        t1 = asyncio.create_task(engine.play_chunk(first))
+        await wait_until(lambda: played == [first])
+        t2 = asyncio.create_task(engine.play_chunk(second))
+        await wait_until(lambda: engine._play_lock._waiters)  # t2 espera el lock
+
+        engine.reset()
+        release.set()
+        await asyncio.gather(t1, t2)
+
+        self.assertEqual(played, [first], "audio del turno anterior sonó tras reset()")
+        engine._audio.reset.assert_called_once_with()
+
+    async def test_notificacion_en_espera_se_descarta_tras_reset(self) -> None:
+        engine, release, played = await self._blocked_engine()
+        t1 = asyncio.create_task(engine.play_chunk(b"\x01\x00"))
+        await wait_until(lambda: len(played) == 1)
+        t2 = asyncio.create_task(engine.play_notification())
+        await wait_until(lambda: engine._play_lock._waiters)
+
+        engine.reset()
+        release.set()
+        await asyncio.gather(t1, t2)
+
+        engine._audio.play_notification.assert_not_called()
+
+    async def test_chunk_posterior_al_reset_si_suena(self) -> None:
+        """El primer chunk del turno nuevo (pedido después del reset) no se
+        pierde aunque el lock siga ocupado por el turno anterior."""
+        engine, release, played = await self._blocked_engine()
+        old, new = b"\x01\x00", b"\x02\x00"
+        t1 = asyncio.create_task(engine.play_chunk(old))
+        await wait_until(lambda: played == [old])
+
+        engine.reset()
+        t2 = asyncio.create_task(engine.play_chunk(new))
+        await wait_until(lambda: engine._play_lock._waiters)
+        release.set()
+        await asyncio.gather(t1, t2)
+
+        self.assertEqual(played, [old, new])

@@ -25,6 +25,13 @@ class PlaybackEngine:
         self._text_buffer: list[str] = []
         self._text_cursor = 0
         self._play_lock = asyncio.Lock()
+        # Época de reproducción (issue #89). reset() tiene que ser síncrono
+        # (state_machine lo llama sin await), así que no puede tomar
+        # _play_lock. En su lugar incrementa la época: lo que estuviera
+        # esperando el lock con una época anterior es del turno cancelado y
+        # se descarta al entrar, sin depender de que el llamador haya
+        # cancelado y esperado antes las tareas de reproducción.
+        self._epoch = 0
 
     def push_token(self, content: str) -> None:
         if content:
@@ -49,11 +56,19 @@ class PlaybackEngine:
             "duration_s": audio_duration,
         }))
 
+        epoch = self._epoch
         async with self._play_lock:
+            if epoch != self._epoch:
+                log.debug("PlaybackEngine: chunk descartado (reset mientras esperaba)")
+                return
             await self._audio.play_chunk(audio)
 
     async def play_notification(self) -> None:
+        epoch = self._epoch
         async with self._play_lock:
+            if epoch != self._epoch:
+                log.debug("PlaybackEngine: notificación descartada (reset mientras esperaba)")
+                return
             await self._audio.play_notification()
 
     async def drain(self) -> None:
@@ -61,6 +76,11 @@ class PlaybackEngine:
             await self._audio.drain()
 
     def reset(self) -> None:
+        # El backend se limpia con su propio lock de hilo (SounddeviceBackend,
+        # issue #88); el chunk que esté sonando ahora termina su espera sobre
+        # una cola ya vacía. TermuxBackend solo toca su carry desde el loop y
+        # sin await entre lectura y escritura, así que no necesita más.
+        self._epoch += 1
         self._text_buffer.clear()
         self._text_cursor = 0
         self._audio.reset()
