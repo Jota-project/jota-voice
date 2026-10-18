@@ -265,6 +265,10 @@ async def _recording(
             try:
                 await gateway.ensure_connected()
             except GatewayHandshakeError as exc:
+                if exc.fatal:
+                    # El turno lo publica (vía _log_error): que el supervisor
+                    # de la próxima IDLE no lo repita.
+                    gateway.reported_fatal = exc
                 raise _GatewayError(
                     code="GATEWAY_HANDSHAKE_REJECTED",
                     message=str(exc),

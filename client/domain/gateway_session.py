@@ -156,7 +156,6 @@ async def idle_supervisor(
     backoff = list(cfg.reconnect_backoff_s) or [1.0]
     attempt = 0
     failures = 0  # fallos de conexión seguidos (para avisar solo del primero)
-    reported_fatal: GatewayHandshakeError | None = None
     loop = asyncio.get_running_loop()
     listen_started = loop.time()
     while True:
@@ -189,8 +188,8 @@ async def idle_supervisor(
             # Rechazo/cierre fatal (1008 de auth o política, HTTP 401/403):
             # no reintentar en bucle. Se publica una vez y se espera; el
             # próximo turno lo reintentará (visible).
-            if fatal is not reported_fatal:
-                reported_fatal = fatal
+            if fatal is not gateway.reported_fatal:
+                gateway.reported_fatal = fatal
                 log.error("Gateway: rechazo fatal, sin reintentos automáticos: %s", fatal)
                 bus.publish(handshake_error_event(fatal))
             await asyncio.Event().wait()
@@ -224,7 +223,7 @@ async def idle_supervisor(
                     "fatal": False,
                 }))
             continue
-        reported_fatal = None
+        gateway.reported_fatal = None
         failures = 0
         listen_started = loop.time()
         log.info("Gateway: sesión reabierta (session=%s)", gateway._session_id)

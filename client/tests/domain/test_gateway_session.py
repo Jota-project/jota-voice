@@ -43,6 +43,7 @@ class FakeGateway:
         self.max_readers = 0
         self.last_close: GatewayDisconnected | None = None
         self.fatal_error: GatewayHandshakeError | None = None
+        self.reported_fatal: GatewayHandshakeError | None = None
         self.keepalives = 0
         self.sent: list = []
         self._since_send = 0.0
@@ -720,3 +721,45 @@ async def test_recording_no_recorta_el_plazo_del_cliente():
     cfg = _cfg(connect_timeout_s=0.1)
     await _recording("ok", EventBus(), _audio_with_frames(0), gw, _playback(), cfg, asyncio.Event())
     assert gw.connect_calls == 1 and ("end",) in gw.sent
+
+
+
+@pytest.mark.asyncio
+async def test_tras_un_fatal_un_solo_error_por_turno(monkeypatch):
+    """Revisión Fase R, punto 6: reported_fatal era local a cada supervisor:
+    tras un 1008 salían dos errores por turno (el del turno y el del
+    supervisor de la siguiente IDLE). Con GatewayClient real."""
+    from backends import gateway_client as gc
+    from domain.state_machine import run as sm_run
+    from websockets.exceptions import InvalidStatus
+
+    async def _fake_connect(*a, **kw):
+        raise InvalidStatus(MagicMock(status_code=403))
+
+    monkeypatch.setattr(gc.websockets, "connect", _fake_connect)
+    cfg = _cfg()
+    bus = EventBus()
+    gw = gc.GatewayClient(cfg.gateway, bus=bus)
+    got_task = asyncio.create_task(_collect_until(bus, lambda e, _: False, 1.2))
+    await asyncio.sleep(0)
+    sm = asyncio.create_task(sm_run(
+        cfg, bus, _audio_with_frames(), gw, _playback(),
+        idle_background=lambda: gateway_session.idle_supervisor(cfg.gateway, bus, gw),
+    ))
+    await asyncio.sleep(0.2)   # IDLE: el supervisor intenta, falla fatal → 1 error
+    for _ in range(2):         # dos turnos: cada uno reintenta y falla → 1 error cada uno
+        bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok"}))
+        await asyncio.sleep(0.3)
+    got = await got_task
+    sm.cancel()
+    await asyncio.wait([sm])
+    errs = [e for e in got if e.type == "error"]
+    assert len(errs) == 3, [e.data for e in errs]
+
+
+def test_cierre_1008_agent_not_available_no_es_fatal():
+    """Coherencia: agent_not_available es transitorio (se reintenta), así que
+    el cierre tampoco se publica como fatal."""
+    exc = GatewayDisconnected(1008, "Agent 'main' not available.")
+    assert exc.fatal is False
+    assert GatewayDisconnected(1008, "Clave de cliente invalida o inactiva").fatal is True

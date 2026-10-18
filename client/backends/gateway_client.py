@@ -63,16 +63,20 @@ def close_code_label(code: int | None) -> str:
     }.get(code or CLOSE_ABNORMAL, f"código {code}")
 
 
-def close_is_fatal(code: int | None) -> bool:
-    """1008 es el único cierre que NO se reintenta en segundo plano.
+def close_is_fatal(code: int | None, reason: str = "") -> bool:
+    """Solo un 1008 de auth/política NO se reintenta en segundo plano.
 
     El gateway lo usa para rechazos de autenticación y de política de
     agente (client-protocol.md §1): reintentar en bucle no lo arregla y
     solo llena logs. Todo lo demás (1000 inactividad, 1001/1012 reinicio,
     1011 error interno, 1013 cliente lento, 1006 corte) es recuperable
-    abriendo una sesión nueva (§13).
+    abriendo una sesión nueva (§13). Dentro de 1008, ``agent_not_available``
+    es transitorio (roster vacío durante un reconnect del gateway, #107) y
+    se trata como recuperable, igual que en el handshake.
     """
-    return code == 1008
+    if code != 1008:
+        return False
+    return classify_handshake_close(code, reason) in _FATAL_HANDSHAKE_KINDS
 
 
 class GatewayDisconnected(ConnectionError):
@@ -87,7 +91,7 @@ class GatewayDisconnected(ConnectionError):
     def __init__(self, code: int | None, reason: str = "") -> None:
         self.code = code if code is not None else CLOSE_ABNORMAL
         self.reason = reason or ""
-        self.fatal = close_is_fatal(self.code)
+        self.fatal = close_is_fatal(self.code, self.reason)
         detail = f": {self.reason}" if self.reason else ""
         super().__init__(
             f"conexión con el gateway cerrada ({self.code}, "
@@ -227,6 +231,10 @@ class GatewayClient:
         # reconexión en segundo plano se detiene (solo reintenta un turno
         # pedido por el usuario). Se limpia con un connect() correcto.
         self.fatal_error: GatewayHandshakeError | None = None
+        # Último rechazo fatal ya publicado en el bus. Compartido entre el
+        # supervisor de IDLE (cada IDLE crea uno nuevo) y el turno, para no
+        # avisar dos veces del mismo rechazo (revisión Fase R).
+        self.reported_fatal: GatewayHandshakeError | None = None
         self._last_send_at: float = time.monotonic()
         self._connect_lock = asyncio.Lock()
         # device_id se mantiene por compat con voice_client.main; se ignora
