@@ -141,6 +141,10 @@ display:
 
 logging:
   level: "INFO"
+
+menubar:
+  # "Abrir logs": el logging del cliente va a stderr (LaunchAgent → stderr.log).
+  log_path: "${HOME}/Library/Logs/jota-voice/stderr.log"
 EOF
 chmod 600 "$CFG"
 _ok "Creado $CFG (chmod 600)"

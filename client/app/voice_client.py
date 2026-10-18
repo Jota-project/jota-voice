@@ -109,6 +109,13 @@ def _call_soon_threadsafe_safe(loop: asyncio.AbstractEventLoop, stop_event: asyn
         )
 
 
+# Fichero que abre "Abrir logs" si menubar.log_path no lo fija. El logging
+# (logging.basicConfig) escribe en stderr, y el LaunchAgent lo redirige a
+# StandardErrorPath = ~/Library/Logs/jota-voice/stderr.log
+# (install/macos/launchd-plist.sh); stdout.log queda casi vacío.
+DEFAULT_LOG_PATH = "~/Library/Logs/jota-voice/stderr.log"
+
+
 def _setup_logging(level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
@@ -280,9 +287,7 @@ async def main(
 
     def _open_logs() -> None:
         import platform
-        path = cfg.menubar.log_path or os.path.expanduser(
-            "~/Library/Logs/jota-voice/stdout.log"
-        )
+        path = cfg.menubar.log_path or os.path.expanduser(DEFAULT_LOG_PATH)
         try:
             if platform.system() == "Darwin":
                 subprocess.Popen(["open", "-a", "Console", path])

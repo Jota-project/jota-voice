@@ -49,3 +49,17 @@ def test_websockets_logger_is_info_after_setup_logging_warning() -> None:
     dejaría el bug vivo si alguien pone DEBUG programáticamente)."""
     _setup_logging("WARNING")
     assert logging.getLogger("websockets").level == logging.INFO
+
+def test_abrir_logs_apunta_al_fichero_donde_va_el_logging() -> None:
+    """"Abrir logs" abre DEFAULT_LOG_PATH: debe ser el StandardErrorPath del
+    LaunchAgent, porque basicConfig escribe en stderr (antes abría
+    stdout.log, que queda casi vacío)."""
+    from pathlib import Path
+
+    from app.voice_client import DEFAULT_LOG_PATH
+
+    assert DEFAULT_LOG_PATH.endswith("/stderr.log")
+    plist_gen = Path(__file__).resolve().parents[3] / "install/macos/launchd-plist.sh"
+    text = plist_gen.read_text()
+    assert "<key>StandardErrorPath</key><string>$4/stderr.log</string>" in text
+    assert DEFAULT_LOG_PATH == "~/Library/Logs/jota-voice/stderr.log"

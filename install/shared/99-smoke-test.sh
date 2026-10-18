@@ -165,8 +165,11 @@ if [ -z "$GW_URL" ] && { [ -z "$GW_HOST" ] || [ -z "$GW_PORT" ]; }; then
 fi
 
 # Logs en macOS están en ~/Library/Logs/jota-voice/
-# En Termux aún no tenemos logging unificado, así que fallback a stdout.log
-if [ -f "$HOME/Library/Logs/jota-voice/stdout.log" ]; then
+# El logging del cliente va a stderr: en macOS el LaunchAgent lo deja en
+# stderr.log (stdout.log queda casi vacío).
+if [ -f "$HOME/Library/Logs/jota-voice/stderr.log" ]; then
+    LOGFILE="$HOME/Library/Logs/jota-voice/stderr.log"
+elif [ -f "$HOME/Library/Logs/jota-voice/stdout.log" ]; then
     LOGFILE="$HOME/Library/Logs/jota-voice/stdout.log"
 elif [ -f "$HOME/.local/share/jota-voice/stdout.log" ]; then
     LOGFILE="$HOME/.local/share/jota-voice/stdout.log"
@@ -331,7 +334,7 @@ if [ "$PASSED" -eq "$TOTAL" ]; then
     echo ""
     echo "  Siguiente paso (MANUAL):"
     echo "    Di \"Ok jota\" cerca del Mac y observa el log:"
-    echo "      tail -f ~/Library/Logs/jota-voice/stdout.log | grep --line-buffered 'wake\\|RESPONDING\\|transcription'"
+    echo "      tail -f ~/Library/Logs/jota-voice/stderr.log | grep --line-buffered 'wake\\|RESPONDING\\|transcription'"
     echo ""
     echo "  Si wake-word no dispara, prueba:"
     echo "    launchctl bootout gui/\$(id -u)/com.jota.voice"
