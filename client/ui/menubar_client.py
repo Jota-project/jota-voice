@@ -63,6 +63,7 @@ _GATEWAY_TEXTS = {
     "reconnecting": "Gateway: reconectando…",
     "disconnected": "Gateway: desconectado",
 }
+_ORDERLY_CLOSE_CODES = (1000, 1001)
 # kind de GatewayHandshakeError (backends.gateway_client.classify_handshake_close).
 _HANDSHAKE_TEXTS = {
     "invalid_client_key": "Gateway: client_key inválida",
@@ -220,7 +221,7 @@ class MenubarClient:
             service = data.get("service")
             state = data.get("state")
             if service == "gateway":
-                self._on_session_status(state)
+                self._on_session_status(state, data.get("code"))
             elif service in _SERVICE_LABELS:
                 self._on_service_status(service, state)
         elif event.type == "gateway_ready":
@@ -241,16 +242,23 @@ class MenubarClient:
         if self._health != before:
             self._push_health()
 
-    def _on_session_status(self, state) -> None:
+    def _on_session_status(self, state, close_code) -> None:
         if state == "connected":
             self._health.pop("gateway", None)
             self._health.pop("fatal", None)
-        elif state in _GATEWAY_TEXTS:
+            return
+        if state == "disconnected":
+            # Los status de servicios eran de la sesión que acaba de caer.
+            for service in _SERVICE_LABELS:
+                self._health.pop(service, None)
+            if close_code in _ORDERLY_CLOSE_CODES:
+                # Cierre ordenado (inactividad): el supervisor reabre al
+                # instante sin "reconnecting". Si no lo consigue, llegarán
+                # reconnecting o un error; avisar aquí solo haría parpadear
+                # el icono.
+                return
+        if state in _GATEWAY_TEXTS:
             self._health["gateway"] = (HEALTH_WARN, _GATEWAY_TEXTS[state])
-            if state == "disconnected":
-                # Los status de servicios eran de la sesión que acaba de caer.
-                for service in _SERVICE_LABELS:
-                    self._health.pop(service, None)
 
     def _on_service_status(self, service: str, state) -> None:
         if state == "restored":

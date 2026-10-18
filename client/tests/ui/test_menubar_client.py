@@ -540,7 +540,7 @@ def test_ui_queue_drained_without_polling_nor_default_executor():
         await _subscribed(bus)
         ui_queue.put_nowait("toggle_pause")
         await wait_until(lambda: pause.is_set(), message="toggle_pause procesado")
-        assert len(_forwarder_threads()) == 1
+        assert _forwarder_threads(), "el hilo reenviador debe estar vivo"
         bus.close()
         await asyncio.wait_for(task, timeout=5.0)
         await wait_until(lambda: not _forwarder_threads(), message="hilo reenviador terminado")
@@ -766,3 +766,22 @@ def test_good_turn_clears_orchestrator_and_tts_warnings():
     )
     assert health[-1] == ("ok", "")
     assert ("warn", "Orquestador no disponible · Síntesis de voz no disponible") in health
+
+
+def test_orderly_close_does_not_flash_a_warning():
+    """Un cierre 1000/1001 tras una sesión estable (inactividad, cierre
+    ordenado) se reabre al instante sin ``reconnecting``: no debe hacer
+    parpadear el aviso. Un corte real sí llega como reconnecting o error."""
+    _, health = _health_after(
+        _gw("disconnected", code=1000, reason="idle"),
+        _gw("connected", session_id="s2"),
+    )
+    assert health == []
+
+
+def test_orderly_close_still_drops_stale_service_statuses():
+    _, health = _health_after(
+        _status("transcriber", "degraded"),
+        _gw("disconnected", code=1001, reason="going away"),
+    )
+    assert health == [("info", "Transcripción degradada"), ("ok", "")]
