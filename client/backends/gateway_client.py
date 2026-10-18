@@ -3,13 +3,12 @@ import json
 import logging
 import os
 import time
-import warnings
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
-    from domain.event_bus import EventBus
+    from domain.event_bus import EventBus, EventType
 
 import websockets
 import websockets.exceptions
@@ -49,6 +48,14 @@ class GatewayEvent:
 # perdida (keepalive ping sin pong).
 CLOSE_ABNORMAL = 1006
 
+# Tope de tamaño de un mensaje entrante (issue #113). El default de
+# websockets (1 MiB) cortaba frames TTS legítimos con 1009, y max_size=None
+# (sin límite) dejaba que un gateway comprometido o con un bug agotara la RAM
+# con un único frame. 16 MiB son ~5,8 min de PCM16 24 kHz mono en un solo
+# frame: muy por encima de cualquier chunk TTS real. Si se supera, la
+# librería cierra con 1009 y se trata como un corte recuperable.
+MAX_MESSAGE_BYTES = 16 * 1024 * 1024
+
 
 def close_code_label(code: int | None) -> str:
     """Etiqueta legible del código de cierre, para logs y para la UI."""
@@ -57,6 +64,7 @@ def close_code_label(code: int | None) -> str:
         1001: "el gateway se está apagando",
         1006: "conexión perdida sin close frame (red o keepalive)",
         1008: "rechazo de política (auth o agente)",
+        1009: "mensaje demasiado grande (supera MAX_MESSAGE_BYTES)",
         1011: "error interno del gateway",
         1012: "el gateway se está reiniciando",
         1013: "cliente demasiado lento",
@@ -211,8 +219,11 @@ class GatewayClient:
         cfg: GatewayConfig,
         *,
         bus: Optional["EventBus"] = None,
-        device_id: str | None = None,
     ) -> None:
+        # Sin device_id (issue #83): el handshake documentado en
+        # jota-gateway/docs/client-protocol.md §1 solo admite client_key,
+        # input_mode, output_mode y agent; la identidad del device la da la
+        # client_key. El parámetro estuvo deprecado e ignorado desde #24.
         self._cfg = cfg
         self._bus = bus
         # Atributos poblados tras handshake exitoso (issue #24).
@@ -237,21 +248,6 @@ class GatewayClient:
         self.reported_fatal: GatewayHandshakeError | None = None
         self._last_send_at: float = time.monotonic()
         self._connect_lock = asyncio.Lock()
-        # device_id se mantiene por compat con voice_client.main; se ignora
-        # porque el handshake del gateway no lo contempla (ver
-        # jota-gateway/docs/client-protocol.md §1). Remoción total en una
-        # versión futura cuando todos los call sites estén actualizados.
-        if device_id is not None:
-            warnings.warn(
-                "GatewayClient: device_id se ignora y se eliminará en una "
-                "versión futura (issue #24). El handshake del gateway no "
-                "lo contempla.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            self._legacy_device_id: str | None = device_id
-        else:
-            self._legacy_device_id = None
 
     # ------------------------------------------------------------------
     # Estado de la sesión
@@ -302,10 +298,9 @@ class GatewayClient:
         ping_timeout = self._cfg.ping_timeout_s or None
         return dict(
             additional_headers=_cloudflare_access_headers() or None,
-            # max_size=None desactiva el límite de 1 MiB del default de
-            # websockets: un tts_chunk grande dispararía 1009 (payload too
-            # big). El framing binario TTS no acota tamaño por chunk.
-            max_size=None,
+            # Tope explícito (ver MAX_MESSAGE_BYTES): el default de 1 MiB
+            # cortaba tts_chunk grandes con 1009 y None no acotaba nada.
+            max_size=MAX_MESSAGE_BYTES,
             # Issue #118: max_queue=None hace que la librería vacíe el socket
             # siempre, aunque la app lea al ritmo de reproducción (el
             # _receive_loop espera a play_chunk) o no lea (RECORDING). Con el
@@ -441,9 +436,12 @@ class GatewayClient:
                 self._publish("gateway_status", msg)
                 continue
             if msg_type == "error":
-                err = GatewayHandshakeError(
-                    "error_message", None, str(msg.get("message", msg))
-                )
+                # El `code` del gateway (AUTH_FAILED…) va en el reason: el
+                # atributo .code es el close code WS (issue #113).
+                reason = str(msg.get("message", msg))
+                if msg.get("code"):
+                    reason = f"{msg['code']}: {reason}"
+                err = GatewayHandshakeError("error_message", None, reason)
                 if msg.get("fatal") is True:
                     err.fatal = True
                 raise err
@@ -471,7 +469,7 @@ class GatewayClient:
             "capabilities": self._capabilities,
         })
 
-    def _publish(self, type_: str, data: dict) -> None:
+    def _publish(self, type_: "EventType", data: dict) -> None:
         if self._bus is None:
             return
         from domain.event_bus import VoiceEvent
@@ -502,6 +500,18 @@ class GatewayClient:
         self._last_send_at = time.monotonic()
 
     async def send_audio(self, float32_bytes: bytes) -> None:
+        """Envía un frame de micrófono tal cual: PCM Float32 LE, 16 kHz, mono.
+
+        Asimetría deliberada con la bajada (issue #84): el TTS llega como
+        ``[0xA1][turn_seq uint16 BE][PCM16 24 kHz]`` (client-protocol.md §6)
+        y la subida va SIN cabecera ni turn_seq (§3 "Header: ninguno", §12
+        "bytes PCM Float32 16 kHz sin header"). Es lo que exige el gateway:
+        una cabecera se interpretaría como muestras de audio. Tampoco hace
+        falta correlación de turno en la subida, ni con sesión persistente:
+        el audio del micrófono existe antes de que haya turno (el gateway
+        asigna turn_seq en turn_start, tras ``send``) y el barge-in se
+        resuelve con ``interrupted`` y el turn_seq de la bajada (§7).
+        """
         await self._send(float32_bytes)
 
     async def send_end(self) -> None:

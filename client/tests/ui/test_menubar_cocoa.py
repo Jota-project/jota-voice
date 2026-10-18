@@ -212,6 +212,23 @@ def test_health_item_shows_discreet_info(backend):
     assert backend.status_item.button().toolTip() == "jota-voice"
 
 
+def test_agent_item_shows_active_agent(backend):
+    """Issue #111: el agente activo de la sesión (ready.agent) se ve en el
+    menú como línea informativa; oculta hasta el primer ready."""
+    backend.set_commands(_noop_commands())
+    backend.tick_(None)
+    item = backend._agent_item
+    assert item.isHidden()
+    assert backend._menu.indexOfItem_(item) == 2  # bajo el aviso de salud
+    assert not item.isEnabled()
+
+    backend.set_agent("jarvis")
+    backend.tick_(None)
+    assert not item.isHidden()
+    assert item.title() == "Agente: jarvis"
+    assert not item.isEnabled()  # informativa, no clicable
+
+
 def test_health_item_disabled_until_commands(backend):
     backend.set_health("warn", "Gateway: reconectando…")
     backend.tick_(None)

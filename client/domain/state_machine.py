@@ -12,25 +12,41 @@ OWW corre como task background persistente (ver oww_client.run_forever):
 - RECORDING/RESPONDING monitorizan el bus y cancelan el turn actual si llega
   otro wake_word (wake word interrumpe TTS, estilo Alexa/Google)
 
-Publica en EventBus en cada transición y en cada evento relevante.
+Eventos que publica en el EventBus (issue #94: antes decía "en cada
+transición", pero ``state_changed`` solo se publica para IDLE):
+
+- IDLE: ``state_changed`` con ``{"state": "idle"}`` al entrar.
+- RECORDING: ``wake_word_detected`` y ``recording_started`` al entrar,
+  ``recording_ended`` al salir.
+- RESPONDING: se infiere de ``transcription``/``turn_start``/``llm_token``/
+  ``playback_started``; termina con ``playback_ended`` (éxito),
+  ``cancelled`` o ``error``.
+
+No hay ``state_changed`` para RECORDING/RESPONDING a propósito: los
+consumidores (MenubarClient, DisplayClient) derivan el estado visual de los
+eventos de dominio y MenubarClient pasaría cualquier otro valor de
+``state_changed`` tal cual a ``set_state``, que solo entiende sus propios
+estados (listening/thinking/speaking...).
 Toda transición de error publica VoiceEvent(type="error") antes de volver a IDLE.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 
 from app.playback_engine import PlaybackEngine
 from backends.audio_base import AudioBackend
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 from backends.gateway_client import (
     GatewayClient,
     GatewayDisconnected,
     GatewayHandshakeError,
 )
-from config import Config
+from config import Config, GatewayConfig
 from core.aio import cancel_and_wait
 
 from .event_bus import EventBus, VoiceEvent
@@ -42,14 +58,69 @@ log = logging.getLogger(__name__)
 # State helpers
 # ---------------------------------------------------------------------------
 
-# Margen tras el turn_end de NUESTRO turno para el audio TTS que aún está en
-# tránsito (client-protocol.md §5: "El audio TTS puede seguir llegando
-# brevemente después").
-TURN_END_GRACE_S = 2.0
+# Los plazos de RESPONDING viven en GatewayConfig (issue #65):
+# turn_end_grace_s, response_start_timeout_s y turn_inactivity_timeout_s.
+
+
+class _ResponseDeadline:
+    """Plazo de INACTIVIDAD de RESPONDING (issue #65).
+
+    Antes era un tope total (``wait_for(_receive_loop(), 30)``): cualquier
+    respuesta de más de 30 s se cortaba aunque siguiera llegando audio, y sin
+    avisar al gateway. Ahora, como el TURN_TIMEOUT_S del gateway
+    (client-protocol §13, "idle-reset"), el reloj se reinicia con cada señal
+    de progreso de NUESTRO turno. Dos fases:
+
+    - Hasta que empieza nuestro turno (transcripción, turn_start):
+      ``response_start_timeout_s``. El gateway no acota esta espera (si el
+      transcriptor no entrega nada, p. ej. una falsa wake word sin voz,
+      nadie avisaría), así que aquí manda el cliente.
+    - Con nuestro turno en marcha: ``turn_inactivity_timeout_s`` (600 s por
+      defecto, 0 = desactivado). Aquí manda el TURN_TIMEOUT_S del gateway
+      (120 s idle-reset), que también se reinicia con los eventos de
+      herramienta del orquestador; el cliente NO los ve (no pedimos
+      tool_calls_enabled), así que un plazo propio cercano a 120 s cortaría
+      turnos sanos con varias herramientas largas. Si el orquestador se
+      cuelga llega el ``TURN_ERROR turn_timeout`` del gateway; el plazo del
+      cliente es solo una red muy holgada por si el gateway deja de hablar
+      sin cerrar el socket.
+
+    ``clock`` inyectable para testear el reinicio sin esperas reales.
+    """
+
+    def __init__(self, start_timeout_s: float, turn_timeout_s: float, clock) -> None:
+        self._start = start_timeout_s
+        self._turn = turn_timeout_s
+        self._clock = clock
+        self.phase = "start"
+        self._deadline = clock() + start_timeout_s
+
+    @property
+    def timeout_s(self) -> float:
+        return self._turn if self.phase == "turn" else self._start
+
+    def progress(self) -> None:
+        self._deadline = self._clock() + self.timeout_s
+
+    def our_turn_started(self) -> None:
+        self.phase = "turn"
+        self.progress()
+
+    def remaining(self) -> float | None:
+        """Segundos hasta vencer; None = sin plazo (timeout 0 = desactivado)."""
+        if self.timeout_s <= 0:
+            return None
+        return self._deadline - self._clock()
 
 
 class _TurnCancelled(Exception):
     """Lanzada cuando cancel_event gana la race en RECORDING o RESPONDING."""
+
+
+def _str_or_empty(value: object) -> str:
+    """str() de un campo del gateway, con JSON null → "" (issue #113: antes
+    un ``"code": null`` llegaba a logs y UI como el texto 'None')."""
+    return "" if value is None else str(value)
 
 
 class _GatewayError(Exception):
@@ -87,18 +158,53 @@ class _GatewayError(Exception):
         return self.message
 
 
+class _ResponseTimeout(_GatewayError):
+    """RESPONDING sin progreso durante su plazo de inactividad (issue #65).
+
+    _responding manda ``cancel`` al gateway antes de propagarla (que deje de
+    generar y no siga mandando audio de un turno que el cliente ya abandonó)
+    y run() la publica como ``error`` con code RESPONSE_TIMEOUT.
+    """
+
+    def __init__(self, *, phase: str, timeout_s: float) -> None:
+        if phase == "start":
+            what = "no empezó a responder"
+        else:
+            what = "dejó de responder"
+        super().__init__(
+            code="RESPONSE_TIMEOUT",
+            message=f"El gateway {what} en {timeout_s:g} s; turno cancelado",
+            fatal=False,
+            extra={"phase": phase, "timeout_s": timeout_s},
+        )
+
+
 async def _safe_send_cancel(gateway: GatewayClient) -> None:
+    """Envía ``cancel`` sin dejar que un fallo tumbe la limpieza del turno.
+
+    Issue #66: antes el fallo se tragaba sin rastro. Una sesión ya cerrada es
+    lo esperable (cancel tras un corte) y va a DEBUG; cualquier otra cosa es
+    un fallo real y va a WARNING.
+    """
     try:
         await gateway.send_cancel()
-    except Exception:
-        pass
+    except GatewayDisconnected as exc:
+        log.debug("cancel no enviado: la sesión con el gateway ya está cerrada (%s)", exc)
+    except Exception as exc:
+        if not gateway.is_connected:
+            # Modo efímero: cancel antes de conectar o tras desconectar
+            # (RuntimeError "no conectado"). Esperable, no un fallo.
+            log.debug("cancel no enviado: sin conexión con el gateway (%r)", exc)
+        else:
+            log.warning("cancel no enviado al gateway: %r", exc)
+
 
 async def _idle(
     cfg: Config,
     bus: EventBus,
     audio: AudioBackend,
     cancel_event: asyncio.Event,
-    background: Callable[[], Awaitable[None]] | None = None,
+    background: Callable[[], Coroutine[Any, Any, None]] | None = None,
 ) -> str:
     """Envuelve ``_wait_idle`` con una tarea de fondo que solo vive en IDLE.
 
@@ -133,8 +239,15 @@ async def _wait_idle(
     evento. Esto permite que OWW siga escuchando durante RECORDING/RESPONDING
     y pueda interrumpir el turno actual.
 
-    Limpia el cancel_event por si quedó seteado de un /cancel externo o de
-    una wake_word recibida mientras estábamos en otro estado.
+    Issue #62 — el turno empieza en el instante en que se consume la wake
+    word: ahí (y solo ahí) se limpia ``cancel_event``. Un cancel anterior (un
+    /cancel pulsado en reposo, o el resto de un turno anterior) no tiene turno
+    al que aplicar y se descarta; uno posterior pertenece al turno nuevo y
+    RECORDING/RESPONDING lo respetan aunque llegue entre estados. Equivale a
+    marcar cada cancel con su instante y compararlo con el inicio del turno,
+    sin cambiar el tipo de ``cancel_event`` (lo comparten el display y
+    voice_client como un asyncio.Event normal) y sin ventana: entre consumir
+    la wake word y limpiar no hay ningún await.
     """
     q = audio.get_queue()
 
@@ -146,77 +259,41 @@ async def _wait_idle(
     if drained:
         log.debug("IDLE: descartados %d frames stale", drained)
 
-    # 2. Limpiar cualquier cancel pendiente
-    cancel_event.clear()
-
-    # 3. Publicar state_changed("idle")
+    # 2. Publicar state_changed("idle")
     bus.publish(VoiceEvent(type="state_changed", data={"state": "idle"}))
     log.info("IDLE: esperando wake_word del bus…")
 
-    # 4. Suscribirse al bus y esperar primer wake_word_detected
+    # 3. Suscribirse al bus y esperar primer wake_word_detected
     timeout_s = cfg.oww.idle_detection_timeout_s
     if timeout_s > 0:
         # Aplicar timeout: si no llega wake_word_detected en `timeout_s`,
         # lanzar OSError para que run() publique error y vuelva a IDLE.
-        async def _wait_wake_or_timeout() -> str:
-            try:
-                async for event in bus.subscribe():
-                    if event.type == "wake_word_detected":
-                        return event.data.get("wake_word", "")
-            except asyncio.CancelledError:
-                raise
         try:
-            return await asyncio.wait_for(_wait_wake_or_timeout(), timeout=timeout_s)
+            wake_word = await asyncio.wait_for(_consume_wake(bus), timeout=timeout_s)
         except asyncio.TimeoutError:
             raise OSError(
                 f"IDLE: timeout {timeout_s}s esperando wake_word_detected"
             )
     else:
-        async for event in bus.subscribe():
-            if event.type == "wake_word_detected":
-                wake_word = event.data.get("wake_word", "")
-                log.info("IDLE: wake word recibido → %r", wake_word)
-                return wake_word
-
-
-async def _wait_wake_or_cancel(
-    bus: EventBus,
-    cancel_event: asyncio.Event,
-    current_state: str,
-) -> None:
-    """
-    Bloquea hasta que llegue wake_word_detected al bus o se setee cancel_event.
-
-    Usado en RECORDING y RESPONDING para implementar wake-word-interrumpe-TTS:
-    si el usuario dice la wake word mientras jota-voice está grabando o
-    reproduciendo respuesta, esta coroutine retorna, el caller lanza
-    _TurnCancelled, y el state_machine vuelve a IDLE que ya tiene el
-    wake_word en el bus listo para consumir.
-    """
-    cancel_task = asyncio.create_task(cancel_event.wait())
-    wake_task = asyncio.create_task(_consume_wake(bus))
-    try:
-        done, pending = await asyncio.wait(
-            [cancel_task, wake_task],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        # cancel_and_wait: el viejo `cancel(); try: await t except
-        # CancelledError: pass` se tragaba el cancel de ESTA tarea si llegaba
-        # durante el drenaje.
-        await cancel_and_wait(*pending)
-
-        if wake_task in done and not wake_task.cancelled():
-            log.info("%s: wake_word detectado durante el estado, interrumpiendo", current_state)
-            cancel_event.set()  # para que el state_machine vea _TurnCancelled
-    finally:
-        await cancel_and_wait(cancel_task, wake_task)
+        wake_word = await _consume_wake(bus)
+    # 4. Inicio del turno: descartar los cancel anteriores (ver docstring).
+    cancel_event.clear()
+    log.info("IDLE: wake word recibido → %r", wake_word)
+    return wake_word
 
 
 async def _consume_wake(bus: EventBus) -> str:
-    """Lee el bus hasta encontrar wake_word_detected."""
-    async for event in bus.subscribe():
-        if event.type == "wake_word_detected":
-            return event.data.get("wake_word", "")
+    """Lee el bus hasta encontrar wake_word_detected.
+
+    Issue #92: ``aclosing`` retira la suscripción en el acto al volver (o al
+    cancelarse), en vez de depender de que el finalizador de async-generators
+    de asyncio lo haga más tarde.
+    """
+    async with contextlib.aclosing(bus.subscribe()) as events:
+        async for event in events:
+            if event.type == "wake_word_detected":
+                return event.data.get("wake_word", "")
+    raise OSError("EventBus cerrado esperando wake_word_detected")
 
 
 async def _recording(
@@ -228,8 +305,8 @@ async def _recording(
     cfg: Config,
     cancel_event: asyncio.Event,
 ) -> None:
-    cancel_event.clear()
-
+    # Sin cancel_event.clear() (issue #62): lo hace IDLE al consumir la wake
+    # word; un cancel posterior es de este turno y debe respetarse.
     bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": wake_word}))
     bus.publish(VoiceEvent(type="recording_started", data={}))
 
@@ -358,14 +435,14 @@ async def _recording(
             raise _TurnCancelled()
 
         if not capture_task.cancelled():
-            exc = capture_task.exception()
-            if exc is not None:
-                raise exc
+            capture_exc = capture_task.exception()
+            if capture_exc is not None:
+                raise capture_exc
     finally:
         # Issue #21: si la tarea externa fue cancelada durante el wait
         # (SIGTERM durante shutdown), el código de arriba no se ejecuta
-        # pero los tasks hijos sí. Drenarlos siempre, replicando el patrón
-        # de _wait_wake_or_cancel.
+        # pero los tasks hijos sí. Drenarlos siempre (mismo patrón que
+        # _responding).
         await cancel_and_wait(capture_task, cancel_task)
 
     # play_notification() es un beep puramente cosmético (confirma al
@@ -378,7 +455,9 @@ async def _recording(
         await playback.play_notification()
     except Exception as exc:
         log.warning("RECORDING: fallo al reproducir notificación (no crítico): %s", exc)
-        bus.publish(VoiceEvent(type="error", data={"message": f"Notificación de audio falló: {exc}"}))
+        bus.publish(VoiceEvent(type="error", data={
+            "code": None, "message": f"Notificación de audio falló: {exc}", "fatal": False,
+        }))
 
     await gateway.send_end()
     bus.publish(VoiceEvent(type="recording_ended", data={}))
@@ -390,11 +469,21 @@ async def _responding(
     gateway: GatewayClient,
     playback: PlaybackEngine,
     cancel_event: asyncio.Event,
+    *,
+    gateway_cfg: GatewayConfig | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> None:
-    # Limpiar cualquier cancel pendiente del turn anterior o de /cancel
-    # recibido fuera de contexto — si quedó seteado, el wait() siguiente
-    # completaría inmediatamente y abortaría el turn sin reproducir respuesta.
-    cancel_event.clear()
+    """Estado RESPONDING. ``gateway_cfg`` aporta los plazos (issue #65; None =
+    los defaults de GatewayConfig). ``clock``: reloj de los plazos, solo para
+    tests (por defecto el del loop)."""
+    # Sin cancel_event.clear() (issue #62): un cancel que llegó al terminar
+    # RECORDING (enviando `end`, durante el beep) es de este turno y debe
+    # cancelarlo; los anteriores al turno ya los descartó IDLE.
+    if gateway_cfg is None:
+        gateway_cfg = GatewayConfig(client_key="")
+    if clock is None:
+        clock = asyncio.get_running_loop().time
+    grace_s = gateway_cfg.turn_end_grace_s
     playback_started = False
 
     async def _receive_loop() -> None:
@@ -402,11 +491,17 @@ async def _responding(
         # El protocolo de jota-gateway (docs/client-protocol.md) señala fin
         # de turno con "turn_end", nunca con "done" — y no cierra la
         # conexión WS tras el turno (puede haber más turnos en la misma
-        # sesión). Sin este margen, el loop dependería siempre del timeout
-        # externo de 30s para cortar, aunque la respuesta ya haya terminado.
+        # sesión). Tras NUESTRO turn_end se espera turn_end_grace_s al audio
+        # en tránsito y se termina.
         gen = gateway.receive()
-        loop = asyncio.get_running_loop()
         grace_deadline: float | None = None
+        # Issue #65: plazo de inactividad (ver _ResponseDeadline). Se
+        # reinicia DESPUÉS de procesar cada señal de progreso de nuestro
+        # turno: el tiempo que el cliente pasa reproduciendo un chunk no es
+        # silencio del gateway.
+        deadline = _ResponseDeadline(
+            gateway_cfg.response_start_timeout_s, gateway_cfg.turn_inactivity_timeout_s, clock,
+        )
         # Revisión Fase R: en sesión persistente pueden llegar mensajes de
         # OTROS turnos (un push del agente que empezó antes de nuestro
         # `send`). Nuestro turno es el del primer turn_start visto después de
@@ -433,16 +528,25 @@ async def _responding(
             return False
 
         while True:
+            in_grace = grace_deadline is not None
+            remaining: float | None
+            if grace_deadline is not None:
+                remaining = grace_deadline - clock()
+                if remaining <= 0:
+                    return
+            else:
+                left = deadline.remaining()
+                remaining = None if left is None else max(left, 0.0)
             try:
-                if grace_deadline is not None:
-                    remaining = grace_deadline - loop.time()
-                    if remaining <= 0:
-                        return
-                    gw_event = await asyncio.wait_for(gen.__anext__(), timeout=remaining)
-                else:
-                    gw_event = await gen.__anext__()
+                gw_event = await asyncio.wait_for(gen.__anext__(), timeout=remaining)
             except asyncio.TimeoutError:
-                return
+                if in_grace:
+                    return
+                log.warning(
+                    "RESPONDING: %.1fs sin progreso del gateway (fase %s); se cancela el turno",
+                    deadline.timeout_s, deadline.phase,
+                )
+                raise _ResponseTimeout(phase=deadline.phase, timeout_s=deadline.timeout_s)
             except StopAsyncIteration:
                 return
 
@@ -452,10 +556,12 @@ async def _responding(
                 log.info("RESPONDING: transcription → %r", text)
                 await gateway.send_text(text)
                 sent_text = True
+                deadline.progress()
 
             elif gw_event.type == "transcription_partial":
                 text = gw_event.data.get("text", "")
                 bus.publish(VoiceEvent(type="transcription_partial", data={"text": text}))
+                deadline.progress()
 
             elif gw_event.type == "llm_token":
                 if _is_foreign(turn_id=gw_event.data.get("turn_id")):
@@ -464,6 +570,7 @@ async def _responding(
                 content = gw_event.data.get("content", "")
                 playback.push_token(content)
                 bus.publish(VoiceEvent(type="llm_token", data={"content": content}))
+                deadline.progress()
 
             elif gw_event.type == "tts_chunk":
                 if _is_foreign(turn_seq=gw_event.data.get("turn_seq")):
@@ -474,9 +581,10 @@ async def _responding(
                     playback_started = True
                 audio_bytes = gw_event.data.get("audio", b"")
                 await playback.play_chunk(audio_bytes)
+                deadline.progress()
                 if grace_deadline is not None:
                     # Sigue llegando audio en tránsito tras turn_end — no cortar aún.
-                    grace_deadline = loop.time() + TURN_END_GRACE_S
+                    grace_deadline = clock() + grace_s
 
             elif gw_event.type == "turn_start":
                 # Issue #24: turn_start del gateway resetea el estado de
@@ -486,6 +594,7 @@ async def _responding(
                 tseq = gw_event.data.get("turn_seq")
                 if sent_text and my_turn_id is None and my_turn_seq is None:
                     my_turn_id, my_turn_seq = tid, tseq
+                    deadline.our_turn_started()
                     log.info("RESPONDING: turn_start → nuestro turno %s seq=%s", tid, tseq)
                     # Si había audio en tránsito de un turno anterior con seq
                     # menor, el descarte ya está hecho en receive(). Aquí
@@ -524,7 +633,7 @@ async def _responding(
                 )
                 if ours:
                     if grace_deadline is None:
-                        grace_deadline = loop.time() + TURN_END_GRACE_S
+                        grace_deadline = clock() + grace_s
                 else:
                     log.info("RESPONDING: turn_end ajeno %r ignorado", tid)
 
@@ -545,6 +654,7 @@ async def _responding(
                     continue
                 data = {k: v for k, v in gw_event.data.items() if k != "type"}
                 bus.publish(VoiceEvent(type="tool_call", data=data))
+                deadline.progress()
                 log.info(
                     "RESPONDING: tool_call %s %s",
                     data.get("phase"), data.get("name"),
@@ -559,19 +669,20 @@ async def _responding(
                 # No publicamos playback_ended ni playback.drain() — el
                 # turno termina con error, no con éxito.
                 raise _GatewayError(
-                    code=str(gw_event.data.get("code", "")),
-                    message=str(gw_event.data.get("message", "")),
+                    code=_str_or_empty(gw_event.data.get("code")),
+                    message=_str_or_empty(gw_event.data.get("message")),
                     fatal=gw_event.data.get("fatal", False),
                 )
 
             else:
                 log.debug("RESPONDING: evento desconocido de gateway: %r", gw_event.type)
 
-    receive_task = asyncio.create_task(
-        asyncio.wait_for(_receive_loop(), timeout=30.0)
-    )
+    receive_task = asyncio.create_task(_receive_loop())
+    # Dos fuentes de cancelación, cada una esperada en UN solo sitio (issue
+    # #93: antes la espera de la wake word creaba otro cancel_event.wait()
+    # propio y luego hacía cancel_event.set() para que este lo viera).
     cancel_task = asyncio.create_task(cancel_event.wait())
-    wake_task = asyncio.create_task(_wait_wake_or_cancel(bus, cancel_event, "RESPONDING"))
+    wake_task = asyncio.create_task(_consume_wake(bus))
 
     try:
         done, pending = await asyncio.wait(
@@ -589,19 +700,31 @@ async def _responding(
         real_exc: BaseException | None = None
         if receive_task.done() and not receive_task.cancelled():
             exc = receive_task.exception()
-            if exc is not None and not isinstance(exc, (asyncio.TimeoutError, _TurnCancelled)):
+            if exc is not None and not isinstance(exc, _TurnCancelled):
                 real_exc = exc
 
+        wake_exc = wake_task.exception() if wake_task in done else None
+        if wake_exc is not None:
+            raise wake_exc  # el bus se cerró: no hay turno que seguir
+        woke = wake_task in done
+
         if real_exc is not None:
-            if cancel_task in done:
+            if cancel_task in done or woke:
                 log.warning(
                     "RESPONDING: cancel simultáneo con error del gateway; "
                     "se informa el error: %s", real_exc,
                 )
+            if isinstance(real_exc, _ResponseTimeout):
+                # Que el gateway deje de generar y no siga mandando audio de
+                # un turno que el cliente ya abandonó (issue #65).
+                await _safe_send_cancel(gateway)
             playback.reset()
             raise real_exc
 
-        if cancel_task in done:
+        if cancel_task in done or woke:
+            if woke:
+                # Wake word interrumpe el TTS (estilo Alexa/Google).
+                log.info("RESPONDING: wake_word detectado durante el estado, interrumpiendo")
             await _safe_send_cancel(gateway)
             playback.reset()
             raise _TurnCancelled()
@@ -609,10 +732,6 @@ async def _responding(
         if not receive_task.cancelled():
             exc = receive_task.exception()
             if exc is not None:
-                if isinstance(exc, asyncio.TimeoutError):
-                    log.warning("RESPONDING: timeout 30s")
-                    bus.publish(VoiceEvent(type="error", data={"message": "Timeout en estado RESPONDING"}))
-                    return
                 raise exc
     finally:
         # Issue #21: si la tarea externa fue cancelada durante el wait
@@ -660,8 +779,14 @@ def _log_error(state: str, exc: Exception, bus: EventBus) -> None:
             "fatal": exc.fatal,
         }))
         return
-    log.error("Error en estado %s: %s", state, exc)
-    bus.publish(VoiceEvent(type="error", data={"message": str(exc)}))
+    log.error("Error en estado %s: %r", state, exc)
+    # str() de algunas excepciones (TimeoutError()) es "": que la UI no
+    # muestre un error vacío.
+    # Mismo shape {code, message, fatal} que los errores del gateway (issue
+    # #113); code=None marca un error local (docs/display-protocol.md).
+    bus.publish(VoiceEvent(type="error", data={
+        "code": None, "message": str(exc) or type(exc).__name__, "fatal": False,
+    }))
 
 
 def _log_cancelled(state: str, bus: EventBus) -> None:
@@ -673,15 +798,18 @@ def _log_cancelled(state: str, bus: EventBus) -> None:
     bus.publish(VoiceEvent(type="cancelled", data={"state": state}))
 
 
-async def _cleanup(gateway: GatewayClient, playback: PlaybackEngine) -> None:
+async def _cleanup(cfg: Config, gateway: GatewayClient, playback: PlaybackEngine) -> None:
     """Limpia recursos al final de un turno. En modo persistente
     (issue #24) NO desconecta el gateway — eso lo hace voice_client.main
-    en el shutdown final."""
-    try:
-        if not gateway._cfg.persistent_session:
+    en el shutdown final.
+
+    Issue #66: decide por ``cfg`` (antes leía ``gateway._cfg``, un atributo
+    privado) y deja rastro si ``disconnect`` falla."""
+    if not cfg.gateway.persistent_session:
+        try:
             await gateway.disconnect()
-    except Exception:
-        pass
+        except Exception as exc:
+            log.warning("Limpieza del turno: gateway.disconnect() falló: %r", exc)
     playback.reset()
 
 
@@ -697,7 +825,7 @@ async def run(
     playback: PlaybackEngine,
     cancel_event: asyncio.Event | None = None,
     *,
-    idle_background: Callable[[], Awaitable[None]] | None = None,
+    idle_background: Callable[[], Coroutine[Any, Any, None]] | None = None,
 ) -> None:
     """Bucle principal IDLE → RECORDING → RESPONDING.
 
@@ -719,7 +847,7 @@ async def run(
             raise
         except Exception as exc:
             _log_error(state, exc, bus)
-            await _cleanup(gateway, playback)
+            await _cleanup(cfg, gateway, playback)
             continue
 
         state = "RECORDING"
@@ -727,20 +855,20 @@ async def run(
             await _recording(wake_word, bus, audio, gateway, playback, cfg, cancel_event)
         except _TurnCancelled:
             _log_cancelled(state, bus)
-            await _cleanup(gateway, playback)
+            await _cleanup(cfg, gateway, playback)
             continue
         except asyncio.CancelledError:
             log.info("StateMachine: cancelado en RECORDING")
-            await _cleanup(gateway, playback)
+            await _cleanup(cfg, gateway, playback)
             raise
         except Exception as exc:
             _log_error(state, exc, bus)
-            await _cleanup(gateway, playback)
+            await _cleanup(cfg, gateway, playback)
             continue
 
         state = "RESPONDING"
         try:
-            await _responding(bus, gateway, playback, cancel_event)
+            await _responding(bus, gateway, playback, cancel_event, gateway_cfg=cfg.gateway)
         except _TurnCancelled:
             _log_cancelled(state, bus)
         except asyncio.CancelledError:
@@ -749,4 +877,4 @@ async def run(
         except Exception as exc:
             _log_error(state, exc, bus)
         finally:
-            await _cleanup(gateway, playback)
+            await _cleanup(cfg, gateway, playback)

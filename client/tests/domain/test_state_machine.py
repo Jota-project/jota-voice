@@ -13,54 +13,25 @@ Ejecutar:
 from __future__ import annotations
 
 import asyncio
-import sys
-import os
-import types
+import contextlib
 from typing import AsyncGenerator
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
-# ---------------------------------------------------------------------------
-# Stubs para dependencias de hardware (pyaudio, websockets, numpy)
-# Deben instalarse ANTES de importar los módulos del proyecto.
-# ---------------------------------------------------------------------------
+import pytest
 
-def _install_stubs() -> None:
-    """Instala módulos stub para pyaudio y websockets si no están disponibles."""
-    # pyaudio stub
-    if "pyaudio" not in sys.modules:
-        try:
-            import pyaudio  # noqa: F401
-        except ImportError:
-            stub = types.ModuleType("pyaudio")
-            stub.paInt16 = 8
-            stub.paContinue = 0
-
-            class _FakeStream:
-                def write(self, data: bytes) -> None: pass
-                def stop_stream(self) -> None: pass
-                def close(self) -> None: pass
-
-            class _FakePyAudio:
-                def open(self, **kwargs): return _FakeStream()
-                def terminate(self) -> None: pass
-
-            stub.PyAudio = _FakePyAudio
-            stub.Stream = _FakeStream
-            sys.modules["pyaudio"] = stub
-
-    # Antes aquí se sustituían websockets.exceptions.ConnectionClosed* por
-    # clases fake para toda la sesión de pytest, lo que rompía cualquier test
-    # posterior con un servidor WebSocket real (Fase R, #118). Los tests usan
-    # ahora las excepciones reales.
-
-
-_install_stubs()
+# pyaudio solo existe en Termux: el módulo falso lo pone el fixture
+# ``fake_pyaudio`` de tests/conftest.py (con teardown), en vez del antiguo
+# _install_stubs() que tocaba sys.modules al importar este fichero.
+pytestmark = pytest.mark.usefixtures("fake_pyaudio")
 
 # Importar módulos del proyecto
 from domain.event_bus import EventBus, VoiceEvent                       # noqa: E402
 from config import Config, GatewayConfig, AudioConfig, OWWConfig, DeviceConfig  # noqa: E402
-from backends.gateway_client import GatewayEvent                        # noqa: E402
+from backends.gateway_client import GatewayClient, GatewayEvent         # noqa: E402
+from backends.audio_base import AudioBackend                            # noqa: E402
 from backends.audio_sounddevice import SounddeviceBackend               # noqa: E402
+from backends.oww_client import OWWClient                               # noqa: E402
+from app.playback_engine import PlaybackEngine                          # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +55,8 @@ def _make_config(
             sample_rate=16000,
             frames_per_buffer=512,
             silence_timeout_s=0.1,   # ~3 frames de silencio con silence_count
+            # Cota superior de seguridad: con _make_audio_mock el turno acaba
+            # por silencio en ~3 frames y nunca llega a este plazo (#112).
             recording_timeout_s=5.0,
         ),
         oww=OWWConfig(),
@@ -93,34 +66,36 @@ def _make_config(
 
 def _make_audio_mock(*, silent: bool = True) -> MagicMock:
     """
-    Mock de AudioCapture.
-    - get_queue() devuelve una Queue con 20 frames de audio float32.
+    Mock de AudioBackend.
+    - get_queue() devuelve una Queue que se rellena con 20 frames float32
+      justo DESPUÉS del drain de _recording(): get_preroll() se llama tras el
+      drain y antes de _capture_loop, y su side_effect encola los frames.
+      Antes la cola se llenaba al crear el mock, IDLE/RECORDING la drenaban y
+      cada turno agotaba recording_timeout_s (5 s reales por test, #112).
     - get_preroll() devuelve bytes vacíos.
     - is_silence() devuelve `silent` para todos los frames.
     """
-    import numpy as np
-
-    audio = MagicMock()
+    audio = MagicMock(spec=AudioBackend)
 
     q: asyncio.Queue[bytes] = asyncio.Queue()
     frame = bytes(512 * 4)  # 512 float32 samples = 2048 bytes de ceros
-    for _ in range(20):
-        q.put_nowait(frame)
+
+    def _preroll_then_frames() -> bytes:
+        for _ in range(20):
+            q.put_nowait(frame)
+        return b""
 
     audio.get_queue.return_value = q
-    audio.get_preroll.return_value = b""
+    audio.get_preroll.side_effect = _preroll_then_frames
     audio.is_silence.return_value = silent
     return audio
 
 
 def _make_oww_mock(wake_word: str = "ok_nabu") -> MagicMock:
     """Mock de OWWClient que detecta el wake word al primer intento."""
-    oww = MagicMock()
+    oww = MagicMock(spec=OWWClient)
     oww.is_connected = True
-    oww.send_audio = AsyncMock()
-    oww.wait_for_detection = AsyncMock(return_value=wake_word)
-    oww.connect_with_backoff = AsyncMock()
-    oww.disconnect = AsyncMock()
+    oww.wait_for_detection.return_value = wake_word
     return oww
 
 
@@ -131,25 +106,48 @@ def _gateway_mock_with_events(events: list[GatewayEvent]) -> MagicMock:
         for ev in events:
             yield ev
 
-    gateway = MagicMock()
-    gateway.connect = AsyncMock()
-    gateway.disconnect = AsyncMock()
-    gateway.send_audio = AsyncMock()
-    gateway.send_end = AsyncMock()
-    gateway.send_text = AsyncMock()
+    gateway = MagicMock(spec=GatewayClient)
     gateway.receive = _receive
     return gateway
 
 
 def _make_playback_mock() -> MagicMock:
-    playback = MagicMock()
-    playback.push_token = MagicMock()
-    playback.play_chunk = AsyncMock()
-    playback.play_notification = AsyncMock()
-    playback.drain = AsyncMock()
-    playback.reset = MagicMock()
-    playback.close = MagicMock()
-    return playback
+    return MagicMock(spec=PlaybackEngine)
+
+
+def _publish_wake_on_idle(bus: EventBus, times: int = 1) -> asyncio.Task:
+    """Publica wake_word_detected cada vez que la máquina entra en IDLE, hasta
+    ``times`` veces. Se suscribe al llamarla (antes de arrancar la máquina),
+    así que no pierde el primer state_changed(idle). Sustituye a los bucles
+    de sondeo con asyncio.sleep (#76)."""
+    events = bus.subscribe()
+
+    async def _run() -> None:
+        published = 0
+        async with contextlib.aclosing(events):
+            async for ev in events:
+                if ev.type == "state_changed" and ev.data.get("state") == "idle":
+                    bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
+                    published += 1
+                    if published >= times:
+                        return
+
+    return asyncio.create_task(_run())
+
+
+def _wait_for_event(bus: EventBus, type_: str) -> asyncio.Task:
+    """Task que termina cuando se publica un evento ``type_``. Se suscribe al
+    llamarla, así que no pierde eventos publicados después."""
+    events = bus.subscribe()
+
+    async def _run() -> VoiceEvent:
+        async with contextlib.aclosing(events):
+            async for ev in events:
+                if ev.type == type_:
+                    return ev
+        raise AssertionError(f"el bus se cerró sin publicar {type_!r}")
+
+    return asyncio.create_task(_run())
 
 
 # ---------------------------------------------------------------------------
@@ -179,16 +177,7 @@ async def _run_e2e_test() -> None:
     # El state_machine consume `wake_word_detected` del bus. Publicamos el
     # primer wake_word inmediatamente; los siguientes nunca llegan (simula
     # que OWW solo detectó una vez y luego está en silencio).
-    call_count = [0]
-
-    async def _publish_wake_words() -> None:
-        while True:
-            await asyncio.sleep(0)
-            if call_count[0] == 0:
-                call_count[0] += 1
-                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
-
-    wake_publisher_task = asyncio.create_task(_publish_wake_words())
+    wake_publisher_task = _publish_wake_on_idle(bus)
 
     # Suscribir al bus para capturar todos los eventos
     received: list[VoiceEvent] = []
@@ -328,22 +317,10 @@ async def _run_error_test() -> None:
     oww = _make_oww_mock()
 
     # Publica wake_word_detected en el bus (el state_machine lo consume desde ahí).
-    call_count = [0]
+    wake_publisher_task = _publish_wake_on_idle(bus)
 
-    async def _publish_wake_words() -> None:
-        while True:
-            await asyncio.sleep(0)
-            if call_count[0] == 0:
-                call_count[0] += 1
-                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
-
-    wake_publisher_task = asyncio.create_task(_publish_wake_words())
-
-    gateway = MagicMock()
-    gateway.connect = AsyncMock(side_effect=ConnectionRefusedError("gateway no disponible"))
-    gateway.disconnect = AsyncMock()
-    gateway.send_audio = AsyncMock()
-    gateway.send_end = AsyncMock()
+    gateway = MagicMock(spec=GatewayClient)
+    gateway.connect.side_effect = ConnectionRefusedError("gateway no disponible")
     playback = _make_playback_mock()
 
     received: list[VoiceEvent] = []
@@ -407,22 +384,13 @@ async def _run_notification_failure_test() -> None:
     cfg = _make_config()
     audio = _make_audio_mock(silent=True)
 
-    call_count = [0]
-
-    async def _publish_wake_words() -> None:
-        while True:
-            await asyncio.sleep(0)
-            if call_count[0] == 0:
-                call_count[0] += 1
-                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
-
-    wake_publisher_task = asyncio.create_task(_publish_wake_words())
+    wake_publisher_task = _publish_wake_on_idle(bus)
 
     gateway = _gateway_mock_with_events([])  # RESPONDING termina rápido (sin eventos)
 
     playback = _make_playback_mock()
-    playback.play_notification = AsyncMock(
-        side_effect=RuntimeError("Error opening OutputStream: Internal PortAudio error [PaErrorCode -9986]")
+    playback.play_notification.side_effect = RuntimeError(
+        "Error opening OutputStream: Internal PortAudio error [PaErrorCode -9986]"
     )
 
     received: list[VoiceEvent] = []
@@ -508,32 +476,23 @@ async def _run_capture_exception_test() -> None:
     # cuenta como send_audio → la 1ª va al preroll si existe; aquí no hay,
     # luego 2 sends en _capture_loop y el 3er lanza ConnectionError simulando
     # un corte de red a mitad de grabación).
-    gateway.send_audio = AsyncMock(
-        side_effect=[None, None, ConnectionError("corte de red")]
-    )
+    gateway.send_audio.side_effect = [None, None, ConnectionError("corte de red")]
 
     playback = _make_playback_mock()
 
-    call_count = [0]
-
-    async def _publish_wake_words() -> None:
-        while True:
-            await asyncio.sleep(0)
-            if call_count[0] == 0:
-                call_count[0] += 1
-                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
-
-    wake_publisher_task = asyncio.create_task(_publish_wake_words())
+    wake_publisher_task = _publish_wake_on_idle(bus)
 
     # Producer que introduce frames no silenciosos a la cola tras el drain
     # inicial de _recording() — sin esto, _capture_loop espera eternamente y
-    # nunca llega a invocar gateway.send_audio(). El test no reproduciría
-    # el escenario real de corte de red a mitad de grabación.
+    # nunca llega a invocar gateway.send_audio(). Reacciona a
+    # recording_started (publicado justo antes del drain síncrono): los
+    # frames, encolados vía call_soon_threadsafe, llegan después del drain.
+    recording_started = _wait_for_event(bus, "recording_started")
+
     async def _audio_producer() -> None:
-        await asyncio.sleep(0.1)  # deja pasar el drain de _recording()
+        await recording_started
         for _ in range(20):
             audio._on_frame(_tone_frame_f32())
-            await asyncio.sleep(0.01)
 
     audio_producer_task = asyncio.create_task(_audio_producer())
 
@@ -613,11 +572,8 @@ async def _run_idle_timeout_test() -> None:
         oww=OWWConfig(idle_detection_timeout_s=0.1),  # timeout muy corto
     )
 
-    oww = MagicMock()
+    oww = MagicMock(spec=OWWClient)
     oww.is_connected = False
-    oww.connect_with_backoff = AsyncMock()
-    oww.disconnect = AsyncMock()
-    oww.send_audio = AsyncMock()
 
     audio = _make_audio_mock(silent=True)
     gateway = _gateway_mock_with_events([])
@@ -681,23 +637,9 @@ async def _run_cancel_recording_test() -> None:
     oww = _make_oww_mock()
 
     # Publica wake_word_detected en el bus (el state_machine lo consume desde ahí).
-    call_count = [0]
+    wake_publisher_task = _publish_wake_on_idle(bus)
 
-    async def _publish_wake_words() -> None:
-        while True:
-            await asyncio.sleep(0)
-            if call_count[0] == 0:
-                call_count[0] += 1
-                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
-
-    wake_publisher_task = asyncio.create_task(_publish_wake_words())
-
-    gateway = MagicMock()
-    gateway.connect = AsyncMock()
-    gateway.disconnect = AsyncMock()
-    gateway.send_audio = AsyncMock()
-    gateway.send_end = AsyncMock()
-    gateway.send_cancel = AsyncMock()
+    gateway = MagicMock(spec=GatewayClient)
     gateway.receive = lambda: (x for x in [])  # never used
 
     playback = _make_playback_mock()
@@ -724,15 +666,14 @@ async def _run_cancel_recording_test() -> None:
 
     from domain.state_machine import run as sm_run
 
+    recording_started = _wait_for_event(bus, "recording_started")
     sm_task = asyncio.create_task(
         sm_run(cfg, bus, audio, gateway, playback, cancel_event)
     )
 
-    # Esperar a que empiece RECORDING y disparar cancel
+    # Disparar cancel en cuanto empiece RECORDING (sin sondeo, #76)
     async def _fire_cancel() -> None:
-        # Esperar recording_started
-        while not any(e.type == "recording_started" for e in received):
-            await asyncio.sleep(0.01)
+        await recording_started
         cancel_event.set()
 
     fire_task = asyncio.create_task(_fire_cancel())
@@ -746,7 +687,8 @@ async def _run_cancel_recording_test() -> None:
     watcher_task.cancel()
     fire_task.cancel()
     wake_publisher_task.cancel()
-    for t in [sm_task, watcher_task, fire_task, wake_publisher_task]:
+    recording_started.cancel()
+    for t in [sm_task, watcher_task, fire_task, wake_publisher_task, recording_started]:
         try:
             await t
         except (asyncio.CancelledError, Exception):
@@ -800,16 +742,7 @@ async def _run_cancel_responding_test() -> None:
     oww = _make_oww_mock()
 
     # Publica wake_word_detected en el bus (el state_machine lo consume desde ahí).
-    call_count = [0]
-
-    async def _publish_wake_words() -> None:
-        while True:
-            await asyncio.sleep(0)
-            if call_count[0] == 0:
-                call_count[0] += 1
-                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
-
-    wake_publisher_task = asyncio.create_task(_publish_wake_words())
+    wake_publisher_task = _publish_wake_on_idle(bus)
 
     # Gateway que emite transcription y luego bloquea (tts lento)
     received_events: list[VoiceEvent] = []
@@ -819,13 +752,7 @@ async def _run_cancel_responding_test() -> None:
         yield GatewayEvent(type="llm_token", data={"content": "Son "})
         await asyncio.Event().wait()  # bloquea — simulando TTS lento
 
-    gateway = MagicMock()
-    gateway.connect = AsyncMock()
-    gateway.disconnect = AsyncMock()
-    gateway.send_audio = AsyncMock()
-    gateway.send_end = AsyncMock()
-    gateway.send_cancel = AsyncMock()
-    gateway.send_text = AsyncMock()
+    gateway = MagicMock(spec=GatewayClient)
     gateway.receive = _slow_receive
 
     playback = _make_playback_mock()
@@ -851,14 +778,14 @@ async def _run_cancel_responding_test() -> None:
 
     from domain.state_machine import run as sm_run
 
+    llm_token_seen = _wait_for_event(bus, "llm_token")
     sm_task = asyncio.create_task(
         sm_run(cfg, bus, audio, gateway, playback, cancel_event)
     )
 
     # Disparar cancel cuando llegue llm_token (estamos en RESPONDING)
     async def _fire_cancel() -> None:
-        while not any(e.type == "llm_token" for e in received):
-            await asyncio.sleep(0.01)
+        await llm_token_seen
         cancel_event.set()
 
     fire_task = asyncio.create_task(_fire_cancel())
@@ -872,7 +799,8 @@ async def _run_cancel_responding_test() -> None:
     watcher_task.cancel()
     fire_task.cancel()
     wake_publisher_task.cancel()
-    for t in [sm_task, watcher_task, fire_task, wake_publisher_task]:
+    llm_token_seen.cancel()
+    for t in [sm_task, watcher_task, fire_task, wake_publisher_task, llm_token_seen]:
         try:
             await t
         except (asyncio.CancelledError, Exception):
@@ -927,8 +855,11 @@ async def _run_turn_end_grace_period_test() -> None:
     # (ver _idle()), así que RECORDING siempre cierra por timeout absoluto,
     # no por silencio. Lo dejamos corto para que el test quede casi todo el
     # margen para lo que realmente prueba: el cierre en RESPONDING.
+    # turn_end_grace_s corto (issue #65: antes 2 s fijos en el módulo).
     cfg = Config(
-        gateway=GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=5.0),
+        gateway=GatewayConfig(
+            host="127.0.0.1", client_key="test", connect_timeout_s=5.0, turn_end_grace_s=0.05,
+        ),
         device=DeviceConfig(id="test-device"),
         audio=AudioConfig(sample_rate=16000, frames_per_buffer=512, recording_timeout_s=0.2),
         oww=OWWConfig(),
@@ -944,26 +875,12 @@ async def _run_turn_end_grace_period_test() -> None:
         yield GatewayEvent(type="turn_end", data={"turn_id": "t-1"})
         await asyncio.Event().wait()  # el WS real nunca cierra tras el turno
 
-    gateway = MagicMock()
-    gateway.connect = AsyncMock()
-    gateway.disconnect = AsyncMock()
-    gateway.send_audio = AsyncMock()
-    gateway.send_end = AsyncMock()
-    gateway.send_text = AsyncMock()
+    gateway = MagicMock(spec=GatewayClient)
     gateway.receive = _receive_then_hang
 
     playback = _make_playback_mock()
 
-    call_count = [0]
-
-    async def _publish_wake_words() -> None:
-        while True:
-            await asyncio.sleep(0)
-            if call_count[0] == 0:
-                call_count[0] += 1
-                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
-
-    wake_publisher_task = asyncio.create_task(_publish_wake_words())
+    wake_publisher_task = _publish_wake_on_idle(bus)
 
     received: list[VoiceEvent] = []
     stop_event = asyncio.Event()
@@ -1064,32 +981,36 @@ async def _run_recording_discards_stale_idle_backlog_test() -> None:
 
     playback = _make_playback_mock()
 
-    wake_published = asyncio.Event()
     tone = _tone_frame_f32()
+    n_backlog = 30
 
-    async def _publish_wake_word_soon() -> None:
-        await asyncio.sleep(0.05)  # deja tiempo a que se acumule backlog
-        bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
-        wake_published.set()
+    # Sin esperas reales (#76/#112): en cuanto la máquina entra en IDLE se
+    # acumula backlog de ambiente en get_queue() (nadie la consume en IDLE
+    # tras el fan-out) y se publica la wake word; en cuanto empieza RECORDING
+    # llega la locución real. _on_frame encola vía call_soon_threadsafe: el
+    # backlog queda en la cola antes de que IDLE vea la wake word, y la voz
+    # llega después del drain síncrono que sigue a recording_started.
+    idle_events = bus.subscribe()
+    recording_started = _wait_for_event(bus, "recording_started")
 
-    async def _ambient_backlog_producer() -> None:
-        # Simula la captura continua de mic mientras _idle() espera — nadie
-        # consume get_queue() en ese tramo tras el fix de fan-out.
-        while not wake_published.is_set():
-            audio._on_frame(_silence_frame_f32())
-            await asyncio.sleep(0.002)
+    async def _publish_wake_word_after_backlog() -> None:
+        async with contextlib.aclosing(idle_events):
+            async for ev in idle_events:
+                if ev.type == "state_changed" and ev.data.get("state") == "idle":
+                    for _ in range(n_backlog):
+                        audio._on_frame(_silence_frame_f32())
+                    bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
+                    return
 
     async def _live_speech_producer() -> None:
-        await wake_published.wait()
+        await recording_started
         for _ in range(5):
             audio._on_frame(tone)
-            await asyncio.sleep(0.01)
         for _ in range(5):
             audio._on_frame(_silence_frame_f32())
-            await asyncio.sleep(0.01)
 
-    wake_task = asyncio.create_task(_publish_wake_word_soon())
-    backlog_task = asyncio.create_task(_ambient_backlog_producer())
+    wake_task = asyncio.create_task(_publish_wake_word_after_backlog())
+    backlog_task = recording_started
     speech_task = asyncio.create_task(_live_speech_producer())
 
     stop_event = asyncio.Event()
@@ -1123,11 +1044,22 @@ async def _run_recording_discards_stale_idle_backlog_test() -> None:
             pass
 
     sent_frames = [c.args[0] for c in gateway.send_audio.call_args_list]
-    assert tone in sent_frames, (
-        "RECORDING cortó por silencio consumiendo solo el backlog de IDLE — "
-        f"nunca llegó a procesar el audio en vivo del usuario "
-        f"(frames enviados al gateway: {len(sent_frames)})"
+    # #112: no basta con que llegue UN tono (un drenaje parcial del backlog
+    # también lo cumpliría): deben llegar los 5 y ningún frame del backlog
+    # antes del primero.
+    assert sent_frames.count(tone) == 5, (
+        "RECORDING cortó por silencio consumiendo el backlog de IDLE — "
+        f"no procesó toda la locución del usuario "
+        f"(tonos enviados: {sent_frames.count(tone)}/5, frames: {len(sent_frames)})"
     )
+    # El pre-roll (contexto previo a la wake word, un único envío más largo)
+    # es legítimo; de los frames de captura, el primero debe ser ya la voz.
+    captured = [f for f in sent_frames if len(f) == len(tone)]
+    assert captured.index(tone) == 0, (
+        f"se enviaron {captured.index(tone)} frames del backlog de IDLE antes de la voz"
+    )
+    # Fan-out (#9): la cola de OWW recibió el mismo audio, incluido el backlog.
+    assert audio.get_oww_queue().qsize() >= n_backlog + 10
     print("  OK  audio en vivo consumido, backlog de IDLE descartado correctamente")
 
 
@@ -1201,16 +1133,7 @@ async def _run_anomalous_close_during_tts_publishes_error_test() -> None:
     cfg = _make_config()
     audio = _make_audio_mock(silent=True)
 
-    call_count = [0]
-
-    async def _publish_wake_words() -> None:
-        while True:
-            await asyncio.sleep(0)
-            if call_count[0] == 0:
-                call_count[0] += 1
-                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
-
-    wake_publisher_task = asyncio.create_task(_publish_wake_words())
+    wake_publisher_task = _publish_wake_on_idle(bus)
 
     # Gateway que emite transcription + un tts_chunk y luego CAE con
     # ConnectionClosedError — el escenario exacto del bug: el servidor se
@@ -1226,13 +1149,7 @@ async def _run_anomalous_close_during_tts_publishes_error_test() -> None:
         yield GatewayEvent(type="tts_chunk", data={"audio": b"\x00\x01" * 100})
         raise _drop_exc
 
-    gateway = MagicMock()
-    gateway.connect = AsyncMock()
-    gateway.disconnect = AsyncMock()
-    gateway.send_audio = AsyncMock()
-    gateway.send_end = AsyncMock()
-    gateway.send_cancel = AsyncMock()
-    gateway.send_text = AsyncMock()
+    gateway = MagicMock(spec=GatewayClient)
     gateway.receive = _receive_then_drop
 
     playback = _make_playback_mock()
@@ -1311,19 +1228,6 @@ def test_state_machine_anomalous_close_during_tts_publishes_error() -> None:
     asyncio.run(_run_anomalous_close_during_tts_publishes_error_test())
 
 
-def test_idle_type_hints_resolve() -> None:
-    """_idle()/_recording() deben anotar audio con AudioBackend (importado), no
-    con el AudioCapture obsoleto que ya no se importa en el módulo."""
-    import typing
-    from domain import state_machine
-
-    hints = typing.get_type_hints(state_machine._idle)
-    assert hints["audio"] is state_machine.AudioBackend
-
-    hints = typing.get_type_hints(state_machine._recording)
-    assert hints["audio"] is state_machine.AudioBackend
-
-
 # ---------------------------------------------------------------------------
 # Issue #18: mensajes `status` y `error` del gateway durante un turno activo
 # deben tener manejo explícito en state_machine._receive_loop.
@@ -1360,16 +1264,7 @@ async def _run_gateway_status_event_publishes_to_bus_test() -> None:
     )
     audio = _make_audio_mock(silent=True)
 
-    call_count = [0]
-
-    async def _publish_wake_words() -> None:
-        while True:
-            await asyncio.sleep(0)
-            if call_count[0] == 0:
-                call_count[0] += 1
-                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
-
-    wake_publisher_task = asyncio.create_task(_publish_wake_words())
+    wake_publisher_task = _publish_wake_on_idle(bus)
 
     gw_events = [
         GatewayEvent(type="transcription", data={"text": "hola"}),
@@ -1466,16 +1361,7 @@ async def _run_gateway_error_event_terminates_immediately_test() -> None:
     )
     audio = _make_audio_mock(silent=True)
 
-    call_count = [0]
-
-    async def _publish_wake_words() -> None:
-        while True:
-            await asyncio.sleep(0)
-            if call_count[0] == 0:
-                call_count[0] += 1
-                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
-
-    wake_publisher_task = asyncio.create_task(_publish_wake_words())
+    wake_publisher_task = _publish_wake_on_idle(bus)
 
     # Escenario exacto de la issue: transcribe → orchestrator cae mid-turn →
     # error con code/message/fatal → no llegan más eventos (el mock termina
@@ -1619,7 +1505,6 @@ def test_state_machine_gateway_error_event_terminates_immediately() -> None:
 # nunca) vs modo efímero (connect/disconnect por turno)
 # ---------------------------------------------------------------------------
 
-import pytest
 from domain.state_machine import run as sm_run
 
 
@@ -1649,12 +1534,7 @@ async def test_dos_turnos_con_una_sola_connect_persistente():
     cycle_calls = [0]
 
     def _gateway_mock_multi_cycle():
-        gateway = MagicMock()
-        gateway.connect = AsyncMock()
-        gateway.disconnect = AsyncMock()
-        gateway.send_audio = AsyncMock()
-        gateway.send_end = AsyncMock()
-        gateway.send_text = AsyncMock()
+        gateway = MagicMock(spec=GatewayClient)
         gateway.is_connected = True
         gateway.receive = lambda: _make_async_iter(cycles[cycle_calls[0]])
         cycle_calls[0] += 1
@@ -1663,18 +1543,8 @@ async def test_dos_turnos_con_una_sola_connect_persistente():
     audio = _make_audio_mock(silent=True)
     playback = _make_playback_mock()
 
-    # Publicar dos wake_word_detected para forzar dos ciclos
-    wake_count = [0]
-    async def _publish_wake():
-        while True:
-            await asyncio.sleep(0)
-            if wake_count[0] < 2:
-                wake_count[0] += 1
-                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
-            else:
-                await asyncio.sleep(0.1)
-
-    wake_task = asyncio.create_task(_publish_wake())
+    # Publicar dos wake_word_detected (uno por cada IDLE) para forzar dos ciclos
+    wake_task = _publish_wake_on_idle(bus, times=2)
 
     # Contar ciclos
     idle_count = [0]
@@ -1747,15 +1617,8 @@ async def test_interrupted_durante_responding_dispara_cancel():
 
     interrupted_event = GatewayEvent(type="interrupted", data={})
 
-    gateway = MagicMock()
-    gateway.connect = AsyncMock()
-    gateway.disconnect = AsyncMock()
-    gateway.send_audio = AsyncMock()
-    gateway.send_end = AsyncMock()
-    gateway.send_text = AsyncMock()
-    gateway.send_cancel = AsyncMock()
+    gateway = MagicMock(spec=GatewayClient)
     gateway.is_connected = True
-    gateway._cfg = MagicMock(persistent_session=True)
 
     # El gateway emite interrupted como primer evento (simula barge-in del servidor).
     async def _receive_with_interrupt():
@@ -1768,16 +1631,7 @@ async def test_interrupted_durante_responding_dispara_cancel():
     playback = _make_playback_mock()
 
     # Mismo patrón que _run_cancel_responding_test: wake publisher en task separada.
-    call_count = [0]
-
-    async def _publish_wake_once() -> None:
-        while True:
-            await asyncio.sleep(0)
-            if call_count[0] == 0:
-                call_count[0] += 1
-                bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": "ok_nabu"}))
-
-    wake_publisher_task = asyncio.create_task(_publish_wake_once())
+    wake_publisher_task = _publish_wake_on_idle(bus)
 
     received: list[VoiceEvent] = []
     stop_event = asyncio.Event()
@@ -1840,14 +1694,8 @@ async def test_dos_turnos_conectan_y_desconectan_en_modo_efimero():
         GatewayEvent(type="turn_end", data={"turn_id": "t-1"}),
     ]
 
-    gateway = MagicMock()
-    gateway.connect = AsyncMock()
-    gateway.disconnect = AsyncMock()
-    gateway.send_audio = AsyncMock()
-    gateway.send_end = AsyncMock()
-    gateway.send_text = AsyncMock()
+    gateway = MagicMock(spec=GatewayClient)
     gateway.is_connected = True
-    gateway._cfg = MagicMock(persistent_session=False)
     gateway.receive = lambda: _make_async_iter(gw_events)
 
     audio = _make_audio_mock(silent=True)

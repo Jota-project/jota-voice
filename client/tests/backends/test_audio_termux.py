@@ -339,11 +339,41 @@ def test_start_arranca_captura_e_inicializa_pyaudio(fake_pyaudio) -> None:
 
 
 def test_start_sin_pyaudio_propaga_runtimeerror(no_pyaudio) -> None:
-    be, _ = _backend_with_mock_capture()
+    """Bug de la Fase 4c: start() arrancaba parec y su hilo lector antes de
+    importar pyaudio; si el import fallaba, la captura quedaba viva y nadie
+    la paraba. pyaudio se comprueba antes de tocar el micrófono."""
+    be, capture = _backend_with_mock_capture()
 
     with pytest.raises(RuntimeError, match="pyaudio"):
         asyncio.run(be.start())
 
+    assert be._pa is None
+    capture.start.assert_not_awaited()
+
+
+def test_start_no_inicializa_pyaudio_si_pararon_la_captura(fake_pyaudio) -> None:
+    """B1: si AudioCapture.start() devuelve False (la pararon durante el
+    arranque), TermuxBackend.start() no crea PyAudio."""
+    be, capture = _backend_with_mock_capture()
+    capture.start.return_value = False
+
+    asyncio.run(be.start())
+
+    fake_pyaudio.cls.assert_not_called()
+    assert be._pa is None
+
+
+def test_start_para_la_captura_si_pyaudio_no_inicializa(fake_pyaudio) -> None:
+    """Si PyAudio() lanza (PortAudio sin dispositivos, p. ej.) con la
+    captura ya arrancada, start() la para antes de propagar el error."""
+    fake_pyaudio.cls.side_effect = OSError("no default output device")
+    be, capture = _backend_with_mock_capture()
+
+    with pytest.raises(OSError, match="no default output device"):
+        asyncio.run(be.start())
+
+    capture.start.assert_awaited_once_with()
+    capture.stop.assert_awaited_once_with()
     assert be._pa is None
 
 
@@ -394,6 +424,83 @@ def test_stop_para_captura_cierra_stream_y_termina_pyaudio() -> None:
     pa.terminate.assert_called_once_with()
     assert be._stream is None
     assert be._pa is None
+
+
+def test_stop_cierra_portaudio_fuera_del_hilo_del_loop() -> None:
+    """stop_stream()/close()/terminate() de PortAudio pueden bloquear; igual
+    que drain(), stop() los ejecuta en el executor y no en el loop."""
+    be, _ = _backend_with_mock_capture()
+    pa = create_autospec(PyAudioSpec, instance=True)
+    stream = create_autospec(_FakeStream, instance=True)
+    seen: list[threading.Thread] = []
+    for m in (stream.stop_stream, stream.close, pa.terminate):
+        m.side_effect = lambda: seen.append(threading.current_thread())
+    be._pa = pa  # type: ignore[assignment]
+    be._stream = stream  # type: ignore[assignment]
+
+    async def _run() -> threading.Thread:
+        await be.stop()
+        return threading.current_thread()
+
+    loop_thread = asyncio.run(_run())
+
+    assert len(seen) == 3
+    assert all(t is not loop_thread for t in seen)
+
+
+def test_stop_usa_hilos_daemon_acotados() -> None:
+    """B4: el executor por defecto usa hilos no daemon que retienen la salida
+    del proceso si el driver se cuelga. stop() usa hilos daemon propios."""
+    be, _ = _backend_with_mock_capture()
+    pa = create_autospec(PyAudioSpec, instance=True)
+    stream = create_autospec(_FakeStream, instance=True)
+    daemons: list[bool] = []
+    for m in (stream.stop_stream, stream.close, pa.terminate):
+        m.side_effect = lambda: daemons.append(threading.current_thread().daemon)
+    be._pa = pa  # type: ignore[assignment]
+    be._stream = stream  # type: ignore[assignment]
+
+    asyncio.run(be.stop())
+
+    assert daemons == [True, True, True]
+
+
+def test_stop_cierra_aunque_stop_stream_falle() -> None:
+    """B4: si stop_stream() lanza, close() se intenta igual."""
+    be, _ = _backend_with_mock_capture()
+    pa = create_autospec(PyAudioSpec, instance=True)
+    stream = create_autospec(_FakeStream, instance=True)
+    stream.stop_stream.side_effect = OSError("Stream not open")
+    be._pa = pa  # type: ignore[assignment]
+    be._stream = stream  # type: ignore[assignment]
+
+    asyncio.run(be.stop())
+
+    stream.close.assert_called_once_with()
+    pa.terminate.assert_called_once_with()
+
+
+def test_stop_no_se_cuelga_si_stop_stream_no_vuelve(monkeypatch) -> None:
+    """B4: con el driver colgado, stop() se rinde tras un tope y abandona el
+    stream: ni close() ni terminate() concurrentes sobre PortAudio."""
+    monkeypatch.setattr(audio_termux, "_STREAM_CLOSE_TIMEOUT_S", 0.01)
+    be, capture = _backend_with_mock_capture()
+    pa = create_autospec(PyAudioSpec, instance=True)
+    stream = create_autospec(_FakeStream, instance=True)
+    release = threading.Event()
+    stream.stop_stream.side_effect = lambda: release.wait(5.0)
+    be._pa = pa  # type: ignore[assignment]
+    be._stream = stream  # type: ignore[assignment]
+
+    try:
+        asyncio.run(asyncio.wait_for(be.stop(), timeout=5.0))
+    finally:
+        release.set()
+
+    capture.stop.assert_awaited_once_with()
+    stream.close.assert_not_called()
+    pa.terminate.assert_not_called()
+    assert be._stream is None and be._pa is None
 
 
 def test_stop_tolera_excepcion_al_cerrar_stream() -> None:
@@ -503,3 +610,102 @@ def test_reset_delega_en_audio_capture() -> None:
     be.reset()
 
     capture.reset.assert_called_once_with()
+
+
+# --- write() en curso tras cancelar _play() --------------------------------
+#
+# run_in_executor(stream.write) no se interrumpe al cancelar la tarea: el
+# write sigue en su hilo y, sin esperar a que acabe, drain()/stop()/otro
+# _play() tocaban el mismo stream de PortAudio en paralelo.
+
+
+def _blocking_stream_backend():
+    be, _ = _backend_with_mock_capture()
+    be._pa = create_autospec(PyAudioSpec, instance=True)  # type: ignore[assignment]
+    stream = create_autospec(_FakeStream, instance=True)
+    events: list[str] = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _write(data, num_frames=None):  # noqa: ARG001
+        events.append("write-start")
+        entered.set()
+        release.wait(5.0)
+        events.append("write-end")
+
+    stream.write.side_effect = _write
+    stream.stop_stream.side_effect = lambda: events.append("stop_stream")
+    stream.close.side_effect = lambda: events.append("close")
+    be._stream = stream  # type: ignore[assignment]
+    return be, stream, events, entered, release
+
+
+def test_drain_espera_al_write_en_curso_tras_cancelar_play() -> None:
+    be, stream, events, entered, release = _blocking_stream_backend()
+
+    async def _run() -> None:
+        play = asyncio.create_task(be.play_chunk(b"\x01\x00"))
+        await wait_until(entered.is_set)
+        play.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await play
+        drain = asyncio.create_task(be.drain())
+        await wait_until(lambda: be._lock.locked() or drain.done())
+        assert "close" not in events, "drain() cerró el stream con el write en curso"
+        release.set()
+        await asyncio.wait_for(drain, timeout=5.0)
+
+    try:
+        asyncio.run(_run())
+    finally:
+        release.set()
+    assert events == ["write-start", "write-end", "stop_stream", "close"]
+
+
+def test_play_siguiente_espera_al_write_en_curso_tras_cancelar() -> None:
+    """Un play_notification() tras cancelar un _play() no escribe en el
+    stream mientras el write anterior sigue en su hilo."""
+    be, stream, events, entered, release = _blocking_stream_backend()
+
+    async def _run() -> None:
+        play = asyncio.create_task(be.play_chunk(b"\x01\x00"))
+        await wait_until(entered.is_set)
+        play.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await play
+        entered.clear()
+        nxt = asyncio.create_task(be.play_chunk(b"\x02\x00"))
+        await wait_until(lambda: be._lock.locked())
+        assert events == ["write-start"]
+        release.set()
+        await asyncio.wait_for(nxt, timeout=5.0)
+
+    try:
+        asyncio.run(_run())
+    finally:
+        release.set()
+    assert events == ["write-start", "write-end", "write-start", "write-end"]
+
+
+def test_stop_abandona_el_stream_si_el_write_no_termina(monkeypatch) -> None:
+    """Si el write en curso no termina a tiempo (driver colgado), stop() no
+    cierra el stream ni termina PyAudio: los abandona y sigue."""
+    monkeypatch.setattr(audio_termux, "_WRITE_WAIT_TIMEOUT_S", 0.01)
+    be, stream, events, entered, release = _blocking_stream_backend()
+    pa = be._pa
+
+    async def _run() -> None:
+        play = asyncio.create_task(be.play_chunk(b"\x01\x00"))
+        await wait_until(entered.is_set)
+        play.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await play
+        await asyncio.wait_for(be.stop(), timeout=5.0)
+
+    try:
+        asyncio.run(_run())
+    finally:
+        release.set()
+    stream.close.assert_not_called()
+    pa.terminate.assert_not_called()
+    assert be._stream is None and be._pa is None

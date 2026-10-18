@@ -6,6 +6,7 @@ Plataformas: macOS (CoreAudio), Linux (ALSA/PulseAudio). No funciona en Termux
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import queue as queue_mod
 import threading
@@ -13,13 +14,80 @@ import threading
 import numpy as np
 
 from config import AudioConfig
+from core.audio.offloop import call_off_loop
 from core.audio.preroll import PrerollBuffer
+from core.audio.queues import capture_queue_maxsize, put_latest
 from core.audio.vad import is_silence as _is_silence
 from .notification_tone import synth_notification_tone
 
 log = logging.getLogger(__name__)
 
 _TTS_SAMPLE_RATE = 24000  # PCM16 mono del gateway
+
+# Tope de espera por cada stop()/close() de un stream de PortAudio (issue
+# #87). Un driver colgado (Bluetooth desconectado a media reproducción) no
+# debe bloquear el loop ni impedir el apagado: pasado este tiempo se loguea
+# y se sigue. Constante de módulo, no clave de config.
+_STREAM_CLOSE_TIMEOUT_S = 2.0
+
+
+async def _call_off_loop(fn, timeout: float):
+    """Ver core.audio.offloop.call_off_loop (hilo daemon con tope)."""
+    return await call_off_loop(fn, timeout, name="sounddevice-close")
+
+
+# Streams abandonados porque el driver no respondió a stop()/abort()/close()
+# (M1). Su hilo sigue dentro de PortAudio, y al salir del proceso el atexit
+# de sounddevice (_exit_handler: stop()/close() del último stream con
+# callback y Pa_Terminate) volvería a tocar PortAudio en paralelo: justo la
+# llamada concurrente que se evita aquí. Se guardan para que el apagado
+# pueda saberlo (abandoned_streams()) y, si quiere, salir sin ese atexit.
+_ABANDONED_STREAMS: list = []
+
+
+def abandoned_streams() -> list:
+    """Streams de PortAudio abandonados por un driver colgado (ver M1)."""
+    return list(_ABANDONED_STREAMS)
+
+
+async def _close_stream(stream, label: str, *, first: str = "stop") -> None:
+    """``first`` (stop() o abort()) + close() de un stream fuera del loop,
+    cada uno con su try: si el primero falla (dispositivo desaparecido)
+    close() se intenta igual.
+
+    Si una llamada no vuelve a tiempo, su hilo sigue dentro de PortAudio y
+    el stream se abandona sin más llamadas: PortAudio no admite llamadas
+    concurrentes sobre el mismo stream y cerrarlo desde otro hilo podría
+    tumbar el proceso en vez de dejar un aviso en el log."""
+    for step in (first, "close"):
+        try:
+            await _call_off_loop(getattr(stream, step), _STREAM_CLOSE_TIMEOUT_S)
+        except (TimeoutError, asyncio.TimeoutError):
+            _ABANDONED_STREAMS.append(stream)
+            log.error(
+                "SounddeviceBackend.%s %s: timeout (%.1fs), el driver no responde; "
+                "se abandona el stream (el atexit de sounddevice podría colgarse al salir)",
+                label, step, _STREAM_CLOSE_TIMEOUT_S,
+            )
+            return
+        except Exception as exc:
+            log.warning("SounddeviceBackend.%s %s: %s", label, step, exc)
+
+
+def _open_and_start(factory, **kwargs):
+    """Crea un stream y lo arranca. Si .start() falla, cierra el stream
+    antes de relanzar: si no, cada intento fallido deja el dispositivo
+    ocupado por un stream de PortAudio huérfano."""
+    stream = factory(**kwargs)
+    try:
+        stream.start()
+    except BaseException:
+        try:
+            stream.close()
+        except Exception as exc:
+            log.warning("SounddeviceBackend: error cerrando stream que no arrancó: %s", exc)
+        raise
+    return stream
 
 
 class SounddeviceBackend:
@@ -48,6 +116,32 @@ class SounddeviceBackend:
             frames_per_buffer=cfg.frames_per_buffer,
         )
         self._lock = threading.Lock()
+        # Lock propio del estado de reproducción (_play_q + _play_leftover),
+        # compartido con el callback realtime de PortAudio (issue #88). No se
+        # reutiliza self._lock: el hilo de captura lo toma en cada frame y el
+        # callback de salida perdería bloques (silencio a mitad del TTS).
+        # El callback solo lo intenta sin bloquear; el hilo de asyncio sí
+        # espera (unos microsegundos: lo que tarda el callback en un bloque).
+        # _enqueue_carry no lo necesita: solo se toca desde el hilo del loop.
+        self._play_lock = threading.Lock()
+        # Diagnóstico de los callbacks realtime (M3). Los callbacks de
+        # PortAudio no escriben en el log: la E/S del logging puede tardar y,
+        # en el de salida, se haría con _play_lock tomado (reset() esperaría
+        # al log). Solo apuntan aquí; el loop lo vuelca con
+        # _flush_callback_diagnostics(). Sin lock: perder una cuenta entre
+        # hilos es aceptable para un diagnóstico.
+        self._out_status_count = 0
+        self._out_last_status = None
+        self._out_error_count = 0
+        self._out_last_error: BaseException | None = None
+        self._in_status_count = 0
+        self._in_last_status = None
+        # Generación del stream de salida actual (M2). Cada stream nuevo
+        # recibe su número en el callback; drain()/stop() la incrementan al
+        # soltar el stream. Si un stream abandonado (driver colgado que
+        # revive) sigue llamando a su callback, emite silencio y no toca
+        # _play_q, que ya pertenece al stream nuevo.
+        self._out_gen = 0
 
     # --- captura ---
 
@@ -60,13 +154,17 @@ class SounddeviceBackend:
             ) from exc
 
         self._loop = asyncio.get_running_loop()
-        self._capture_q = asyncio.Queue()
-        self._oww_q = asyncio.Queue()
+        # Acotadas (issue #113): ver core/audio/queues.py.
+        maxsize = capture_queue_maxsize(self._cfg.sample_rate, self._cfg.frames_per_buffer)
+        self._capture_q = asyncio.Queue(maxsize=maxsize)
+        self._oww_q = asyncio.Queue(maxsize=maxsize)
         self._capture_stop.clear()
 
         def _callback(indata, frames, time, status):  # noqa: ARG001
+            # Hilo realtime: sin logging (M3), solo se apunta.
             if status:
-                log.warning("SounddeviceBackend capture status: %s", status)
+                self._in_last_status = status
+                self._in_status_count += 1
             self._on_frame(bytes(indata))  # float32 contiguo
 
         kwargs = dict(
@@ -94,16 +192,12 @@ class SounddeviceBackend:
         Tras agotar los reintentos se relanza la última excepción."""
         backoff = list(self._cfg.start_retry_backoff_s)
         if not backoff:
-            stream = sd.InputStream(**kwargs)
-            stream.start()
-            return stream
+            return _open_and_start(sd.InputStream, **kwargs)
 
         last_exc: Exception | None = None
         for idx, delay in enumerate(backoff):
             try:
-                stream = sd.InputStream(**kwargs)
-                stream.start()
-                return stream
+                return _open_and_start(sd.InputStream, **kwargs)
             except sd.PortAudioError as exc:
                 last_exc = exc
                 if idx == len(backoff) - 1:
@@ -119,28 +213,38 @@ class SounddeviceBackend:
 
     async def stop(self) -> None:
         self._capture_stop.set()
-        if self._input_stream is not None:
-            try:
-                self._input_stream.stop()
-                self._input_stream.close()
-            except Exception as exc:
-                log.warning("SounddeviceBackend.stop input: %s", exc)
-            self._input_stream = None
-        if self._output_stream is not None:
-            try:
-                self._output_stream.stop()
-                self._output_stream.close()
-            except Exception as exc:
-                log.warning("SounddeviceBackend.stop output: %s", exc)
-            self._output_stream = None
-        # Drenar play queue
-        self._play_leftover = None
+        self._flush_callback_diagnostics()
+        # Se sueltan las referencias ANTES de esperar: así un drain()/stop()
+        # concurrente no vuelve a cerrar el mismo stream ni lee un None a
+        # mitad de camino. El cierre va fuera del loop (issue #87).
+        input_stream, self._input_stream = self._input_stream, None
+        output_stream, self._output_stream = self._output_stream, None
+        self._out_gen += 1
+        # abort() y no stop() en el apagado (M1): no espera a que se vacíen
+        # los buffers del driver, así que es menos probable que se cuelgue y
+        # deje un stream abandonado. drain() sí usa stop() para no cortar el
+        # final de la respuesta.
+        if input_stream is not None:
+            await _close_stream(input_stream, "stop input", first="abort")
+        if output_stream is not None:
+            await _close_stream(output_stream, "stop output", first="abort")
+        self._clear_playback()
+
+    def _clear_playback(self) -> None:
+        """Vacía la cola de reproducción y el resto pendiente del callback.
+
+        Toma _play_lock para no intercalarse con un bloque del callback
+        realtime: sin él, el callback podía sacar un chunk, reset() vaciar
+        todo y después el callback guardar el resto del chunk viejo en
+        _play_leftover, que sonaba al principio del turno siguiente (#88)."""
         self._enqueue_carry = b""
-        while not self._play_q.empty():
-            try:
-                self._play_q.get_nowait()
-            except queue_mod.Empty:
-                break
+        with self._play_lock:
+            self._play_leftover = None
+            while True:
+                try:
+                    self._play_q.get_nowait()
+                except queue_mod.Empty:
+                    break
 
     # --- acceso a datos ---
 
@@ -151,10 +255,11 @@ class SounddeviceBackend:
         (issue #9: antes ambos hacían `await q.get()` sobre la misma cola)."""
         with self._lock:
             self._preroll.append(chunk)
-        if self._loop is None or self._loop.is_closed():
+        loop, capture_q, oww_q = self._loop, self._capture_q, self._oww_q
+        if loop is None or loop.is_closed() or capture_q is None or oww_q is None:
             return
-        self._loop.call_soon_threadsafe(self._capture_q.put_nowait, chunk)
-        self._loop.call_soon_threadsafe(self._oww_q.put_nowait, chunk)
+        loop.call_soon_threadsafe(put_latest, capture_q, chunk)
+        loop.call_soon_threadsafe(put_latest, oww_q, chunk)
 
     def get_queue(self) -> asyncio.Queue[bytes]:
         if self._capture_q is None:
@@ -188,25 +293,63 @@ class SounddeviceBackend:
         if self._cfg.output_device is not None:
             out_kwargs["device"] = self._cfg.output_device
 
-        self._output_stream = sd.OutputStream(**out_kwargs, callback=self._out_callback)
-        self._output_stream.start()
+        # Solo se guarda si arrancó: antes se asignaba antes de .start() y, si
+        # start fallaba, las llamadas siguientes veían "ya hay stream" y la
+        # reproducción quedaba en silencio para siempre.
+        self._out_gen += 1
+        self._output_stream = _open_and_start(
+            sd.OutputStream, **out_kwargs,
+            callback=functools.partial(self._out_callback, gen=self._out_gen),
+        )
 
-    def _out_callback(self, outdata, frames, time, status) -> None:  # noqa: ARG002
+    def _out_callback(self, outdata, frames, time, status, *, gen: int | None = None) -> None:  # noqa: ARG002
         # IMPORTANTE: este callback corre en el hilo realtime de PortAudio,
         # registrado por sounddevice con error=paAbort — cualquier excepción
         # sin capturar que escape de aquí aborta el OutputStream ENTERO
         # (no solo el chunk en curso), dejando el resto de la respuesta en
         # silencio permanente sin ningún error visible para el usuario. Por
         # eso nunca debe poder lanzar, pase lo que pase en la cola.
-        try:
-            self._out_callback_unsafe(outdata, frames, status)
-        except Exception:
-            log.exception("SounddeviceBackend: error en _out_callback, escribiendo silencio")
+        # Nunca esperar el lock en el hilo realtime: si el hilo de asyncio
+        # está vaciando la cola (reset/drain/stop), este bloque sale en
+        # silencio y el siguiente ya ve el estado limpio (issue #88).
+        # gen=None: llamada directa (tests); si no, solo el stream actual lee.
+        if gen is not None and gen != self._out_gen:
             outdata[:, 0] = 0
-
-    def _out_callback_unsafe(self, outdata, frames, status) -> None:
+            return
+        if not self._play_lock.acquire(blocking=False):
+            outdata[:, 0] = 0
+            return
+        try:
+            self._out_callback_unsafe(outdata, frames)
+        except Exception as exc:
+            # Sin logging aquí (M3): se apunta y lo vuelca el loop.
+            self._out_last_error = exc
+            self._out_error_count += 1
+            outdata[:, 0] = 0
+        finally:
+            self._play_lock.release()
         if status:
-            log.warning("SounddeviceBackend playback status: %s", status)
+            self._out_last_status = status
+            self._out_status_count += 1
+
+    def _flush_callback_diagnostics(self) -> None:
+        """Vuelca al log, desde el hilo del loop, lo que los callbacks
+        realtime solo apuntaron (status de PortAudio y excepciones)."""
+        if self._out_status_count:
+            n, self._out_status_count = self._out_status_count, 0
+            log.warning("SounddeviceBackend playback status: %s (x%d)", self._out_last_status, n)
+        if self._out_error_count:
+            n, self._out_error_count = self._out_error_count, 0
+            exc, self._out_last_error = self._out_last_error, None
+            log.warning(
+                "SounddeviceBackend: error en _out_callback (x%d), se escribió silencio: %r",
+                n, exc, exc_info=exc,
+            )
+        if self._in_status_count:
+            n, self._in_status_count = self._in_status_count, 0
+            log.warning("SounddeviceBackend capture status: %s (x%d)", self._in_last_status, n)
+
+    def _out_callback_unsafe(self, outdata, frames) -> None:
         written = 0
         while written < frames:
             if self._play_leftover is not None:
@@ -236,6 +379,7 @@ class SounddeviceBackend:
         await self._enqueue_and_wait(audio)
 
     async def _enqueue_and_wait(self, audio: bytes) -> None:
+        self._flush_callback_diagnostics()
         # El chunking de red no garantiza alinear cada mensaje TTS a un
         # número par de bytes (tamaño de una muestra int16) — un chunk de
         # longitud impar rompería np.frombuffer en _out_callback. En vez de
@@ -256,7 +400,13 @@ class SounddeviceBackend:
         # justo al arrancar, reproduciendo silencio y perdiendo el principio
         # del audio (click al inicio de cada beep/respuesta).
         self._play_q.put(audio)
-        self._ensure_output_stream()
+        try:
+            self._ensure_output_stream()
+        except BaseException:
+            # Sin stream no hay quien consuma la cola: ese audio sonaría
+            # fuera de contexto en el siguiente intento. Se descarta.
+            self._clear_playback()
+            raise
         # Dormir solo la duración real del chunk: _play_q ya desacopla
         # productor/consumidor, así que no hace falta (ni conviene) un
         # margen extra aquí — dormir de más retrasa la entrega del
@@ -266,34 +416,14 @@ class SounddeviceBackend:
         await asyncio.sleep(duration)
 
     async def drain(self) -> None:
-        if self._output_stream is not None:
-            try:
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, self._output_stream.stop)
-            except Exception as exc:
-                log.warning("SounddeviceBackend.drain stop: %s", exc)
-            try:
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, self._output_stream.close)
-            except Exception as exc:
-                log.warning("SounddeviceBackend.drain close: %s", exc)
-            self._output_stream = None
-        # Vaciar play queue
-        self._play_leftover = None
-        self._enqueue_carry = b""
-        while not self._play_q.empty():
-            try:
-                self._play_q.get_nowait()
-            except queue_mod.Empty:
-                break
+        self._flush_callback_diagnostics()
+        output_stream, self._output_stream = self._output_stream, None
+        self._out_gen += 1
+        if output_stream is not None:
+            await _close_stream(output_stream, "drain")
+        self._clear_playback()
 
     def reset(self) -> None:
         with self._lock:
             self._preroll.clear()
-        self._play_leftover = None
-        self._enqueue_carry = b""
-        while not self._play_q.empty():
-            try:
-                self._play_q.get_nowait()
-            except queue_mod.Empty:
-                break
+        self._clear_playback()

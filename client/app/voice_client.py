@@ -85,7 +85,7 @@ _apply_termux_hosts()
 
 from backends import registry
 from backends.gateway_client import GatewayClient, GatewayHandshakeError
-from config import Config, load_config
+from config import Config, ConfigError, load_config
 from core.aio import cancel_and_wait
 from domain.event_bus import EventBus, VoiceEvent
 from domain.gateway_session import gateway_idle_listener, idle_supervisor
@@ -183,7 +183,7 @@ async def main(
         bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": name}))
 
     audio = registry.make_audio(cfg)
-    oww = registry.make_oww(cfg, on_wake_word=_oww_on_wake, bus=bus)
+    oww = registry.make_oww(cfg, bus=bus)
     display_backend = registry.make_display(cfg, on_cancel=cancel_event.set)
     # bus=bus: sin él gateway_ready (session_id, capabilities, #110) y los
     # status previos a ready nunca llegaban al bus en producción.
@@ -457,21 +457,10 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
     if not loop_ready.wait(timeout=5.0):
         log.error("El hilo de asyncio no arrancó a tiempo")
 
-    # DEAD CODE (issue #104): _handle_os_signal ya no se invoca en Cocoa
-    # mode — el fix #20 de hecho instalaba signal.set_wakeup_fd() y NSFileHandle
-    # como único canal de señales (el hilo principal no ejecuta bytecode Python,
-    # así que el handler clásico nunca se dispara). El NSFileHandle observer
-    # (_on_wakeup_fd_data) es el único handler activo. Se mantiene la función
-    # comentada para no romper la pista de auditoría de signal.signal() líneas
-    # abajo, pero nunca se invoca en Cocoa mode.
-    #
-    # def _handle_os_signal(signum, _frame) -> None:
-    #     log.info("Señal de parada recibida (%s)", signum)
-    #     loop = loop_holder.get("loop")
-    #     stop_event = stop_holder.get("stop_event")
-    #     if loop is None or stop_event is None:
-    #         return
-    #     _call_soon_threadsafe_safe(loop, stop_event)
+    # En modo Cocoa no hay handler de señales "clásico" que haga el trabajo
+    # (issue #104/#113): el hilo principal está dentro de NSApp.run() y no
+    # ejecuta bytecode Python, así que el único canal es el wakeup fd +
+    # observer de NSFileHandle de abajo (_on_wakeup_fd_data).
 
     # --- Issue #20: wakeup_fd para que las señales despierten el run loop
     # de Cocoa sin esperar al NSTimer. set_wakeup_fd hace que CPython
@@ -487,10 +476,9 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
         _flags = _fcntl.fcntl(_fd, _fcntl.F_GETFL)
         _fcntl.fcntl(_fd, _fcntl.F_SETFL, _flags | _os.O_NONBLOCK)
     signal.set_wakeup_fd(_write_fd)
-    # Mantener el write_fd vivo durante toda la vida del proceso — si se
-    # recogiese el int, CPython lo cerraría y las señales volverían al
-    # camino lento (NSTimer).
-    _write_fd_holder: list[int] = [_write_fd]
+    # Ni _read_fd ni _write_fd se cierran nunca a propósito: viven lo que el
+    # proceso. Perder la referencia al int no cierra el fd (Python no cierra
+    # descriptores crudos por GC), así que no hace falta retenerlos aparte.
 
     import AppKit
     import Foundation
@@ -511,7 +499,12 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
         if loop is not None and stop_event is not None:
             _call_soon_threadsafe_safe(loop, stop_event)
 
-    Foundation.NSNotificationCenter.defaultCenter().addObserverForName_object_queue_usingBlock_(
+    # El token opaco que devuelve addObserverForName_… es lo que mantiene
+    # registrado el bloque: se retiene en una variable local (vive mientras
+    # el hilo principal está en run_forever) y se des-registra al salir del
+    # run loop (issue #113).
+    _center = Foundation.NSNotificationCenter.defaultCenter()
+    _wakeup_observer = _center.addObserverForName_object_queue_usingBlock_(
         Foundation.NSFileHandleReadCompletionNotification,
         _fh,
         None,
@@ -527,7 +520,10 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
     for _sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(_sig, lambda _signum, _frame: None)
 
-    menubar_backend.run_forever()  # bloquea el hilo principal (NSApp.run)
+    try:
+        menubar_backend.run_forever()  # bloquea el hilo principal (NSApp.run)
+    finally:
+        _center.removeObserver_(_wakeup_observer)
 
     # El run loop puede haber parado sin pasar por main() (p.ej. "Salir"
     # durante "Arrancando…", antes de set_commands()): pedir también el
@@ -545,7 +541,13 @@ if __name__ == "__main__":
         print(f"Uso: {sys.argv[0]} <config.yaml>", file=sys.stderr)
         sys.exit(1)
 
-    _cfg = load_config(sys.argv[1])
+    try:
+        _cfg = load_config(sys.argv[1])
+    except ConfigError as _exc:
+        # Config inválida: falla al arrancar con un mensaje que nombra cada
+        # clave mal puesta, sin traceback (Fase 6, issues #49/#80).
+        print(_exc, file=sys.stderr)
+        sys.exit(2)
     _setup_logging(_cfg.logging.level)
     _menubar_backend = registry.make_menubar(_cfg)
 

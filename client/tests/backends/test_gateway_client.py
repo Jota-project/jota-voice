@@ -340,16 +340,13 @@ def test_gateway_client_init_con_bus() -> None:
     assert client._bus is bus
 
 
-def test_gateway_client_init_device_id_deprecation_warning() -> None:
-    """Issue #24: device_id se mantiene por compat pero emite DeprecationWarning."""
+def test_gateway_client_ya_no_acepta_device_id() -> None:
+    """Issue #83: device_id no forma parte del handshake documentado
+    (client-protocol.md §1); tras estar deprecado e ignorado (#24) se retira."""
     from config import GatewayConfig
     cfg = GatewayConfig(host="127.0.0.1", client_key="x")
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        GatewayClient(cfg, device_id="legacy-1")
-    deprecation = [w for w in caught if issubclass(w.category, DeprecationWarning)]
-    assert deprecation, "device_id debería emitir DeprecationWarning"
-    assert "device_id" in str(deprecation[0].message)
+    with pytest.raises(TypeError):
+        GatewayClient(cfg, device_id="legacy-1")  # type: ignore[call-arg]
 
 
 def test_gateway_client_sin_device_id_sin_warning() -> None:
@@ -781,7 +778,9 @@ async def test_connect_pasa_keepalive_y_cola_explicitos(ws_connect):
     assert kw["ping_interval"] == 15.0
     assert kw["ping_timeout"] == 25.0
     assert kw["max_queue"] is None
-    assert kw["max_size"] is None
+    # Issue #113: tope explícito en vez de None (sin límite), holgado para
+    # los frames TTS grandes que el default de 1 MiB cortaba con 1009.
+    assert kw["max_size"] == 16 * 1024 * 1024
 
 
 @pytest.mark.asyncio
@@ -886,6 +885,22 @@ async def test_send_tras_cierre_lanza_gateway_disconnected():
     with pytest.raises(GatewayDisconnected):
         await client.send_end()
     assert ws.send.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_send_audio_envia_float32_crudo_sin_cabecera():
+    """Issue #84: la subida NO lleva cabecera ni turn_seq, a diferencia de la
+    bajada TTS ([0xA1][turn_seq][PCM16]). Lo fija el protocolo del gateway
+    (client-protocol.md §3 y §12: "Header: ninguno"); una cabecera aquí se
+    interpretaría como muestras de audio."""
+    import numpy as np
+
+    client = GatewayClient(GatewayConfig(host="h", client_key="k"))
+    ws = make_ws()
+    client._ws = ws
+    frame = np.array([0.0, 0.5, -0.5, 1.0], dtype="<f4").tobytes()
+    await client.send_audio(frame)
+    ws.send.assert_awaited_once_with(frame)
 
 
 @pytest.mark.asyncio
@@ -1036,3 +1051,29 @@ async def test_cancelar_handshake_no_espera_el_close_lento(ws_connect):
     # _ABORT_CLOSE_S (0.5 s). Margen amplio para no fallar por carga (#76).
     assert loop.time() - t0 < 5.0
     assert aborted, "debe abortar el transporte si el close no termina enseguida"
+
+
+def test_handshake_error_conserva_el_code_del_gateway(ws_connect) -> None:
+    """Issue #113: un `error` antes de `ready` ya no pierde su `code`; va en
+    el reason (el atributo .code sigue siendo el close code WS, aquí None)."""
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
+    ws_mock = make_ws()
+    ws_mock.recv.return_value = json.dumps(
+        {"type": "error", "code": "AUTH_FAILED", "message": "bad key", "fatal": True}
+    )
+    ws_connect(AsyncMock(return_value=ws_mock))
+
+    with pytest.raises(GatewayHandshakeError) as info:
+        asyncio.run(GatewayClient(cfg).connect())
+    assert info.value.code is None
+    assert info.value.reason == "AUTH_FAILED: bad key"
+    assert info.value.fatal is True
+
+
+def test_cierre_1009_es_recuperable_y_tiene_etiqueta():
+    """Issue #113: un frame que supere max_size cierra con 1009; se trata
+    como cualquier corte recuperable y el log dice qué pasó."""
+    from backends.gateway_client import close_code_label, close_is_fatal
+
+    assert close_is_fatal(1009) is False
+    assert "demasiado grande" in close_code_label(1009)

@@ -6,6 +6,8 @@ is_silence() y get_preroll() con frames sintéticos.
 from __future__ import annotations
 
 import asyncio
+import queue as queue_mod
+import threading
 from unittest.mock import create_autospec
 
 import numpy as np
@@ -278,3 +280,462 @@ def test_start_succeeds_on_first_try_normal(monkeypatch, fake_sounddevice) -> No
 
     assert attempts["n"] == 1, f"sin error no debería reintentar (vi {attempts['n']})"
     assert be._input_stream is successful_stream
+
+
+# --- issue #88: _play_leftover compartido con el hilo realtime de PortAudio ---
+
+
+class _BlockingQueue:
+    """Cola falsa: get_nowait() entrega un chunk y se queda parada hasta que
+    el test la suelte, para abrir la ventana entre "el callback ya sacó el
+    chunk" y "el callback escribe _play_leftover"."""
+
+    def __init__(self, chunk: bytes) -> None:
+        self._chunk: bytes | None = chunk
+        self.inside = threading.Event()
+        self.proceed = threading.Event()
+
+    def get_nowait(self) -> bytes:
+        if self._chunk is None:
+            raise queue_mod.Empty
+        chunk, self._chunk = self._chunk, None
+        self.inside.set()
+        assert self.proceed.wait(5.0), "el test no soltó la cola"
+        return chunk
+
+    def empty(self) -> bool:
+        return self._chunk is None
+
+    def put(self, chunk: bytes) -> None:  # pragma: no cover - no se usa
+        self._chunk = chunk
+
+
+class _ObservedLock:
+    """Lock real con un aviso: ``trying`` se activa cuando alguien entra con
+    ``with`` (espera bloqueante, el lado de asyncio). El callback usa
+    ``acquire(blocking=False)``, que va directo al lock real."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.trying = threading.Event()
+
+    def acquire(self, blocking: bool = True) -> bool:
+        return self._lock.acquire(blocking)
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def __enter__(self) -> "_ObservedLock":
+        self.trying.set()
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._lock.release()
+
+
+def test_reset_no_deja_leftover_viejo_tras_callback_concurrente() -> None:
+    """Issue #88: el callback saca un chunk más grande que el bloque, reset()
+    limpia todo en otro hilo y después el callback guardaba el resto en
+    _play_leftover: ese audio viejo sonaba al principio del turno siguiente
+    (p. ej. tras interrumpir el TTS con la wake word)."""
+    be = SounddeviceBackend(_cfg())
+    lock = _ObservedLock()
+    be._play_lock = lock  # type: ignore[assignment]
+    frames = 4
+    q = _BlockingQueue(np.arange(1, 11, dtype=np.int16).tobytes())  # 10 > 4
+    be._play_q = q  # type: ignore[assignment]
+
+    outdata = np.zeros((frames, 1), dtype=np.int16)
+    cb = threading.Thread(target=be._out_callback, args=(outdata, frames, None, None))
+    cb.start()
+    resetter = threading.Thread(target=be.reset)
+    try:
+        assert q.inside.wait(5.0)
+        resetter.start()
+        # reset() tiene que pedir el lock de playback y quedarse esperando
+        # mientras el callback está a mitad de bloque (sin el lock, reset()
+        # vaciaba todo y terminaba aquí mismo).
+        assert lock.trying.wait(5.0), "reset() no usa el lock de playback"
+        assert resetter.is_alive(), "reset() mutó el estado de playback a mitad del callback"
+    finally:
+        q.proceed.set()
+        cb.join(5.0)
+        if resetter.ident is not None:  # join() de un hilo no arrancado lanza
+            resetter.join(5.0)
+    assert not cb.is_alive() and not resetter.is_alive()
+
+    assert be._play_leftover is None, "audio del turno anterior sobrevivió a reset()"
+
+
+def test_out_callback_no_bloquea_si_reset_tiene_el_lock() -> None:
+    """El callback realtime nunca espera un lock: si el hilo de asyncio está
+    limpiando la cola, ese bloque sale en silencio y el callback vuelve."""
+    be = SounddeviceBackend(_cfg())
+    be._play_q.put(np.arange(1, 5, dtype=np.int16).tobytes())
+    frames = 4
+    outdata = np.ones((frames, 1), dtype=np.int16)
+
+    with be._play_lock:
+        done = threading.Event()
+
+        def _run() -> None:
+            be._out_callback(outdata, frames, None, None)
+            done.set()
+
+        t = threading.Thread(target=_run)
+        t.start()
+        assert done.wait(5.0), "el callback realtime se quedó esperando el lock"
+        t.join(5.0)
+
+    assert np.all(outdata == 0)
+    # El chunk no se consumió: sonará en el siguiente bloque.
+    assert be._play_q.qsize() == 1
+
+
+def test_out_callback_no_usa_el_lock_del_preroll() -> None:
+    """El hilo de captura toma self._lock en cada frame; si el callback de
+    salida compartiera ese lock perdería bloques (silencio a mitad del TTS)."""
+    be = SounddeviceBackend(_cfg())
+    be._play_q.put(np.arange(1, 5, dtype=np.int16).tobytes())
+    frames = 4
+    outdata = np.zeros((frames, 1), dtype=np.int16)
+
+    with be._lock:
+        be._out_callback(outdata, frames, None, None)
+
+    assert list(outdata.ravel()) == [1, 2, 3, 4]
+
+
+# --- issue #87: stop() no debe bloquear el loop de asyncio ---------------
+#
+# Y, de paso, fallos parciales: ningún camino de error deja un stream de
+# PortAudio abierto.
+
+
+def _stream_mock(cls=None):
+    return create_autospec(cls or sd.InputStream, instance=True)
+
+
+def test_stop_cierra_los_streams_fuera_del_hilo_del_loop() -> None:
+    """Issue #87: stop()/close() de PortAudio pueden colgarse (Bluetooth que
+    se desconecta a media reproducción); no pueden correr en el hilo del loop."""
+    be = SounddeviceBackend(_cfg())
+    threads: list[threading.Thread] = []
+    inp = _stream_mock()
+    out = _stream_mock(sd.OutputStream)
+    for s in (inp, out):
+        s.abort.side_effect = lambda: threads.append(threading.current_thread())
+        s.close.side_effect = lambda: threads.append(threading.current_thread())
+    be._input_stream = inp
+    be._output_stream = out
+
+    async def _run() -> threading.Thread:
+        await be.stop()
+        return threading.current_thread()
+
+    loop_thread = asyncio.run(_run())
+
+    for s in (inp, out):
+        # M1: en el apagado, abort() (no espera a vaciar buffers) y no stop().
+        s.abort.assert_called_once_with()
+        s.stop.assert_not_called()
+        s.close.assert_called_once_with()
+    assert len(threads) == 4
+    assert all(t is not loop_thread for t in threads)
+    assert be._input_stream is None and be._output_stream is None
+
+
+def test_stop_cierra_aunque_stop_del_stream_falle() -> None:
+    """Antes, si input.stop() lanzaba, input.close() no se llamaba nunca."""
+    be = SounddeviceBackend(_cfg())
+    inp = _stream_mock()
+    inp.abort.side_effect = sd.PortAudioError("device gone")
+    out = _stream_mock(sd.OutputStream)
+    out.abort.side_effect = sd.PortAudioError("device gone")
+    be._input_stream = inp
+    be._output_stream = out
+
+    asyncio.run(be.stop())
+
+    inp.close.assert_called_once_with()
+    out.close.assert_called_once_with()
+    assert be._input_stream is None and be._output_stream is None
+
+
+def test_stop_no_se_cuelga_si_el_driver_no_vuelve(monkeypatch, caplog) -> None:
+    """Un driver colgado no debe impedir el apagado: stop() se rinde tras un
+    timeout acotado, lo loguea y sigue con el resto."""
+    import backends.audio_sounddevice as mod
+
+    monkeypatch.setattr(mod, "_STREAM_CLOSE_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(mod, "_ABANDONED_STREAMS", [])  # estado global aislado
+    be = SounddeviceBackend(_cfg())
+    release = threading.Event()
+    inp = _stream_mock()
+    inp.abort.side_effect = lambda: release.wait(5.0)
+    out = _stream_mock(sd.OutputStream)
+    be._input_stream = inp
+    be._output_stream = out
+    be._play_q.put(b"\x00\x00")
+
+    try:
+        with caplog.at_level("WARNING", logger=mod.__name__):
+            asyncio.run(asyncio.wait_for(be.stop(), timeout=5.0))
+    finally:
+        release.set()
+
+    # El stream colgado se abandona: su hilo sigue dentro de PortAudio y un
+    # close() concurrente sobre el mismo stream no es seguro.
+    inp.close.assert_not_called()
+    out.abort.assert_called_once_with()
+    out.close.assert_called_once_with()
+    assert be._play_q.empty()
+    # M1: el stream colgado queda marcado (choca con el atexit de sounddevice).
+    assert inp in mod.abandoned_streams()
+    assert any("timeout" in r.getMessage().lower() for r in caplog.records)
+
+
+def test_drain_soporta_stop_concurrente() -> None:
+    """drain() leía self._output_stream tras cada await: un stop() concurrente
+    lo ponía a None entre medias (AttributeError sobre None)."""
+    be = SounddeviceBackend(_cfg())
+    out = _stream_mock(sd.OutputStream)
+    be._output_stream = out
+
+    async def _run() -> None:
+        await asyncio.gather(be.drain(), be.stop())
+
+    asyncio.run(_run())
+
+    out.stop.assert_called_once_with()
+    out.close.assert_called_once_with()
+    assert be._output_stream is None
+
+
+def test_start_cierra_el_stream_si_start_del_stream_falla(monkeypatch, fake_sounddevice) -> None:
+    """Fallo parcial: InputStream() se crea pero .start() lanza. Cada reintento
+    dejaba un stream de PortAudio abierto (el dispositivo seguía ocupado)."""
+    streams: list = []
+
+    def make_input_stream(**_kwargs):
+        s = _stream_mock()
+        if len(streams) < 2:
+            s.start.side_effect = sd.PortAudioError("busy")
+        streams.append(s)
+        return s
+
+    fake_sounddevice.InputStream.side_effect = make_input_stream
+    _no_wait_sleep(monkeypatch)
+
+    be = SounddeviceBackend(_cfg())
+    asyncio.run(be.start())
+
+    assert len(streams) == 3
+    for failed in streams[:2]:
+        failed.close.assert_called_once_with()
+    streams[2].close.assert_not_called()
+    assert be._input_stream is streams[2]
+
+
+def test_start_sin_backoff_cierra_el_stream_si_start_falla(fake_sounddevice) -> None:
+    s = _stream_mock()
+    s.start.side_effect = sd.PortAudioError("busy")
+    fake_sounddevice.InputStream.return_value = s
+
+    be = SounddeviceBackend(_cfg(start_retry_backoff_s=[]))
+    with pytest.raises(sd.PortAudioError):
+        asyncio.run(be.start())
+
+    s.close.assert_called_once_with()
+    assert be._input_stream is None
+
+
+def test_ensure_output_stream_no_guarda_un_stream_que_no_arranco(fake_sounddevice) -> None:
+    """Fallo parcial en la salida: se asignaba self._output_stream antes de
+    .start(); si start fallaba, las llamadas siguientes veían "ya hay stream"
+    y la reproducción quedaba en silencio para siempre."""
+    broken = _stream_mock(sd.OutputStream)
+    broken.start.side_effect = sd.PortAudioError("no output device")
+    good = _stream_mock(sd.OutputStream)
+    fake_sounddevice.OutputStream.side_effect = [broken, good]
+
+    be = SounddeviceBackend(_cfg())
+    with pytest.raises(sd.PortAudioError):
+        be._ensure_output_stream()
+
+    broken.close.assert_called_once_with()
+    assert be._output_stream is None
+
+    be._ensure_output_stream()
+    assert be._output_stream is good
+    good.start.assert_called_once_with()
+
+
+# --- M3: nada de logging en los callbacks realtime ------------------------
+
+
+class _LogSpy:
+    """Sustituto del logger del módulo: registra qué hilo escribe."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, threading.Thread, str]] = []
+
+    def _rec(self, level: str):
+        def _f(msg, *args, **_kw):
+            self.calls.append((level, threading.current_thread(), msg % args if args else msg))
+        return _f
+
+    def __getattr__(self, name: str):
+        if name in ("debug", "info", "warning", "error", "exception"):
+            return self._rec(name)
+        raise AttributeError(name)
+
+
+def test_out_callback_no_escribe_en_el_log(monkeypatch) -> None:
+    """El callback realtime escribía en el log con _play_lock tomado: con
+    underflows frecuentes, reset() quedaba esperando a la E/S del log. Ahora
+    solo apunta contadores y el loop los vuelca después."""
+    import backends.audio_sounddevice as mod
+
+    spy = _LogSpy()
+    monkeypatch.setattr(mod, "log", spy)
+    be = SounddeviceBackend(_cfg())
+    frames = 4
+    outdata = np.zeros((frames, 1), dtype=np.int16)
+
+    be._out_callback(outdata, frames, None, "output underflow")
+    be._play_q.put("no-son-bytes")  # type: ignore[arg-type]  # hace lanzar al callback
+    be._out_callback(outdata, frames, None, None)
+
+    assert spy.calls == [], "el callback realtime escribió en el log"
+    assert np.all(outdata == 0)
+
+    be._flush_callback_diagnostics()
+    msgs = " | ".join(m for _, _, m in spy.calls)
+    assert "underflow" in msgs
+    assert "error en _out_callback" in msgs
+    # Volcado una sola vez: los contadores se reinician.
+    spy.calls.clear()
+    be._flush_callback_diagnostics()
+    assert spy.calls == []
+
+
+def test_play_chunk_vuelca_los_diagnosticos_del_callback(monkeypatch) -> None:
+    import backends.audio_sounddevice as mod
+
+    spy = _LogSpy()
+    monkeypatch.setattr(mod, "log", spy)
+    be = SounddeviceBackend(_cfg())
+    be._ensure_output_stream = lambda: None
+    be._out_callback(np.zeros((4, 1), dtype=np.int16), 4, None, "output underflow")
+
+    async def _no_sleep(_s: float) -> None:
+        return None
+
+    monkeypatch.setattr(mod.asyncio, "sleep", _no_sleep)
+    asyncio.run(be.play_chunk(b"\x00\x00"))
+
+    assert any("underflow" in m for _, _, m in spy.calls)
+
+
+def test_callback_de_captura_no_escribe_en_el_log(monkeypatch, fake_sounddevice) -> None:
+    import backends.audio_sounddevice as mod
+
+    stream = _stream_mock()
+    fake_sounddevice.InputStream.return_value = stream
+    spy = _LogSpy()
+    be = SounddeviceBackend(_cfg())
+    asyncio.run(be.start())
+    callback = fake_sounddevice.InputStream.call_args.kwargs["callback"]
+    be._loop = None  # sin loop vivo: _on_frame solo alimenta el preroll
+
+    monkeypatch.setattr(mod, "log", spy)
+    callback(np.zeros((512, 1), dtype=np.float32), 512, None, "input overflow")
+    assert spy.calls == []
+
+    be._flush_callback_diagnostics()
+    assert any("overflow" in m for _, _, m in spy.calls)
+
+
+# --- M2: el callback de un stream abandonado no compite por la cola -------
+
+
+def test_callback_de_stream_antiguo_emite_silencio_y_no_consume(fake_sounddevice) -> None:
+    """Un stream abandonado en drain()/stop() (driver colgado que revive)
+    seguía leyendo _play_q y competía con el stream nuevo por el audio."""
+    old_stream = _stream_mock(sd.OutputStream)
+    new_stream = _stream_mock(sd.OutputStream)
+    fake_sounddevice.OutputStream.side_effect = [old_stream, new_stream]
+    be = SounddeviceBackend(_cfg())
+
+    be._ensure_output_stream()
+    old_cb = fake_sounddevice.OutputStream.call_args.kwargs["callback"]
+    asyncio.run(be.drain())
+    be._ensure_output_stream()
+    new_cb = fake_sounddevice.OutputStream.call_args.kwargs["callback"]
+
+    be._play_q.put(np.arange(1, 5, dtype=np.int16).tobytes())
+    out = np.ones((4, 1), dtype=np.int16)
+    old_cb(out, 4, None, None)
+    assert np.all(out == 0)
+    assert be._play_q.qsize() == 1, "el stream viejo se comió audio del nuevo"
+
+    new_cb(out, 4, None, None)
+    assert list(out.ravel()) == [1, 2, 3, 4]
+
+
+def test_drain_sigue_usando_stop_para_no_cortar_el_final() -> None:
+    """drain() quiere que suene lo que queda en el buffer: stop(), no abort()."""
+    be = SounddeviceBackend(_cfg())
+    out = _stream_mock(sd.OutputStream)
+    be._output_stream = out
+
+    asyncio.run(be.drain())
+
+    out.stop.assert_called_once_with()
+    out.abort.assert_not_called()
+
+
+def test_play_chunk_no_deja_audio_en_cola_si_el_stream_no_arranca(fake_sounddevice) -> None:
+    """El put() va antes de arrancar el stream (para no perder el principio
+    del audio); si arrancar falla, ese audio no debe quedarse en la cola y
+    sonar fuera de contexto en el siguiente intento."""
+    broken = _stream_mock(sd.OutputStream)
+    broken.start.side_effect = sd.PortAudioError("no output device")
+    fake_sounddevice.OutputStream.return_value = broken
+    be = SounddeviceBackend(_cfg())
+
+    with pytest.raises(sd.PortAudioError):
+        asyncio.run(be.play_chunk(b"\x01\x00\x02\x00"))
+
+    assert be._play_q.empty()
+
+
+# --- issue #113: colas de captura acotadas --------------------------------
+
+
+def test_colas_de_captura_acotadas_sin_consumidor(fake_sounddevice) -> None:
+    """Mientras IDLE espera la wake word nadie consume get_queue(), y con OWW
+    reconectando nadie consume get_oww_queue(): sin maxsize crecían sin
+    límite (~60 KB/s). Ahora guardan los últimos ~10 s y descartan lo viejo."""
+    fake_sounddevice.InputStream.return_value = _stream_mock()
+    be = SounddeviceBackend(_cfg())
+
+    async def _run() -> tuple[int, int, bytes]:
+        await be.start()
+        maxsize = be.get_queue().maxsize
+        assert maxsize > 0 and be.get_oww_queue().maxsize == maxsize
+        for i in range(maxsize + 5):
+            be._on_frame(i.to_bytes(4, "little"))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        q = be.get_queue()
+        last = b""
+        while not q.empty():
+            last = q.get_nowait()
+        return be.get_oww_queue().qsize(), maxsize, last
+
+    oww_size, maxsize, last = asyncio.run(_run())
+    assert oww_size == maxsize
+    assert last == (maxsize + 4).to_bytes(4, "little"), "se perdió el frame más reciente"

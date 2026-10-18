@@ -37,6 +37,6 @@ async def cancel_and_wait(*tasks: asyncio.Future | None) -> None:
         await asyncio.wait(pending)
     # Marca como recuperadas las excepciones de tareas ya terminadas para no
     # generar "Task exception was never retrieved" en el log.
-    for t in tasks:
-        if t is not None and t.done() and not t.cancelled():
-            t.exception()
+    for task in tasks:
+        if task is not None and task.done() and not task.cancelled():
+            task.exception()

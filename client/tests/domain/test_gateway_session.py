@@ -8,7 +8,7 @@ tests/backends/test_gateway_real_ws.py.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -17,6 +17,8 @@ from backends.gateway_client import (
     GatewayEvent,
     GatewayHandshakeError,
 )
+from app.playback_engine import PlaybackEngine
+from backends.audio_base import AudioBackend
 from config import AudioConfig, Config, DeviceConfig, GatewayConfig
 from domain import gateway_session
 from domain.event_bus import EventBus, VoiceEvent
@@ -121,6 +123,14 @@ class FakeGateway:
 
     async def disconnect(self) -> None:
         self._connected = False
+
+
+def _http_response(status: int):
+    """Respuesta HTTP real de websockets para InvalidStatus (sin mocks)."""
+    from websockets.datastructures import Headers
+    from websockets.http11 import Response
+
+    return Response(status, "rechazado", Headers())
 
 
 def _gcfg(**kw) -> GatewayConfig:
@@ -324,7 +334,7 @@ async def test_idle_cancela_el_supervisor_antes_de_volver():
     from domain.state_machine import _idle
 
     bus = EventBus()
-    audio = MagicMock()
+    audio = MagicMock(spec=AudioBackend)
     audio.get_queue.return_value = asyncio.Queue()
     gw = FakeGateway()  # sesión viva y en silencio: el supervisor lee
     cfg = _cfg()
@@ -349,7 +359,7 @@ async def test_un_solo_lector_del_socket_durante_un_turno_completo():
 
     bus = EventBus()
     cfg = _cfg()
-    audio = MagicMock()
+    audio = MagicMock(spec=AudioBackend)
     q: asyncio.Queue = asyncio.Queue()
     for _ in range(10):
         q.put_nowait(bytes(2048))
@@ -361,10 +371,8 @@ async def test_un_solo_lector_del_socket_durante_un_turno_completo():
         [GatewayEvent("transcription", {"text": "hola"}),
          GatewayEvent("tts_chunk", {"audio": b"\x00\x00"})],  # turno
     ])
-    playback = MagicMock()
-    playback.play_chunk = AsyncMock()
-    playback.drain = AsyncMock()
-    playback.play_notification = AsyncMock(side_effect=OSError("beep roto"))
+    playback = MagicMock(spec=PlaybackEngine)
+    playback.play_notification.side_effect = OSError("beep roto")
 
     sm = asyncio.create_task(sm_run(
         cfg, bus, audio, gw, playback,
@@ -389,7 +397,7 @@ async def test_un_solo_lector_del_socket_durante_un_turno_completo():
 
 
 def _audio_with_frames(n: int = 5) -> MagicMock:
-    audio = MagicMock()
+    audio = MagicMock(spec=AudioBackend)
     q: asyncio.Queue = asyncio.Queue()
     for _ in range(n):
         q.put_nowait(bytes(2048))
@@ -400,11 +408,7 @@ def _audio_with_frames(n: int = 5) -> MagicMock:
 
 
 def _playback() -> MagicMock:
-    p = MagicMock()
-    p.play_chunk = AsyncMock()
-    p.drain = AsyncMock()
-    p.play_notification = AsyncMock()
-    return p
+    return MagicMock(spec=PlaybackEngine)
 
 
 @pytest.mark.asyncio
@@ -540,7 +544,11 @@ async def test_cancel_sin_error_sigue_siendo_cancel():
     gw = FakeGateway(sessions=[["block"]])
     cancel_event = asyncio.Event()
     t = asyncio.create_task(_responding(bus, gw, _playback(), cancel_event))
-    await asyncio.sleep(0.02)
+    for _ in range(100):  # sin esperas reales: hasta que el lector está dentro
+        if gw.readers:
+            break
+        await asyncio.sleep(0)
+    assert gw.readers == 1
     cancel_event.set()
     with pytest.raises(_TurnCancelled):
         await asyncio.wait_for(t, 1.0)
@@ -555,25 +563,36 @@ async def test_cancel_sin_error_sigue_siendo_cancel():
 # ---------------------------------------------------------------------------
 
 
-async def _slow_to_cancel(*_a, **_kw):
-    try:
-        await asyncio.Event().wait()
-    except asyncio.CancelledError:
-        await asyncio.sleep(0.2)  # limpieza lenta: ventana para el cancel exterior
-        raise
-
-
 @pytest.mark.asyncio
-async def test_wait_wake_or_cancel_no_se_traga_la_cancelacion_exterior(monkeypatch):
+async def test_responding_no_se_traga_la_cancelacion_exterior_durante_el_drenaje(monkeypatch):
+    """Antes cubría _wait_wake_or_cancel, que desapareció con #93: el mismo
+    contrato vale ahora para la espera de la wake word dentro de _responding.
+    Sin esperas reales: la limpieza lenta del hijo espera a un evento."""
     from domain import state_machine
 
+    cleanup_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow_to_cancel(*_a, **_kw):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cleanup_started.set()
+            await release.wait()  # limpieza lenta: ventana para el cancel exterior
+            raise
+
     monkeypatch.setattr(state_machine, "_consume_wake", _slow_to_cancel)
+    gw = FakeGateway(sessions=[["block"]])
     cancel_event = asyncio.Event()
-    t = asyncio.create_task(state_machine._wait_wake_or_cancel(EventBus(), cancel_event, "X"))
-    await asyncio.sleep(0.01)
-    cancel_event.set()        # cancel_task gana → se empieza a drenar wake_task (lento)
-    await asyncio.sleep(0.05)
+    t = asyncio.create_task(state_machine._responding(EventBus(), gw, _playback(), cancel_event))
+    for _ in range(100):
+        if gw.readers:
+            break
+        await asyncio.sleep(0)
+    cancel_event.set()        # cancel_task gana → se empieza a drenar la espera de wake (lenta)
+    await asyncio.wait_for(cleanup_started.wait(), 1.0)
     t.cancel()                # llega el cancel exterior durante el drenaje
+    release.set()
     await asyncio.wait([t], timeout=1.0)
     assert t.done() and t.cancelled(), "la cancelación exterior se perdió"
 
@@ -595,7 +614,7 @@ async def test_rechazo_fatal_seguido_de_fallo_transitorio_vuelve_a_reintentar():
 
 
 @pytest.mark.asyncio
-async def test_supervisor_con_gateway_real_http_403_no_reintenta_y_avisa(monkeypatch):
+async def test_supervisor_con_gateway_real_http_403_no_reintenta_y_avisa(ws_connect):
     """Revisión Fase R, punto 1: un 403 en el upgrade lanzaba un
     GatewayHandshakeError fatal sin asignar fatal_error y el supervisor
     reintentaba para siempre sin publicar error. Con GatewayClient real."""
@@ -608,9 +627,9 @@ async def test_supervisor_con_gateway_real_http_403_no_reintenta_y_avisa(monkeyp
     async def _fake_connect(*a, **kw):
         nonlocal calls
         calls += 1
-        raise InvalidStatus(MagicMock(status_code=403))
+        raise InvalidStatus(_http_response(403))
 
-    monkeypatch.setattr(gc.websockets, "connect", _fake_connect)
+    ws_connect(_fake_connect)
     cfg = _gcfg()
     bus = EventBus()
     gw = gc.GatewayClient(cfg, bus=bus)
@@ -635,24 +654,25 @@ def _ev(t, **d):
     return GatewayEvent(t, d)
 
 
-async def _respond(script, monkeypatch=None):
+async def _respond(script, grace_s: float = 0.05):
+    """Ejecuta _responding con un guion. Gracia tras turn_end corta por
+    config (issue #65; antes se parcheaba state_machine.TURN_END_GRACE_S)."""
     from domain.state_machine import _responding
 
     bus = EventBus()
     gw = FakeGateway(sessions=[script + ["block"]])
     pb = _playback()
-    pb.push_token = MagicMock()
-    pb.reset = MagicMock()
     published = asyncio.create_task(_collect_until(bus, lambda e, _: e.type == "playback_ended", 5.0))
     await asyncio.sleep(0)
-    await asyncio.wait_for(_responding(bus, gw, pb, asyncio.Event()), 5.0)
+    await asyncio.wait_for(
+        _responding(bus, gw, pb, asyncio.Event(), gateway_cfg=_gcfg(turn_end_grace_s=grace_s)),
+        5.0,
+    )
     return gw, pb, await published
 
 
 @pytest.mark.asyncio
-async def test_turn_end_de_un_push_no_termina_nuestro_turno(monkeypatch):
-    from domain import state_machine
-    monkeypatch.setattr(state_machine, "TURN_END_GRACE_S", 0.05, raising=False)
+async def test_turn_end_de_un_push_no_termina_nuestro_turno():
     gw, pb, got = await _respond([
         _ev("transcription", text="hola"),
         _ev("turn_end", turn_id="t-3"),            # push que acaba ahora
@@ -669,9 +689,7 @@ async def test_turn_end_de_un_push_no_termina_nuestro_turno(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_tokens_y_audio_de_otro_turno_se_ignoran(monkeypatch):
-    from domain import state_machine
-    monkeypatch.setattr(state_machine, "TURN_END_GRACE_S", 0.05, raising=False)
+async def test_tokens_y_audio_de_otro_turno_se_ignoran():
     gw, pb, got = await _respond([
         _ev("llm_token", turn_id="t-3", content="push"),   # push en curso
         _ev("tts_chunk", audio=b"\x09\x00", turn_seq=3),
@@ -725,7 +743,7 @@ async def test_recording_no_recorta_el_plazo_del_cliente():
 
 
 @pytest.mark.asyncio
-async def test_tras_un_fatal_un_solo_error_por_turno(monkeypatch):
+async def test_tras_un_fatal_un_solo_error_por_turno(ws_connect):
     """Revisión Fase R, punto 6: reported_fatal era local a cada supervisor:
     tras un 1008 salían dos errores por turno (el del turno y el del
     supervisor de la siguiente IDLE). Con GatewayClient real."""
@@ -734,9 +752,9 @@ async def test_tras_un_fatal_un_solo_error_por_turno(monkeypatch):
     from websockets.exceptions import InvalidStatus
 
     async def _fake_connect(*a, **kw):
-        raise InvalidStatus(MagicMock(status_code=403))
+        raise InvalidStatus(_http_response(403))
 
-    monkeypatch.setattr(gc.websockets, "connect", _fake_connect)
+    ws_connect(_fake_connect)
     cfg = _cfg()
     bus = EventBus()
     gw = gc.GatewayClient(cfg.gateway, bus=bus)
