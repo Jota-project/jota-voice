@@ -380,6 +380,10 @@ def _field_names(cls: type) -> set[str]:
 # obsoleta (solo avisa, ver load_config).
 _SECTIONS = {"gateway", "device", "oww", "audio", "display", "logging", "menubar"}
 _DEPRECATED_SECTIONS = {"control"}
+# Secciones del mismo YAML que solo leen los scripts shell (issue #79):
+# `hosts:` la usa install/02-hosts.sh (lib/yaml.sh::yaml_get_hosts) para el
+# /etc/hosts de Termux. Se ignoran a propósito, sin aviso ni validación.
+_SHELL_ONLY_SECTIONS = {"hosts"}
 
 
 def _start(problems: list[str] | None) -> tuple[list[str], bool]:
@@ -613,7 +617,8 @@ def load_config(path: str | Path) -> Config:
         logging=_logging_from_dict(data.get("logging"), problems),
         menubar=_menubar_from_dict(menubar_section, problems),
     )
-    for key in sorted(set(data) - _SECTIONS - _DEPRECATED_SECTIONS, key=str):
+    known = _SECTIONS | _DEPRECATED_SECTIONS | _SHELL_ONLY_SECTIONS
+    for key in sorted(set(data) - known, key=str):
         log.warning("config.yaml: sección desconocida %r (se ignora; ¿errata?)", key)
     if problems:
         raise ConfigError(problems, path)

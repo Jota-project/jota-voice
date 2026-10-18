@@ -562,6 +562,26 @@ def _wizard_config_yaml() -> str:
     )
 
 
+def test_seccion_hosts_es_del_lado_shell_y_no_avisa(tmp_path, caplog) -> None:
+    """Issue #79: `hosts:` la leen los scripts de Termux (lib/yaml.sh) para
+    /etc/hosts; el cliente Python la reconoce y la ignora sin aviso."""
+    with caplog.at_level("WARNING", logger="config"):
+        cfg = _load_tmp(tmp_path, {**_BASE, "hosts": [{"ip": "192.168.1.2", "name": "srv"}]})
+    assert not caplog.records, caplog.text
+    assert not hasattr(cfg, "hosts")
+
+
+def test_config_example_documenta_hosts_como_solo_shell() -> None:
+    with open(os.path.join(_REPO_ROOT, "config.example.yaml")) as f:
+        text = f.read()
+    lines = text.split("\nhosts:", 1)[0].splitlines()
+    comment: list[str] = []
+    while lines and lines[-1].startswith("#"):
+        comment.insert(0, lines.pop())
+    block = "\n".join(comment).lower()
+    assert "solo" in block and "termux" in block and "python" in block, block
+
+
 def test_la_config_del_wizard_de_macos_carga_sin_avisos(tmp_path, caplog) -> None:
     from config import load_config
     path = tmp_path / "config.yaml"

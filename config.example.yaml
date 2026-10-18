@@ -78,6 +78,9 @@ display:
   # rate_limit_window_s: 10.0
   # max_clients: 8              # displays conectados a la vez
 
+# Solo para los scripts de Termux (install/02-hosts.sh vía lib/yaml.sh):
+# añaden estas entradas al /etc/hosts del teléfono. El cliente Python no la
+# usa (la reconoce y la ignora sin aviso); en macOS/Linux puedes quitarla.
 hosts:
   - ip: "192.168.X.X"
     name: "mi-servidor"
