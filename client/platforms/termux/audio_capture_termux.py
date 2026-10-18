@@ -11,6 +11,7 @@ parec usa PulseAudio → OpenSL_ES_source → micrófono real.
 """
 
 import asyncio
+import functools
 import logging
 import os
 import subprocess
@@ -21,10 +22,17 @@ import numpy as np
 
 from config import AudioConfig
 from core.audio.framing import int16_to_float32
+from core.audio.offloop import call_off_loop
 from core.audio.preroll import PrerollBuffer
+from core.audio.queues import capture_queue_maxsize, put_latest
 from core.audio.vad import is_silence as _is_silence
 
 logger = logging.getLogger(__name__)
+
+# Tope de la parada completa fuera del loop: terminate + wait(2) [+ kill +
+# wait(2)] + join(2) suman ~6 s en el peor caso; esto es solo la red de
+# seguridad por si algo se cuelga fuera de esos timeouts.
+_STOP_TIMEOUT_S = 8.0
 
 
 class AudioCapture:
@@ -39,6 +47,10 @@ class AudioCapture:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._read_thread: Optional[threading.Thread] = None
+        # Generación de arranque: start() y stop() la incrementan. Un start()
+        # que despierta con otra generación sabe que lo pararon (y quizá
+        # llegó otro start() después) y se retira sin tocar el estado nuevo.
+        self._gen = 0
 
         self._preroll = PrerollBuffer(
             seconds=cfg.preroll_seconds,
@@ -50,11 +62,15 @@ class AudioCapture:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def start(self) -> None:
-        """Arranca parec y el hilo lector. Reintenta con backoff si parec muere."""
+    async def start(self) -> bool:
+        """Arranca parec y el hilo lector. Reintenta con backoff si parec muere.
+
+        Devuelve True si la captura quedó en marcha y False si la pararon
+        durante el arranque (stop() mientras se esperaba a parec)."""
+        self._gen += 1
+        gen = self._gen
         self._loop = asyncio.get_running_loop()
-        self._queue = asyncio.Queue()
-        self._oww_queue = asyncio.Queue()
+        self._queue, self._oww_queue = self._new_queues()
         self._stop_event.clear()
 
         pulse_path = os.environ.get("PULSE_RUNTIME_PATH", os.path.expanduser("~/.pulse"))
@@ -73,31 +89,45 @@ class AudioCapture:
         # Bucle de reintento: si parec muere (PulseAudio aún no listo, HAL no
         # inicializado, etc.) re-lanzarlo hasta que funcione o nos paren.
         backoff = 1.0
-        while not self._stop_event.is_set():
+        while not self._stop_event.is_set() and gen == self._gen:
             try:
-                self._proc = subprocess.Popen(
+                proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                     env=env,
                 )
+                self._proc = proc
                 # Verificar que arrancó de verdad (no murió instantáneo)
                 await asyncio.sleep(0.5)
-                if self._proc.poll() is not None:
+                if self._stop_event.is_set() or gen != self._gen:
+                    # stop() llegó durante la espera (ahora cede el loop), y
+                    # quizá otro start() después. Si stop() ya se llevó el
+                    # proceso, él lo mata; si no, lo hacemos aquí. Nunca se
+                    # toca el proceso de un start() posterior ni se arranca
+                    # el hilo lector.
+                    if self._proc is proc:
+                        self._proc = None
+                        await self._off_loop(functools.partial(self._terminate_proc, proc))
+                    return False
+                if proc.poll() is not None:
                     logger.warning(
                         "AudioCapture: parec murió al arrancar (rc=%s), reintentando en %.1fs",
-                        self._proc.returncode, backoff,
+                        proc.returncode, backoff,
                     )
-                    self._proc = None
+                    if self._proc is proc:
+                        self._proc = None
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 10.0)
                     continue
                 backoff = 1.0
+                # El proceso va como argumento: el hilo no relee self._proc,
+                # que stop() pone a None mientras el hilo sigue leyendo.
                 self._read_thread = threading.Thread(
-                    target=self._read_loop, daemon=True, name="audio-capture"
+                    target=self._read_loop, args=(proc,), daemon=True, name="audio-capture"
                 )
                 self._read_thread.start()
-                return
+                return True
             except FileNotFoundError:
                 logger.error("AudioCapture: parec no encontrado en PATH")
                 raise
@@ -108,27 +138,61 @@ class AudioCapture:
                 )
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 10.0)
+        return False
+
+    def _new_queues(self) -> tuple[asyncio.Queue[bytes], asyncio.Queue[bytes]]:
+        """Colas del fan-out acotadas (issue #113): ver core/audio/queues.py."""
+        maxsize = capture_queue_maxsize(self._cfg.sample_rate, self._cfg.frames_per_buffer)
+        return asyncio.Queue(maxsize=maxsize), asyncio.Queue(maxsize=maxsize)
 
     async def stop(self) -> None:
-        """Detiene el proceso parec y el hilo lector."""
+        """Detiene el proceso parec y el hilo lector.
+
+        Las esperas (hasta 2 s por wait() de parec y 2 s por el join del
+        hilo, ~6 s en el peor caso) corren en un hilo daemon: en el hilo del
+        loop congelaban OWW, gateway y display durante el apagado. El aviso
+        de parada y la suelta de referencias son síncronos, así un start()
+        en curso ve el stop al despertar y no arranca el hilo lector."""
         logger.debug("AudioCapture detenido")
         self._stop_event.set()
-        if self._proc is not None:
+        self._gen += 1
+        proc, self._proc = self._proc, None
+        thread, self._read_thread = self._read_thread, None
+        if proc is None and thread is None:
+            return
+        await self._off_loop(functools.partial(self._stop_blocking, proc, thread))
+
+    @staticmethod
+    async def _off_loop(fn) -> None:
+        """Hilo daemon con tope (core.audio.offloop), no el executor por
+        defecto: sus hilos no son daemon y retendrían la salida del proceso."""
+        try:
+            await call_off_loop(fn, _STOP_TIMEOUT_S, name="audio-capture-stop")
+        except (TimeoutError, asyncio.TimeoutError):
+            logger.error("AudioCapture: la parada de parec no terminó en %.1fs", _STOP_TIMEOUT_S)
+
+    @classmethod
+    def _stop_blocking(
+        cls, proc: Optional[subprocess.Popen], thread: Optional[threading.Thread]
+    ) -> None:
+        if proc is not None:
+            cls._terminate_proc(proc)
+        if thread is not None:
+            thread.join(timeout=2.0)
+
+    @staticmethod
+    def _terminate_proc(proc: subprocess.Popen) -> None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=2.0)
+        except Exception:
+            # Tras kill() hay que volver a hacer wait() para recoger
+            # (reap) el proceso; si no, parec queda zombie (issue #86).
             try:
-                self._proc.terminate()
-                self._proc.wait(timeout=2.0)
-            except Exception:
-                # Tras kill() hay que volver a hacer wait() para recoger
-                # (reap) el proceso; si no, parec queda zombie (issue #86).
-                try:
-                    self._proc.kill()
-                    self._proc.wait(timeout=2.0)
-                except Exception as exc:
-                    logger.warning("AudioCapture: no se pudo recoger parec tras kill(): %s", exc)
-            self._proc = None
-        if self._read_thread is not None:
-            self._read_thread.join(timeout=2.0)
-            self._read_thread = None
+                proc.kill()
+                proc.wait(timeout=2.0)
+            except Exception as exc:
+                logger.warning("AudioCapture: no se pudo recoger parec tras kill(): %s", exc)
 
     # ------------------------------------------------------------------
     # Acceso a datos
@@ -174,13 +238,17 @@ class AudioCapture:
     # Hilo lector
     # ------------------------------------------------------------------
 
-    def _read_loop(self) -> None:
+    def _read_loop(self, proc: subprocess.Popen) -> None:
         """Lee frames de parec y los encola en asyncio."""
         bytes_per_frame = self._cfg.frames_per_buffer * 2  # int16 = 2 bytes/sample
+        stdout = proc.stdout
+        if stdout is None:  # Popen siempre se crea con stdout=PIPE
+            logger.warning("AudioCapture._read_loop: parec sin stdout")
+            return
         _first = True
         while not self._stop_event.is_set():
             try:
-                in_data = self._proc.stdout.read(bytes_per_frame)
+                in_data = stdout.read(bytes_per_frame)
             except Exception as exc:
                 logger.warning("AudioCapture._read_loop: error leyendo parec: %s", exc)
                 break
@@ -202,7 +270,8 @@ class AudioCapture:
         (issue #9: antes ambos hacían `await q.get()` sobre la misma cola)."""
         with self._lock:
             self._preroll.append(float32_bytes)
-        if self._loop is None or self._loop.is_closed():
+        loop, queue, oww_queue = self._loop, self._queue, self._oww_queue
+        if loop is None or loop.is_closed() or queue is None or oww_queue is None:
             return
-        self._loop.call_soon_threadsafe(self._queue.put_nowait, float32_bytes)
-        self._loop.call_soon_threadsafe(self._oww_queue.put_nowait, float32_bytes)
+        loop.call_soon_threadsafe(put_latest, queue, float32_bytes)
+        loop.call_soon_threadsafe(put_latest, oww_queue, float32_bytes)

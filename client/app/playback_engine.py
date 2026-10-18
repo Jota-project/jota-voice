@@ -22,9 +22,19 @@ class PlaybackEngine:
     def __init__(self, bus: EventBus, audio) -> None:
         self._bus = bus
         self._audio = audio
+        # Tokens recibidos desde el último chunk publicado, y texto completo
+        # del turno ya publicado (issue #95: antes se hacía "".join() de
+        # todos los tokens del turno en cada chunk).
         self._text_buffer: list[str] = []
-        self._text_cursor = 0
+        self._full_text = ""
         self._play_lock = asyncio.Lock()
+        # Época de reproducción (issue #89). reset() tiene que ser síncrono
+        # (state_machine lo llama sin await), así que no puede tomar
+        # _play_lock. En su lugar incrementa la época: lo que estuviera
+        # esperando el lock con una época anterior es del turno cancelado y
+        # se descarta al entrar, sin depender de que el llamador haya
+        # cancelado y esperado antes las tareas de reproducción.
+        self._epoch = 0
 
     def push_token(self, content: str) -> None:
         if content:
@@ -40,20 +50,32 @@ class PlaybackEngine:
         # (docs/display-protocol.md). Se publica ANTES de reproducir para que
         # el reveal empiece cuando empieza a sonar el chunk.
         audio_duration = max(len(audio) / (24000 * 2), 0.001)
-        full_text = "".join(self._text_buffer)
-        chunk_text = full_text[self._text_cursor:]
-        self._text_cursor = len(full_text)
+        # Solo se unen los tokens nuevos. cumulative_text sigue costando
+        # O(longitud del turno) por evento porque el protocolo del display
+        # manda el texto completo en cada uno (docs/display-protocol.md):
+        # ese coste es del protocolo, no de este bucle.
+        chunk_text = "".join(self._text_buffer)
+        self._text_buffer.clear()
+        self._full_text += chunk_text
         self._bus.publish(VoiceEvent(type="display_text_update", data={
             "chunk_text": chunk_text,
-            "cumulative_text": full_text,
+            "cumulative_text": self._full_text,
             "duration_s": audio_duration,
         }))
 
+        epoch = self._epoch
         async with self._play_lock:
+            if epoch != self._epoch:
+                log.debug("PlaybackEngine: chunk descartado (reset mientras esperaba)")
+                return
             await self._audio.play_chunk(audio)
 
     async def play_notification(self) -> None:
+        epoch = self._epoch
         async with self._play_lock:
+            if epoch != self._epoch:
+                log.debug("PlaybackEngine: notificación descartada (reset mientras esperaba)")
+                return
             await self._audio.play_notification()
 
     async def drain(self) -> None:
@@ -61,8 +83,17 @@ class PlaybackEngine:
             await self._audio.drain()
 
     def reset(self) -> None:
+        # La época solo evita que suene lo que esperaba el lock. Lo que ya
+        # está sonando depende del backend:
+        # - SounddeviceBackend vacía su cola con su lock de hilo (issue #88);
+        #   el chunk en curso termina su espera sobre una cola ya vacía.
+        # - TermuxBackend.reset() solo descarta el carry y el preroll: el
+        #   write() bloqueante de PyAudio que esté en curso NO se corta y
+        #   suena entero (hasta un chunk). Su drain()/stop() esperan, con
+        #   tope, a que ese write termine antes de cerrar el stream.
+        self._epoch += 1
         self._text_buffer.clear()
-        self._text_cursor = 0
+        self._full_text = ""
         self._audio.reset()
 
     def close(self) -> None:
