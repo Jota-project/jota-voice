@@ -283,8 +283,8 @@ if command -v curl >/dev/null 2>&1; then
         "${HTTP_URL%/}" 2>/dev/null \
         | head -1 | awk '{print $2}')
     case "$HTTP_CODE" in
-        2*|3*|4*|405)
-            # 2xx/3xx/4xx/405 todos válidos — al menos el puerto está abierto
+        2*|3*|4*)
+            # 2xx/3xx/4xx (405 incluido) todos válidos — al menos el puerto está abierto
             _ok "gateway responde HTTP ${HTTP_CODE:-?}"
             GW_OK=1
             ;;

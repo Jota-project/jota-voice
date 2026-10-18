@@ -152,9 +152,10 @@ _info "Logs: tail -f $LOG_DIR/com.jota-voice.wyoming-oww.log"
 
 # ------------------------------------------------- esperar a que el puerto
 _info "Esperando a que el puerto ${PORT} responda…"
-deadline=$((SECONDS + 30))
+tries=0
 until bash -c "exec 3<>/dev/tcp/127.0.0.1/${PORT} && exec 3>&-" 2>/dev/null; do
-    if [ $SECONDS -ge $deadline ]; then
+    tries=$((tries + 1))
+    if [ "$tries" -ge 30 ]; then
         _err "Timeout esperando puerto ${PORT}. Comprueba: tail -50 $LOG_DIR/com.jota-voice.wyoming-oww.log"
         exit 1
     fi

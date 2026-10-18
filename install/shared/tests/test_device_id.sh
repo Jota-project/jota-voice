@@ -12,6 +12,7 @@ fail=0
 for id in macbook mi-movil tel_2 A1; do
     if jota_valid_id "$id"; then echo "ok: válido '$id'"; else echo "FAIL: rechazado '$id'"; fail=1; fi
 done
+# shellcheck disable=SC2016  # 'x$(id)' es un literal: probar que se rechaza
 for id in "" "../../tmp/pwned" "a/b" ".." "-rf" "con espacio" 'x$(id)' "tab	x" \
           "$(printf 'a%.0s' $(seq 1 65))"; do
     if jota_valid_id "$id"; then echo "FAIL: aceptado '$id'"; fail=1; else echo "ok: rechazado '$id'"; fi

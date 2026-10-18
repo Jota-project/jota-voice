@@ -148,6 +148,7 @@ case "$TARGET" in
         _phone_rsync "$REPO_LOCAL_SELF/" "${PHONE_TARGET}:${PHONE_DIR}/"
 
         echo "[deploy phone:${DEVICE_NAME}] reiniciando jota-voice vía supervisorctl…"
+        # shellcheck disable=SC2016  # $HOME se expande en el teléfono
         _phone_ssh 'supervisorctl -c "$HOME/supervisord.conf" restart jota-voice'
         echo "[deploy phone:${DEVICE_NAME}] OK"
         ;;

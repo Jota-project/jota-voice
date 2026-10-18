@@ -27,7 +27,7 @@ jota_default_device_id() {
         return 0
     fi
     _jd_host="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo dispositivo)"
-    _jd_host="$(printf '%s' "$_jd_host" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9_-' '_' | cut -c1-64)"
+    _jd_host="$(printf '%s' "$_jd_host" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '_' | cut -c1-64)"
     case "$_jd_host" in
         ""|-*) _jd_host="dispositivo" ;;
     esac

@@ -19,6 +19,7 @@ _apply() {
     done
     if [ -n "$to_install" ]; then
         _info "Instalando:$to_install"
+        # shellcheck disable=SC2086  # una palabra por paquete
         pkg install -y $to_install
     fi
     _ok "Paquetes actualizados"
