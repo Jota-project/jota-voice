@@ -83,10 +83,14 @@ class PlaybackEngine:
             await self._audio.drain()
 
     def reset(self) -> None:
-        # El backend se limpia con su propio lock de hilo (SounddeviceBackend,
-        # issue #88); el chunk que esté sonando ahora termina su espera sobre
-        # una cola ya vacía. TermuxBackend solo toca su carry desde el loop y
-        # sin await entre lectura y escritura, así que no necesita más.
+        # La época solo evita que suene lo que esperaba el lock. Lo que ya
+        # está sonando depende del backend:
+        # - SounddeviceBackend vacía su cola con su lock de hilo (issue #88);
+        #   el chunk en curso termina su espera sobre una cola ya vacía.
+        # - TermuxBackend.reset() solo descarta el carry y el preroll: el
+        #   write() bloqueante de PyAudio que esté en curso NO se corta y
+        #   suena entero (hasta un chunk). Su drain()/stop() esperan, con
+        #   tope, a que ese write termine antes de cerrar el stream.
         self._epoch += 1
         self._text_buffer.clear()
         self._full_text = ""

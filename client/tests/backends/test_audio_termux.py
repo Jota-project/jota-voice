@@ -610,3 +610,102 @@ def test_reset_delega_en_audio_capture() -> None:
     be.reset()
 
     capture.reset.assert_called_once_with()
+
+
+# --- write() en curso tras cancelar _play() --------------------------------
+#
+# run_in_executor(stream.write) no se interrumpe al cancelar la tarea: el
+# write sigue en su hilo y, sin esperar a que acabe, drain()/stop()/otro
+# _play() tocaban el mismo stream de PortAudio en paralelo.
+
+
+def _blocking_stream_backend():
+    be, _ = _backend_with_mock_capture()
+    be._pa = create_autospec(PyAudioSpec, instance=True)  # type: ignore[assignment]
+    stream = create_autospec(_FakeStream, instance=True)
+    events: list[str] = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _write(data, num_frames=None):  # noqa: ARG001
+        events.append("write-start")
+        entered.set()
+        release.wait(5.0)
+        events.append("write-end")
+
+    stream.write.side_effect = _write
+    stream.stop_stream.side_effect = lambda: events.append("stop_stream")
+    stream.close.side_effect = lambda: events.append("close")
+    be._stream = stream  # type: ignore[assignment]
+    return be, stream, events, entered, release
+
+
+def test_drain_espera_al_write_en_curso_tras_cancelar_play() -> None:
+    be, stream, events, entered, release = _blocking_stream_backend()
+
+    async def _run() -> None:
+        play = asyncio.create_task(be.play_chunk(b"\x01\x00"))
+        await wait_until(entered.is_set)
+        play.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await play
+        drain = asyncio.create_task(be.drain())
+        await wait_until(lambda: be._lock.locked() or drain.done())
+        assert "close" not in events, "drain() cerró el stream con el write en curso"
+        release.set()
+        await asyncio.wait_for(drain, timeout=5.0)
+
+    try:
+        asyncio.run(_run())
+    finally:
+        release.set()
+    assert events == ["write-start", "write-end", "stop_stream", "close"]
+
+
+def test_play_siguiente_espera_al_write_en_curso_tras_cancelar() -> None:
+    """Un play_notification() tras cancelar un _play() no escribe en el
+    stream mientras el write anterior sigue en su hilo."""
+    be, stream, events, entered, release = _blocking_stream_backend()
+
+    async def _run() -> None:
+        play = asyncio.create_task(be.play_chunk(b"\x01\x00"))
+        await wait_until(entered.is_set)
+        play.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await play
+        entered.clear()
+        nxt = asyncio.create_task(be.play_chunk(b"\x02\x00"))
+        await wait_until(lambda: be._lock.locked())
+        assert events == ["write-start"]
+        release.set()
+        await asyncio.wait_for(nxt, timeout=5.0)
+
+    try:
+        asyncio.run(_run())
+    finally:
+        release.set()
+    assert events == ["write-start", "write-end", "write-start", "write-end"]
+
+
+def test_stop_abandona_el_stream_si_el_write_no_termina(monkeypatch) -> None:
+    """Si el write en curso no termina a tiempo (driver colgado), stop() no
+    cierra el stream ni termina PyAudio: los abandona y sigue."""
+    monkeypatch.setattr(audio_termux, "_WRITE_WAIT_TIMEOUT_S", 0.01)
+    be, stream, events, entered, release = _blocking_stream_backend()
+    pa = be._pa
+
+    async def _run() -> None:
+        play = asyncio.create_task(be.play_chunk(b"\x01\x00"))
+        await wait_until(entered.is_set)
+        play.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await play
+        await asyncio.wait_for(be.stop(), timeout=5.0)
+
+    try:
+        asyncio.run(_run())
+    finally:
+        release.set()
+    stream.close.assert_not_called()
+    pa.terminate.assert_not_called()
+    assert be._stream is None and be._pa is None

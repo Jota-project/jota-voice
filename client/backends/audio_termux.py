@@ -5,10 +5,11 @@ Específico para Android/Termux. En Mac/Linux usa SounddeviceBackend.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 
 from config import AudioConfig
-from core.audio.offloop import call_off_loop
+from core.audio.offloop import call_off_loop, start_off_loop
 from platforms.termux.audio_capture_termux import AudioCapture
 from .notification_tone import synth_notification_tone
 
@@ -20,6 +21,11 @@ _TTS_SAMPLE_RATE = 24000  # PCM16 mono del gateway
 # terminate). Pasado este tiempo el driver se da por colgado y el recurso se
 # abandona: volver a tocarlo desde otro hilo no es seguro.
 _STREAM_CLOSE_TIMEOUT_S = 2.0
+
+# Tope de espera a un write() que sigue en curso tras cancelar _play(). Un
+# write bloquea lo que dura su chunk (normalmente < 1 s); si tarda más, el
+# driver se da por colgado y el stream se abandona.
+_WRITE_WAIT_TIMEOUT_S = 3.0
 
 
 def _require_pyaudio():
@@ -47,6 +53,10 @@ class TermuxBackend:
         # calcula frames como len(data) // 2 y descarta el último byte
         # silenciosamente, perdiendo 1 muestra por cada chunk impar.
         self._enqueue_carry: bytes = b""
+        # write() en curso en su hilo. Cancelar _play() no lo interrumpe, así
+        # que antes de volver a tocar el stream (otro write, drain, stop) hay
+        # que esperar a que termine.
+        self._write_fut: asyncio.Future | None = None
 
     async def start(self) -> None:
         # pyaudio se comprueba ANTES de arrancar la captura: si faltaba, parec
@@ -83,6 +93,8 @@ class TermuxBackend:
             # hilos no daemon que retendrían la salida con el driver colgado.
             stream, self._stream = self._stream, None
             pa, self._pa = self._pa, None
+            if stream is not None and not await self._wait_inflight_write("stop"):
+                return  # write colgado: ni close() ni terminate() concurrentes
             if stream is not None and not await self._close_stream(stream, "stop"):
                 # Stream abandonado: terminate() tocaría PortAudio en
                 # paralelo con el hilo colgado. Se deja para el SO.
@@ -103,7 +115,7 @@ class TermuxBackend:
             )
             return False
         except Exception as exc:
-            log.warning("TermuxBackend.%s: %s", label, exc)
+            log.warning("TermuxBackend.%s: error cerrando stream: %s", label, exc)
         return True
 
     async def _close_stream(self, stream, label: str) -> bool:
@@ -159,21 +171,41 @@ class TermuxBackend:
                     rate=_TTS_SAMPLE_RATE,
                     output=True,
                 )
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self._stream.write, audio)
+            if not await self._wait_inflight_write("play"):
+                # El write anterior sigue colgado: el stream es inservible.
+                self._stream = None
+                return
+            fut = start_off_loop(
+                functools.partial(self._stream.write, audio), name="termux-audio-write"
+            )
+            self._write_fut = fut
+            # shield: si cancelan esta tarea, el write sigue en su hilo y
+            # _write_fut permite al siguiente esperar a que acabe.
+            await asyncio.shield(fut)
+
+    async def _wait_inflight_write(self, label: str) -> bool:
+        """Espera (acotado) al write() en curso de un _play() cancelado.
+        Devuelve False si no terminó a tiempo: hay que abandonar el stream
+        sin más llamadas, porque PortAudio no admite llamadas concurrentes."""
+        fut = self._write_fut
+        if fut is None or fut.done():
+            return True
+        await asyncio.wait({fut}, timeout=_WRITE_WAIT_TIMEOUT_S)
+        if not fut.done():
+            log.error(
+                "TermuxBackend.%s: el write() en curso no terminó en %.1fs; "
+                "se abandona el stream", label, _WRITE_WAIT_TIMEOUT_S,
+            )
+            return False
+        self._write_fut = None
+        return True
 
     async def drain(self) -> None:
         self._enqueue_carry = b""
         async with self._lock:
-            if self._stream is not None:
-                try:
-                    loop = asyncio.get_running_loop()
-                    await loop.run_in_executor(None, self._stream.stop_stream)
-                    await loop.run_in_executor(None, self._stream.close)
-                except Exception as exc:
-                    log.warning("TermuxBackend.drain: error cerrando stream: %s", exc)
-                finally:
-                    self._stream = None
+            stream, self._stream = self._stream, None
+            if stream is not None and await self._wait_inflight_write("drain"):
+                await self._close_stream(stream, "drain")
 
     def reset(self) -> None:
         # No hay buffer interno de texto en TermuxBackend (lo mantiene PlaybackEngine),
