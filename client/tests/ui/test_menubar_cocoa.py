@@ -153,6 +153,47 @@ def test_header_title_with_errors_and_pause(backend):
     assert backend._header_item.title() == "Cancelado — 2 error(es) (pausado)"
 
 
+def test_no_dead_title_for_state(backend):
+    """Issue #98: _title_for_state() siempre devolvía "" (el botón es
+    NSImageOnly)."""
+    assert not hasattr(backend, "_title_for_state")
+
+
+def test_show_about_uses_non_modal_standard_panel(backend, monkeypatch):
+    """Issue #98: showAbout_ usaba NSAlert.runModal(), que bloquea el run
+    loop principal (ni repintados ni el observer de señales de #104 mientras
+    el diálogo está abierto). El panel estándar de Acerca de no es modal."""
+    calls = []
+
+    class _AboutApp(_RecordingApp):
+        def activateIgnoringOtherApps_(self, flag):
+            calls.append(("activate", flag))
+
+        def orderFrontStandardAboutPanelWithOptions_(self, options):
+            calls.append(("about", dict(options)))
+
+    def _no_modal(*_args, **_kwargs):
+        raise AssertionError("no debe usarse un NSAlert modal")
+
+    import ui.menubar_cocoa as menubar_cocoa
+
+    class _AppKitProxy:
+        class NSAlert:
+            alloc = staticmethod(_no_modal)
+
+        def __getattr__(self, name):
+            return getattr(AppKit, name)
+
+    monkeypatch.setattr(menubar_cocoa, "AppKit", _AppKitProxy())
+    backend._app = _AboutApp()
+
+    backend.showAbout_(None)
+
+    assert calls[0] == ("activate", True)
+    assert calls[1][0] == "about"
+    assert calls[1][1]["ApplicationName"] == "jota-voice"
+
+
 def test_status_item_created(backend):
     assert backend.status_item is not None
     assert backend.status_item.button() is not None

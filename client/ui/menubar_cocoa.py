@@ -317,7 +317,6 @@ class CocoaMenubarBackend:
 
         if self.status_item and self.status_item.button():
             self.status_item.button().setImage_(self._icon_for_state(state))
-            self.status_item.button().setTitle_(self._title_for_state(state))
 
         if self._header_item is not None:
             self._header_item.setTitle_(self._header_title())
@@ -328,11 +327,6 @@ class CocoaMenubarBackend:
             self._pause_menu_item.setTitle_(
                 "Reanudar escucha" if paused else "Pausar escucha"
             )
-
-    def _title_for_state(self, state: str) -> str:
-        # El estado se ve también en el icono de la cabecera; dejamos el
-        # botón solo con el icono salvo que el sistema no soporte SF Symbol.
-        return ""
 
     # ------------------------------------------------------------------
     # Acciones de menú (corren en hilo Cocoa)
@@ -355,10 +349,23 @@ class CocoaMenubarBackend:
             self._commands.on_open_config()
 
     def showAbout_(self, _sender) -> None:
-        alert = AppKit.NSAlert.alloc().init()
-        alert.setMessageText_("jota-voice")
-        alert.setInformativeText_("Cliente de voz universal del ecosistema Jota.")
-        alert.runModal()
+        """Panel estándar de "Acerca de", no modal (issue #98).
+
+        Antes era NSAlert.runModal(), que bloqueaba el run loop principal
+        mientras el diálogo estaba abierto: sin repintados del icono y sin
+        atender el observer de señales (#104). Como la app es "accessory"
+        (sin Dock), hay que activarla para que el panel salga al frente."""
+        app = self._app
+        if app is None:
+            return
+        credits = AppKit.NSAttributedString.alloc().initWithString_(
+            "Cliente de voz universal del ecosistema Jota."
+        )
+        app.activateIgnoringOtherApps_(True)
+        app.orderFrontStandardAboutPanelWithOptions_({
+            "ApplicationName": "jota-voice",
+            "Credits": credits,
+        })
 
     def quitApp_(self, _sender) -> None:
         if self._commands is not None:
