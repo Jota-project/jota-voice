@@ -17,7 +17,8 @@ import pytest
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 from websockets.frames import Close
 
-from tests.fakes.gateway import FakeWS, FakeWSRaiseAfter, make_ws
+from tests.fakes.gateway import FakeWS, FakeWSRaiseAfter, make_ws, never
+from tests.fakes.waiting import wait_until
 
 
 def _closed_error(code: int | None = None, reason: str = "") -> ConnectionClosedError:
@@ -846,7 +847,9 @@ async def test_ensure_connected_comparte_un_unico_intento(ws_connect):
     client = GatewayClient(cfg)
     t1 = asyncio.create_task(client.ensure_connected())
     t2 = asyncio.create_task(client.ensure_connected())
-    await asyncio.sleep(0.01)
+    # Ambas peticiones en marcha y el intento bloqueado en el gate (antes:
+    # sleep(0.01), issue #76).
+    await wait_until(lambda: connect.call_count >= 1)
     gate.set()
     await asyncio.gather(t1, t2)
     assert connect.await_count == 1
@@ -857,15 +860,11 @@ async def test_ensure_connected_comparte_un_unico_intento(ws_connect):
 async def test_connect_cancelado_no_deja_socket_medio_abierto(ws_connect):
     cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=5.0)
     ws = make_ws()
-
-    async def _never():
-        await asyncio.Event().wait()
-
-    ws.recv.side_effect = _never
+    ws.recv.side_effect = never
     ws_connect(AsyncMock(return_value=ws))
     client = GatewayClient(cfg)
     t = asyncio.create_task(client.connect())
-    await asyncio.sleep(0.01)
+    await wait_until(lambda: ws.recv.await_count >= 1)  # en pleno handshake
     t.cancel()
     with pytest.raises(asyncio.CancelledError):
         await t
@@ -971,28 +970,43 @@ async def test_connect_reinicia_el_descarte_tras_cancel(ws_connect):
 
 
 @pytest.mark.asyncio
-async def test_connect_un_unico_deadline_para_abrir_y_handshake(ws_connect):
+async def test_connect_un_unico_deadline_para_abrir_y_handshake(ws_connect, monkeypatch):
     """Revisión Fase R, punto 4: abrir el socket y esperar `ready` comparten
-    connect_timeout_s (antes eran dos plazos completos seguidos)."""
-    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=0.3)
+    connect_timeout_s (antes eran dos plazos completos seguidos).
+
+    Antes se medía el tiempo total contra un umbral (< 0.45 s con un plazo
+    de 0.3 s): con la máquina cargada fallaba sin bug (issue #76). Ahora se
+    mira el plazo que connect() le da al recv() del handshake: tras gastar
+    al menos 0.05 s abriendo, debe quedar menos que el plazo completo. La
+    lentitud del entorno solo puede reducirlo, y el plazo (5 s) queda lejos
+    de la apertura, así que tampoco puede vencer antes de tiempo."""
+    budget, open_delay = 5.0, 0.05
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=budget)
+    timeouts: list[float] = []
+    real_wait_for = asyncio.wait_for
+
+    async def _recording_wait_for(aw, timeout):
+        timeouts.append(timeout)
+        return await real_wait_for(aw, timeout)
 
     async def _slow_open(*a, **kw):
-        await asyncio.sleep(0.2)
-        ws = make_ws()
-
-        async def _never():
-            await asyncio.Event().wait()
-
-        ws.recv.side_effect = _never
-        return ws
+        await asyncio.sleep(open_delay)
+        # recv falla al instante (JSON inválido): el test no espera el plazo.
+        return make_ws(recv=["<html>502</html>"])
 
     ws_connect(_slow_open)
-    loop = asyncio.get_running_loop()
-    t0 = loop.time()
-    with pytest.raises(asyncio.TimeoutError):
-        await GatewayClient(cfg).connect()
-    assert loop.time() - t0 < 0.45, "abrir + handshake deben caber en connect_timeout_s"
+    with monkeypatch.context() as m:
+        m.setattr(asyncio, "wait_for", _recording_wait_for)
+        with pytest.raises(json.JSONDecodeError):
+            await GatewayClient(cfg).connect()
 
+    assert len(timeouts) >= 2, f"esperaba wait_for de apertura y de recv: {timeouts}"
+    open_timeout, recv_timeout = timeouts[0], timeouts[1]
+    assert open_timeout == pytest.approx(budget)
+    assert recv_timeout <= budget - open_delay + 1e-6, (
+        f"al recv del handshake le quedaban {recv_timeout:.3f}s de {budget}s: abrir + "
+        "handshake deben caber en un único connect_timeout_s"
+    )
 
 
 @pytest.mark.asyncio
@@ -1007,19 +1021,18 @@ async def test_cancelar_handshake_no_espera_el_close_lento(ws_connect):
     async def _slow_close():
         await asyncio.sleep(10)
 
-    async def _never():
-        await asyncio.Event().wait()
-
     ws.close.side_effect = _slow_close
-    ws.recv.side_effect = _never
+    ws.recv.side_effect = never
     ws_connect(AsyncMock(return_value=ws))
     client = GatewayClient(cfg)
     t = asyncio.create_task(client.connect())
-    await asyncio.sleep(0.02)
+    await wait_until(lambda: ws.recv.await_count >= 1)  # antes: sleep(0.02)
     loop = asyncio.get_running_loop()
     t0 = loop.time()
     t.cancel()
-    await asyncio.wait([t], timeout=5)
+    await asyncio.wait([t], timeout=9)
     assert t.cancelled()
-    assert loop.time() - t0 < 1.0
+    # El bug esperaba el close lento entero (10 s); el fix aborta a los
+    # _ABORT_CLOSE_S (0.5 s). Margen amplio para no fallar por carga (#76).
+    assert loop.time() - t0 < 5.0
     assert aborted, "debe abortar el transporte si el close no termina enseguida"

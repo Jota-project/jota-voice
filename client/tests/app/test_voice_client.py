@@ -446,7 +446,13 @@ async def test_status_previos_a_ready_del_connect_inicial_llegan_a_display_y_men
     sm_done = asyncio.Event()
 
     async def _sm(*a, **kw):
-        await asyncio.sleep(0.05)  # deja drenar a los consumidores
+        # Espera a que ambos consumidores procesen el status (antes: un
+        # sleep(0.05) "para que dé tiempo", issue #76).
+        await wait_until(
+            lambda: "gateway_status" in menubar_got
+            and any(t == "health" for t, _ in display_sent),
+            message="el status previo a ready no llegó a menubar y display",
+        )
         sm_done.set()
 
     audio = _audio_mock()
@@ -543,42 +549,33 @@ def _make_bus():
     return EventBus()
 
 
-async def _collect(bus, timeout=1.0):
-    """Suscribe al bus y recolecta eventos hasta el timeout."""
-    captured = []
-    async def _loop():
-        async for ev in bus.subscribe():
-            captured.append(ev)
-            if ev.type in ("__stop__",):
-                break
-    try:
-        await asyncio.wait_for(_loop(), timeout=timeout)
-    except asyncio.TimeoutError:
-        pass
-    return captured
+async def _run_idle_listener(gateway) -> tuple[str, list]:
+    """Ejecuta gateway_idle_listener hasta que termine (el receive() falso se
+    agota o falla) y devuelve (resultado, eventos publicados).
+
+    Antes se escuchaba el bus durante 0.5 s fijos (issue #76): cada test
+    tardaba siempre medio segundo y, con la máquina cargada, el evento podía
+    llegar tarde. La suscripción se crea antes de arrancar el listener, así
+    que no se pierde nada; bus.close() cierra la iteración al acabar."""
+    from app.voice_client import gateway_idle_listener
+    bus = _make_bus()
+    sub = bus.subscribe()
+    result = await asyncio.wait_for(gateway_idle_listener(bus, gateway), timeout=5.0)
+    bus.close()
+    return result, [ev async for ev in sub]
 
 
 async def _test_idle_listener_publish_status_a_bus():
     """Issue #24: status proactivo durante IDLE aparece como gateway_status."""
-    from app.voice_client import gateway_idle_listener
-    bus = _make_bus()
     gateway = _make_gateway_mock([
         GatewayEvent(type="status", data={"service": "tts", "state": "unavailable"}),
-        # terminamos con un type desconocido para forzar salida
     ])
 
-    listener_task = asyncio.create_task(gateway_idle_listener(bus, gateway))
+    result, captured = await _run_idle_listener(gateway)
 
-    # Esperar un momento para que reciba el evento
-    captured = await _collect(bus, timeout=0.5)
-    listener_task.cancel()
-    try:
-        await listener_task
-    except asyncio.CancelledError:
-        pass
-
+    assert result == "ended"
     status_evts = [e for e in captured if e.type == "gateway_status"]
-    assert len(status_evts) >= 1
+    assert len(status_evts) == 1
     assert status_evts[0].data["service"] == "tts"
 
 
@@ -588,23 +585,17 @@ def test_idle_listener_publish_status_a_bus():
 
 async def _test_idle_listener_descarta_push_turn_solo_logea():
     """Issue #24: turn_start durante IDLE se loguea y descarta, no publica state_changed."""
-    from app.voice_client import gateway_idle_listener
-    bus = _make_bus()
-    gateway = _gateway_mock(ws=make_ws(), connected=True)
+    gateway = _make_gateway_mock([
+        GatewayEvent(type="turn_start", data={"turn_id": f"p-{i}", "turn_seq": i})
+        for i in range(5)
+    ])
 
-    async def _receive_turns():
-        """Generator que emite varios turn_start y luego se agota."""
-        for i in range(5):
-            yield GatewayEvent(type="turn_start", data={"turn_id": f"p-{i}", "turn_seq": i})
+    result, captured = await _run_idle_listener(gateway)
 
-    gateway.receive = _receive_turns
-
-    listener_task = asyncio.create_task(gateway_idle_listener(bus, gateway))
-    captured = await _collect(bus, timeout=0.5)
-
-    state_changed = [e for e in captured if e.type == "state_changed"]
-    # El assertion clave: turn_start NO se traduce en state_changed
-    assert not state_changed, "no debe publicar state_changed ante un push turn"
+    # Consumió los cinco push hasta agotar el iterador...
+    assert result == "ended"
+    # ...y no publicó nada: ni state_changed ni ningún otro evento.
+    assert captured == [], f"un push turn en IDLE no debe publicar nada: {captured}"
 
 
 def test_idle_listener_descarta_push_turn_solo_logea():
@@ -613,8 +604,6 @@ def test_idle_listener_descarta_push_turn_solo_logea():
 
 async def _test_idle_listener_exception_no_controlada_publica_error():
     """Issue #24: excepción inesperada en el listener se reporta y termina limpiamente."""
-    from app.voice_client import gateway_idle_listener
-    bus = _make_bus()
     gateway = _gateway_mock(ws=make_ws(), connected=True)
 
     async def _boom():
@@ -623,18 +612,11 @@ async def _test_idle_listener_exception_no_controlada_publica_error():
 
     gateway.receive = _boom
 
-    listener_task = asyncio.create_task(gateway_idle_listener(bus, gateway))
-    # Recolectar DURING execution (antes de que el task termine)
-    captured = await _collect(bus, timeout=0.5)
-    # Esperar a que termine (el boom explota en el primer __anext__)
-    try:
-        await asyncio.wait_for(listener_task, timeout=0.5)
-    except (asyncio.TimeoutError, RuntimeError):
-        pass
-    listener_task.cancel()
+    result, captured = await _run_idle_listener(gateway)
 
+    assert result == "failed"
     error_evts = [e for e in captured if e.type == "error"]
-    assert len(error_evts) >= 1, "debe publicar VoiceEvent(error) ante excepción"
+    assert len(error_evts) == 1, "debe publicar VoiceEvent(error) ante excepción"
     assert "test explosion" in str(error_evts[0].data.get("message", ""))
 
 
@@ -742,7 +724,10 @@ async def _test_main_shutdown_desconecta_una_vez(monkeypatch):
 
     audio_mock = _audio_mock()
 
+    sm_started = asyncio.Event()
+
     async def _fake_sm_run(cfg, bus, audio, gateway, playback, cancel_event=None, **kw):
+        sm_started.set()
         await asyncio.Event().wait()
 
     class _IdleClient:
@@ -765,7 +750,7 @@ async def _test_main_shutdown_desconecta_una_vez(monkeypatch):
     main_task = asyncio.create_task(
         voice_client.main(cfg, _menubar_mock(), external_stop_event=stop_ext)
     )
-    await asyncio.sleep(0.1)
+    await asyncio.wait_for(sm_started.wait(), timeout=5.0)  # antes: sleep(0.1)
     stop_ext.set()
 
     await asyncio.wait_for(main_task, timeout=3.0)
@@ -875,7 +860,7 @@ def test_oww_loop_termina_al_cancelar_aunque_run_forever_retorne_al_instante() -
         task = asyncio.create_task(
             voice_client.oww_loop(oww, _audio_mock(), _noop_on_wake, asyncio.Event())
         )
-        await asyncio.sleep(0.1)
+        await wait_until(lambda: oww.run_forever.await_count >= 1)  # antes: sleep(0.1)
         for _ in range(20):  # cancelar en distintos puntos del bucle
             task.cancel()
             done, _ = await asyncio.wait([task], timeout=0.05)
@@ -887,20 +872,28 @@ def test_oww_loop_termina_al_cancelar_aunque_run_forever_retorne_al_instante() -
 
 
 def test_oww_loop_no_gira_en_caliente_si_run_forever_retorna() -> None:
+    """Si run_forever retorna, oww_loop espera _OWW_RESTART_DELAY_S antes de
+    relanzarlo. Antes se medía con un sleep(0.3) real y un umbral a ojo
+    (issue #76); ahora: tras la primera vuelta, por muchas iteraciones del
+    loop que pasen, no hay segunda llamada mientras dura el retardo. Un
+    bucle en caliente la tendría en la siguiente iteración."""
     async def _t() -> None:
         oww = _oww_mock()
         task = asyncio.create_task(
             voice_client.oww_loop(oww, _audio_mock(), _noop_on_wake, asyncio.Event())
         )
-        await asyncio.sleep(0.3)
-        task.cancel()
-        await asyncio.wait([task], timeout=1.0)
-        assert oww.run_forever.await_count <= 5, (
-            f"run_forever relanzado {oww.run_forever.await_count} veces en 0.3s"
+        await wait_until(lambda: oww.run_forever.await_count >= 1)
+        for _ in range(100):
+            await asyncio.sleep(0)
+        assert oww.run_forever.await_count == 1, (
+            f"run_forever relanzado {oww.run_forever.await_count} veces sin esperar "
+            f"_OWW_RESTART_DELAY_S={voice_client._OWW_RESTART_DELAY_S}"
         )
+        task.cancel()
+        await asyncio.wait([task], timeout=5.0)
+        assert task.cancelled()
 
     asyncio.run(_t())
-
 
 
 def test_main_no_aborta_si_la_conexion_inicial_falla(monkeypatch) -> None:

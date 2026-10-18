@@ -5,6 +5,8 @@ import asyncio
 
 from core.aio import cancel_and_wait
 
+from tests.fakes.waiting import wait_until
+
 
 async def _sleeper(cleanup_s: float = 0.0) -> None:
     try:
@@ -42,7 +44,9 @@ def test_cancel_and_wait_no_se_traga_la_cancelacion_del_llamante() -> None:
                 await asyncio.sleep(0.01)
 
         outer = asyncio.create_task(_outer())
-        await asyncio.sleep(0.05)  # outer está dentro de cancel_and_wait
+        # outer está dentro de cancel_and_wait cuando ya ha cancelado al hijo
+        # (que tarda 0.2 s en limpiar). Antes: sleep(0.05), issue #76.
+        await wait_until(lambda: child.cancelling() > 0)
         outer.cancel()
         done, _ = await asyncio.wait([outer], timeout=1.0)
         assert outer in done and outer.cancelled()
