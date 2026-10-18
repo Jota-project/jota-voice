@@ -57,6 +57,15 @@ else
     echo "skip: sin plutil (no es macOS), no se validan los plists"
 fi
 
+# --- OWW solo en loopback (macOS y Termux) ---------------------------------
+if grep -q 'tcp://127.0.0.1:10401' "$ROOT/install/macos/launchagent/com.jota-voice.wyoming-oww.plist" \
+   && grep -q 'tcp://127.0.0.1:10401' "$ROOT/boot/supervisord.conf.tpl" \
+   && ! grep -q '0\.0\.0\.0:10401' "$ROOT/install/macos/launchagent/com.jota-voice.wyoming-oww.plist" "$ROOT/boot/supervisord.conf.tpl"; then
+    ok "OWW escucha en 127.0.0.1 en las dos plataformas"
+else
+    bad "OWW expuesto fuera de loopback"
+fi
+
 # --- rotate-logs.sh ---------------------------------------------------------
 LOG="$TMP/stderr.log"
 head -c 3000 /dev/zero | tr '\0' 'x' > "$LOG"

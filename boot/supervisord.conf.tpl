@@ -53,9 +53,12 @@ startretries=999
 startsecs=3
 priority=5
 
+; OWW solo en loopback: su único cliente es jota-voice en este mismo
+; teléfono (jota-display no lo usa). En 0.0.0.0 cualquiera de la LAN podía
+; mandarle audio o leer las detecciones.
 [program:oww]
 command=%(ENV_HOME)s/oww-venv/bin/python3 -u -m wyoming_openwakeword
-    --uri tcp://0.0.0.0:10401
+    --uri tcp://127.0.0.1:10401
     --model ok_nabu
     --threshold 0.5
     --trigger-level 3
