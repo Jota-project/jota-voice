@@ -89,7 +89,7 @@ from core.aio import cancel_and_wait
 from domain.event_bus import EventBus, VoiceEvent
 from domain.gateway_session import gateway_idle_listener, idle_supervisor
 from domain.state_machine import run as sm_run
-from ui.menubar_base import MenubarCommands
+from ui.menubar_base import MenubarCommands, needs_main_thread
 from ui.menubar_client import MenubarClient
 
 from app import control_server
@@ -367,7 +367,7 @@ async def main(
         bus.close()
         log.info("jota-voice apagado limpiamente")
 
-        if hasattr(menubar_backend, "stop"):
+        if needs_main_thread(menubar_backend):
             menubar_backend.stop()
 
 
@@ -509,7 +509,7 @@ if __name__ == "__main__":
     _setup_logging(_cfg.logging.level)
     _menubar_backend = registry.make_menubar(_cfg)
 
-    if hasattr(_menubar_backend, "run_forever"):
+    if needs_main_thread(_menubar_backend):
         _run_with_cocoa_menubar(_cfg, _menubar_backend)
     else:
         asyncio.run(main(_cfg, _menubar_backend))

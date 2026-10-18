@@ -85,3 +85,31 @@ def test_protocol_is_runtime_checkable():
         def set_commands(self, cmds) -> None: ...
 
     assert isinstance(Fake(), MenubarBackend)
+
+
+def test_blocking_backend_protocol_requires_run_forever_and_stop():
+    """Issue #69: run_forever()/stop() forman un contrato explícito, no una
+    convención detectada con hasattr()."""
+    from ui.menubar_base import BlockingMenubarBackend, needs_main_thread
+
+    class WithLoop:
+        def run_forever(self) -> None: ...
+        def stop(self) -> None: ...
+
+    class OnlyRunForever:
+        def run_forever(self) -> None: ...
+
+    assert isinstance(WithLoop(), BlockingMenubarBackend)
+    assert needs_main_thread(WithLoop())
+    # Un backend con run_forever pero sin stop() no cumple el contrato: se
+    # quedaría el run loop vivo para siempre al apagar.
+    assert not isinstance(OnlyRunForever(), BlockingMenubarBackend)
+    assert not needs_main_thread(OnlyRunForever())
+
+
+def test_null_backend_is_not_blocking():
+    from ui.menubar_base import BlockingMenubarBackend, needs_main_thread
+    from ui.menubar_null import NullMenubarBackend
+
+    assert not isinstance(NullMenubarBackend(), BlockingMenubarBackend)
+    assert not needs_main_thread(NullMenubarBackend())

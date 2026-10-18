@@ -17,6 +17,45 @@ class MenubarBackend(Protocol):
     def set_commands(self, cmds: "MenubarCommands") -> None: ...
 
 
+@runtime_checkable
+class BlockingMenubarBackend(Protocol):
+    """Contrato opcional para backends cuyo toolkit exige su propio bucle de
+    eventos bloqueante en el hilo principal (Cocoa hoy; GTK/AppIndicator o
+    Win32/pystray mañana).
+
+    Si un backend lo cumple, el arranque (``voice_client``) invierte el
+    reparto de hilos:
+
+    - hilo principal real del proceso → ``run_forever()``, que bloquea
+      hasta que alguien llame a ``stop()``;
+    - hilo de trabajo → ``asyncio.run(main(...))``, con el EventBus, la
+      state machine y el ``MenubarClient``.
+
+    No al revés: construir el NSStatusItem en un hilo y correr
+    ``NSApp.run()`` en otro distinto cuelga el proceso (comprobado). Un
+    backend futuro debe respetar las mismas reglas:
+
+    - ``run_forever()`` se llama UNA vez, desde el hilo principal, y no
+      retorna hasta ``stop()``. Al retornar debe haber liberado sus
+      recursos de UI.
+    - ``stop()`` puede llamarse desde cualquier hilo (normalmente desde el
+      hilo asyncio al apagar, o desde el propio hilo de UI con "Salir") y
+      más de una vez. Lo que toque la UI lo despacha al hilo principal.
+    - Los ``set_*`` de :class:`MenubarBackend` también llegan desde el hilo
+      asyncio: no deben tocar widgets directamente, solo estado compartido
+      (:class:`_SharedState`) y una petición de repintado al hilo de UI.
+    """
+
+    def run_forever(self) -> None: ...
+    def stop(self) -> None: ...
+
+
+def needs_main_thread(backend: object) -> bool:
+    """True si ``backend`` necesita el hilo principal para su bucle de
+    eventos (ver :class:`BlockingMenubarBackend`)."""
+    return isinstance(backend, BlockingMenubarBackend)
+
+
 @dataclass
 class MenubarCommands:
     """Callbacks que la UI invoca hacia asyncio. La UI no escribe al bus."""

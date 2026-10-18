@@ -43,6 +43,17 @@ def backend():
     b.stop()
 
 
+def test_cocoa_backend_fulfils_both_protocols(backend):
+    """Issue #69: si el backend Cocoa dejara de cumplir el contrato
+    bloqueante (p.ej. renombrando run_forever), voice_client lo trataría
+    como un backend normal y el icono no aparecería nunca, sin diagnóstico."""
+    from ui.menubar_base import BlockingMenubarBackend, MenubarBackend, needs_main_thread
+
+    assert isinstance(backend, MenubarBackend)
+    assert isinstance(backend, BlockingMenubarBackend)
+    assert needs_main_thread(backend)
+
+
 def test_status_item_created(backend):
     assert backend.status_item is not None
     assert backend.status_item.button() is not None
