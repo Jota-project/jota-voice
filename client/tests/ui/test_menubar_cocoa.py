@@ -148,3 +148,97 @@ def test_stop_is_idempotent(backend):
     backend.stop()
 
     assert len(spy.removed) == 1
+
+
+class _FakeTimer:
+    def __init__(self):
+        self.invalidated_on = []
+
+    def invalidate(self):
+        import threading
+
+        self.invalidated_on.append(threading.current_thread())
+
+
+class _RecordingApp:
+    def __init__(self):
+        self.selectors = []
+
+    def performSelectorOnMainThread_withObject_waitUntilDone_(self, sel, obj, wait):
+        self.selectors.append(sel)
+
+    def postEvent_atStart_(self, event, at_start):
+        pass
+
+
+def test_stop_from_worker_thread_defers_teardown_to_main_thread(backend):
+    """Issue #70: NSTimer.invalidate() debe ejecutarse en el hilo que
+    instaló el timer (el principal). Desde el hilo asyncio, stop() solo
+    programa el teardown en el hilo principal."""
+    import threading
+
+    timer = _FakeTimer()
+    backend._timer = timer
+    backend._app = _RecordingApp()
+    scheduled = []
+    backend._call_on_main = lambda fn, *args: scheduled.append((fn, args))
+
+    worker = threading.Thread(target=backend.stop)
+    worker.start()
+    worker.join(timeout=5.0)
+
+    assert timer.invalidated_on == [], "invalidate() no debe correr en el worker"
+    assert [fn for fn, _ in scheduled] == [backend._teardown]
+    assert backend._app.selectors == ["stop:"]
+
+    # El hilo principal ejecuta lo programado.
+    for fn, args in scheduled:
+        fn(*args)
+    assert timer.invalidated_on == [threading.main_thread()]
+    assert backend.status_item is None
+
+
+def test_request_repaint_runs_tick_on_main_thread_not_on_nsapp(backend):
+    """_request_repaint enviaba ``tick:`` a NSApplication, que no responde a
+    ese selector: cada set_* lanzaba un unrecognized selector en el hilo
+    principal y el icono esperaba al siguiente tick del timer."""
+    backend._app = _RecordingApp()
+    scheduled = []
+    backend._call_on_main = lambda fn, *args: scheduled.append((fn, args))
+
+    backend.set_state("listening")
+
+    assert backend._app.selectors == []
+    assert scheduled == [(backend.tick_, (None,))]
+    assert not AppKit.NSApplication.sharedApplication().respondsToSelector_("tick:")
+
+
+def test_run_forever_tears_down_when_run_loop_returns(backend, monkeypatch):
+    """Cuando NSApp.run() retorna (tras stop:), run_forever libera los
+    recursos ya en el hilo principal."""
+
+    class _ReturningApp:
+        def setActivationPolicy_(self, policy):
+            pass
+
+        def run(self):
+            pass
+
+    import ui.menubar_cocoa as menubar_cocoa
+
+    class _FakeNSApplication:
+        @staticmethod
+        def sharedApplication():
+            return _ReturningApp()
+
+    class _AppKitProxy:
+        NSApplication = _FakeNSApplication
+
+        def __getattr__(self, name):
+            return getattr(AppKit, name)
+
+    monkeypatch.setattr(menubar_cocoa, "AppKit", _AppKitProxy())
+    backend.run_forever()
+
+    assert backend.status_item is None
+    assert backend._timer is None

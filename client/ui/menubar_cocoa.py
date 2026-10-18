@@ -10,6 +10,7 @@ from typing import Optional
 
 import AppKit
 import Foundation
+from PyObjCTools import AppHelper
 
 from config import MenubarConfig
 
@@ -168,11 +169,21 @@ class CocoaMenubarBackend:
         default de 5Hz, hasta 200ms). El icono debe reaccionar en el
         instante en que cambia el estado (p.ej. al detectar la wake word),
         no en el siguiente tick periódico. No-op si run_forever() todavía
-        no arrancó (self._app sigue en None)."""
+        no arrancó (self._app sigue en None).
+
+        Antes se enviaba ``tick:`` a NSApplication, que no responde a ese
+        selector (cada set_* acababa en un unrecognized selector en el hilo
+        principal); ahora se ejecuta ``tick_`` del propio backend."""
         if self._app is not None:
-            self._app.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "tick:", None, False
-            )
+            self._call_on_main(self.tick_, None)
+
+    def _call_on_main(self, fn, *args) -> None:
+        """Ejecuta ``fn(*args)`` en el hilo principal, asíncronamente.
+
+        AppHelper.callAfter usa performSelectorOnMainThread en los modos
+        comunes del run loop, así que también se atiende con el menú
+        abierto. Los tests lo sustituyen para observar qué se programa."""
+        AppHelper.callAfter(fn, *args)
 
     # ------------------------------------------------------------------
     # Runloop Cocoa
@@ -200,14 +211,25 @@ class CocoaMenubarBackend:
             self._timer, Foundation.NSRunLoopCommonModes
         )
         self._app.run()
+        # NSApp.run() retornó (stop:): seguimos en el hilo principal, que es
+        # donde se instaló el timer y donde vive el NSStatusItem. Sin run
+        # loop, _app ya no sirve para repintar ni para otro stop:.
+        self._teardown()
+        self._app = None
 
     def stop(self) -> None:
-        """Detiene NSApp. Seguro de llamar desde cualquier hilo: salta al
-        hilo principal (donde corre run_forever) vía
-        performSelectorOnMainThread_withObject_waitUntilDone_. ``stop:`` hace
-        retornar el run loop; ``terminate:`` llamaría a exit() y podría cortar
-        el apagado asíncrono a mitad."""
-        self._teardown()
+        """Detiene NSApp y libera los recursos Cocoa. Seguro de llamar
+        desde cualquier hilo.
+
+        El teardown (``NSTimer.invalidate()``, ``removeStatusItem_``) debe
+        correr en el hilo principal, que es donde se instalaron (issue #70):
+        si ya estamos en él se hace en el acto; si no, se programa allí antes
+        que ``stop:``. ``stop:`` hace retornar el run loop; ``terminate:``
+        llamaría a exit() y podría cortar el apagado asíncrono a mitad."""
+        if Foundation.NSThread.isMainThread():
+            self._teardown()
+        else:
+            self._call_on_main(self._teardown)
         if self._app is not None:
             self._app.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "stop:", None, False
@@ -234,7 +256,8 @@ class CocoaMenubarBackend:
 
     def _teardown(self) -> None:
         """Libera los recursos Cocoa: timer, NSStatusItem y NSMenu (issue
-        #68). Idempotente: stop() puede llamarse más de una vez."""
+        #68). Solo en el hilo principal (issue #70). Idempotente: stop()
+        puede llamarse más de una vez y run_forever() lo repite al salir."""
         if self._timer is not None:
             self._timer.invalidate()
             self._timer = None
