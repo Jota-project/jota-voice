@@ -965,3 +965,18 @@ async def test_receive_token_expone_el_texto_como_content():
     assert events[0].type == "llm_token"
     assert events[0].data["content"] == "Hola"
     assert events[0].data["text"] == "Hola"
+
+
+@pytest.mark.asyncio
+async def test_cierre_1008_a_mitad_de_sesion_marca_fatal_y_connect_lo_limpia():
+    client = GatewayClient(GatewayConfig(host="h", client_key="k", connect_timeout_s=1.0))
+    ws = MagicMock()
+    ws.send = AsyncMock(side_effect=_closed_error(1008, "Agent 'x' not permitted for this client."))
+    client._ws = ws
+    with pytest.raises(GatewayDisconnected):
+        await client.send_end()
+    assert client.fatal_error is not None and client.fatal_error.kind == "agent_not_permitted"
+    sys.modules["websockets"].connect = AsyncMock(side_effect=OSError("red caída"))
+    with pytest.raises(OSError):
+        await client.connect()
+    assert client.fatal_error is None, "el último intento (transitorio) manda"

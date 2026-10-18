@@ -185,17 +185,14 @@ async def idle_supervisor(
             continue
 
         fatal = gateway.fatal_error
-        if fatal is not None or (gateway.last_close is not None and gateway.last_close.fatal):
-            # Cierre/rechazo fatal (1008): no reintentar en bucle. Se publica
-            # una vez y se espera; el próximo turno lo reintentará (visible).
-            if fatal is not None and fatal is not reported_fatal:
+        if fatal is not None:
+            # Rechazo/cierre fatal (1008 de auth o política, HTTP 401/403):
+            # no reintentar en bucle. Se publica una vez y se espera; el
+            # próximo turno lo reintentará (visible).
+            if fatal is not reported_fatal:
                 reported_fatal = fatal
                 log.error("Gateway: rechazo fatal, sin reintentos automáticos: %s", fatal)
                 bus.publish(handshake_error_event(fatal))
-            elif fatal is None and reported_fatal is None:
-                reported_fatal = GatewayHandshakeError("policy_rejected", 1008, gateway.last_close.reason)
-                log.error("Gateway: sesión cerrada con 1008, sin reintentos automáticos")
-                bus.publish(handshake_error_event(reported_fatal))
             await asyncio.Event().wait()
 
         delay = 0.0 if attempt == 0 else backoff[min(attempt - 1, len(backoff) - 1)]

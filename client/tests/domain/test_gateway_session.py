@@ -61,6 +61,7 @@ class FakeGateway:
         if self._connected:
             return
         self.connect_calls += 1
+        self.fatal_error = None  # como GatewayClient.connect: manda el último intento
         if self.connect_results:
             res = self.connect_results.pop(0)
             if isinstance(res, BaseException):
@@ -75,6 +76,8 @@ class FakeGateway:
         exc = GatewayDisconnected(code, reason)
         self._connected = False
         self.last_close = exc
+        if exc.fatal:  # como GatewayClient._mark_closed
+            self.fatal_error = GatewayHandshakeError("policy_rejected", code, reason)
         return exc
 
     async def receive(self):
@@ -570,3 +573,17 @@ async def test_wait_wake_or_cancel_no_se_traga_la_cancelacion_exterior(monkeypat
     await asyncio.wait([t], timeout=1.0)
     assert t.done() and t.cancelled(), "la cancelación exterior se perdió"
 
+
+
+@pytest.mark.asyncio
+async def test_rechazo_fatal_seguido_de_fallo_transitorio_vuelve_a_reintentar():
+    """Tras un 1008, si el intento del usuario falla por red (no por auth),
+    el bloqueo fatal deja de aplicar y el supervisor vuelve a reintentar."""
+    bus = EventBus()
+    gw = FakeGateway(connected=False, connect_results=[OSError("red caída")])
+    gw.fatal_error = GatewayHandshakeError("invalid_client_key", 1008, "Clave de cliente invalida")
+    # El turno del usuario reintenta (perezoso) y falla por red:
+    with pytest.raises(OSError):
+        await gw.ensure_connected()
+    await _run_supervisor(_gcfg(), bus, gw, 0.2)
+    assert gw.is_connected and gw.connect_calls == 2

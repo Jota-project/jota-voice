@@ -243,9 +243,19 @@ async def test_real_control_max_queue_por_defecto_si_corta():
         ws = await websockets.connect(srv.url, max_size=None, ping_interval=0.2, ping_timeout=0.2)
         await ws.send(json.dumps({"client_key": "k", "input_mode": "audio", "output_mode": ["audio"]}))
         closed = False
-        try:
+
+        async def _read_slowly():
             async for _ in ws:
                 await asyncio.sleep(0.03)
+
+        try:
+            # Acotado: si la librería no llegara a cortar, falla este test en
+            # vez de colgar toda la ejecución de pytest.
+            await asyncio.wait_for(_read_slowly(), 5.0)
         except websockets.exceptions.ConnectionClosed:
             closed = True
-        assert closed or ws.close_code is not None
+        except asyncio.TimeoutError:
+            await ws.close()
+        assert closed or ws.close_code not in (None, 1000), (
+            "con max_queue=16 la librería debía cortar por keepalive"
+        )

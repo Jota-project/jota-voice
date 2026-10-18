@@ -251,6 +251,14 @@ class GatewayClient:
             self._closed = True
             self.last_close = exc
             log.warning("Gateway: sesión cerrada — %s", exc)
+            if exc.fatal:
+                # 1008 a mitad de sesión: mismo trato que un rechazo fatal
+                # del handshake (sin reintentos automáticos).
+                err = GatewayHandshakeError(
+                    classify_handshake_close(exc.code, exc.reason), exc.code, exc.reason
+                )
+                if err.fatal:
+                    self.fatal_error = err
         return self.last_close or exc
 
     # ------------------------------------------------------------------
@@ -306,6 +314,10 @@ class GatewayClient:
         self._agent = None
         self._capabilities = {}
         self._closed = False
+        # El resultado del último intento manda: si este falla por algo
+        # transitorio, el rechazo fatal anterior deja de bloquear la
+        # reconexión en segundo plano; si vuelve a ser fatal, se re-marca.
+        self.fatal_error = None
 
         try:
             ws = await asyncio.wait_for(
