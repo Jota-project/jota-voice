@@ -85,7 +85,7 @@ _apply_termux_hosts()
 
 from backends import registry
 from backends.gateway_client import GatewayClient, GatewayHandshakeError
-from config import Config, load_config
+from config import Config, ConfigError, load_config
 from core.aio import cancel_and_wait
 from domain.event_bus import EventBus, VoiceEvent
 from domain.gateway_session import gateway_idle_listener, idle_supervisor
@@ -545,7 +545,13 @@ if __name__ == "__main__":
         print(f"Uso: {sys.argv[0]} <config.yaml>", file=sys.stderr)
         sys.exit(1)
 
-    _cfg = load_config(sys.argv[1])
+    try:
+        _cfg = load_config(sys.argv[1])
+    except ConfigError as _exc:
+        # Config inválida: falla al arrancar con un mensaje que nombra cada
+        # clave mal puesta, sin traceback (Fase 6, issues #49/#80).
+        print(_exc, file=sys.stderr)
+        sys.exit(2)
     _setup_logging(_cfg.logging.level)
     _menubar_backend = registry.make_menubar(_cfg)
 

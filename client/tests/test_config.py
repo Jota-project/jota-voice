@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import tempfile
 
+import pytest
 import yaml
 
 
@@ -298,3 +299,130 @@ def test_gateway_config_persistent_session_explicit_true() -> None:
         "persistent_session": True,
     })
     assert cfg.persistent_session is True
+
+
+# ---------------------------------------------------------------------------
+# Issue #80: un valor con tipo inválido da un ConfigError que nombra la clave
+# ---------------------------------------------------------------------------
+
+_NUMERIC_FIELDS = [
+    ("gateway", "port"),
+    ("gateway", "connect_timeout_s"),
+    ("gateway", "keepalive_interval_s"),
+    ("gateway", "ping_interval_s"),
+    ("gateway", "ping_timeout_s"),
+    ("oww", "port"),
+    ("oww", "debounce_s"),
+    ("oww", "idle_detection_timeout_s"),
+    ("oww", "oww_healthcheck_threshold"),
+    ("audio", "sample_rate"),
+    ("audio", "channels"),
+    ("audio", "frames_per_buffer"),
+    ("audio", "preroll_seconds"),
+    ("audio", "silence_timeout_s"),
+    ("audio", "recording_timeout_s"),
+    ("audio", "vad_rms_threshold"),
+    ("display", "timeout_s"),
+    ("display", "port"),
+    ("display", "rate_limit_max_requests"),
+    ("display", "rate_limit_window_s"),
+    ("display", "max_clients"),
+    ("menubar", "refresh_hz"),
+]
+
+
+def _load_tmp(tmp_path, data):
+    from config import load_config
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(data))
+    return load_config(path)
+
+
+def _with(section: str, values: dict) -> dict:
+    data = {k: dict(v) for k, v in _BASE.items()}
+    data[section] = {**data.get(section, {}), **values}
+    return data
+
+
+@pytest.mark.parametrize("section,key", _NUMERIC_FIELDS)
+def test_valor_no_numerico_da_config_error_con_la_clave(tmp_path, section, key) -> None:
+    from config import ConfigError
+    with pytest.raises(ConfigError) as info:
+        _load_tmp(tmp_path, _with(section, {key: "abc"}))
+    msg = str(info.value)
+    assert f"{section}.{key}" in msg
+    assert "'abc'" in msg
+    assert str(tmp_path / "config.yaml") in msg
+
+
+@pytest.mark.parametrize("section", ["gateway", "oww"])
+def test_lista_de_numeros_invalida_nombra_la_clave(tmp_path, section) -> None:
+    from config import ConfigError
+    with pytest.raises(ConfigError, match=rf"{section}\.reconnect_backoff_s"):
+        _load_tmp(tmp_path, _with(section, {"reconnect_backoff_s": [1, "x"]}))
+
+
+def test_config_error_es_value_error() -> None:
+    from config import ConfigError
+    assert issubclass(ConfigError, ValueError)
+
+
+def test_el_error_lista_todos_los_campos_invalidos_a_la_vez(tmp_path) -> None:
+    from config import ConfigError
+    data = _with("audio", {"sample_rate": "x", "channels": "y"})
+    data["oww"] = {"port": "z"}
+    with pytest.raises(ConfigError) as info:
+        _load_tmp(tmp_path, data)
+    msg = str(info.value)
+    assert "audio.sample_rate" in msg and "audio.channels" in msg and "oww.port" in msg
+
+
+def test_booleanos_no_se_evaluan_por_truthiness(tmp_path) -> None:
+    """bool("false") es True en Python: antes `persistent_session: "false"`
+    activaba la sesión persistente."""
+    cfg = _load_tmp(tmp_path, _with("gateway", {"persistent_session": "false"}))
+    assert cfg.gateway.persistent_session is False
+    cfg = _load_tmp(tmp_path, _with("menubar", {"enabled": "no"}))
+    assert cfg.menubar.enabled is False
+
+
+def test_booleano_invalido_nombra_la_clave(tmp_path) -> None:
+    from config import ConfigError
+    with pytest.raises(ConfigError, match=r"gateway\.persistent_session"):
+        _load_tmp(tmp_path, _with("gateway", {"persistent_session": "quizá"}))
+
+
+def test_numeros_entre_comillas_siguen_valiendo(tmp_path) -> None:
+    """Configs desplegadas pueden llevar números entrecomillados."""
+    cfg = _load_tmp(tmp_path, _with("gateway", {"port": "8004", "connect_timeout_s": "7.5"}))
+    assert cfg.gateway.port == 8004
+    assert cfg.gateway.connect_timeout_s == 7.5
+
+
+def test_entero_no_acepta_bool_ni_decimales(tmp_path) -> None:
+    from config import ConfigError
+    with pytest.raises(ConfigError, match=r"oww\.port"):
+        _load_tmp(tmp_path, _with("oww", {"port": True}))
+    with pytest.raises(ConfigError, match=r"audio\.channels"):
+        _load_tmp(tmp_path, _with("audio", {"channels": 1.5}))
+
+
+def test_seccion_que_no_es_un_mapa_da_config_error(tmp_path) -> None:
+    from config import ConfigError
+    with pytest.raises(ConfigError, match="audio"):
+        _load_tmp(tmp_path, {**_BASE, "audio": [1, 2]})
+
+
+def test_seccion_vacia_usa_los_defaults(tmp_path) -> None:
+    """`oww:` sin nada debajo es None en YAML: equivale a no ponerla."""
+    from config import OWWConfig
+    cfg = _load_tmp(tmp_path, {**_BASE, "oww": None})
+    assert cfg.oww == OWWConfig()
+
+
+def test_fichero_vacio_da_config_error(tmp_path) -> None:
+    from config import ConfigError, load_config
+    path = tmp_path / "config.yaml"
+    path.write_text("")
+    with pytest.raises(ConfigError, match="gateway"):
+        load_config(path)
