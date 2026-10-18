@@ -1016,3 +1016,30 @@ async def test_connect_reinicia_el_descarte_tras_cancel():
     sys.modules["websockets"].connect = AsyncMock(return_value=_ws_with_recv([_READY]))
     await client.connect()
     assert client._discard_upto == 0
+
+
+
+@pytest.mark.asyncio
+async def test_connect_un_unico_deadline_para_abrir_y_handshake():
+    """Revisión Fase R, punto 4: abrir el socket y esperar `ready` comparten
+    connect_timeout_s (antes eran dos plazos completos seguidos)."""
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=0.3)
+
+    async def _slow_open(*a, **kw):
+        await asyncio.sleep(0.2)
+        ws = MagicMock()
+        ws.send = AsyncMock()
+        ws.close = AsyncMock()
+
+        async def _never():
+            await asyncio.Event().wait()
+
+        ws.recv = _never
+        return ws
+
+    sys.modules["websockets"].connect = _slow_open
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    with pytest.raises(asyncio.TimeoutError):
+        await GatewayClient(cfg).connect()
+    assert loop.time() - t0 < 0.45, "abrir + handshake deben caber en connect_timeout_s"

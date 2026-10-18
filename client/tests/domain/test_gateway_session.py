@@ -698,3 +698,25 @@ async def test_audio_tardio_tras_turn_end_se_reproduce():
     ])
     assert pb.play_chunk.await_count == 2
     assert got[-1].type == "playback_ended"
+
+
+
+@pytest.mark.asyncio
+async def test_recording_no_recorta_el_plazo_del_cliente():
+    """Revisión Fase R, punto 4: _recording envolvía ensure_connected en
+    wait_for(connect_timeout_s) mientras el cliente usaba dos plazos: el
+    turno tenía la mitad de presupuesto que la reconexión de fondo. Ahora el
+    plazo lo pone solo el cliente."""
+    from domain.state_machine import _recording
+
+    gw = FakeGateway(connected=False)
+    orig = gw.ensure_connected
+
+    async def _slowish():
+        await asyncio.sleep(0.15)  # > connect_timeout_s del cfg (0.1)
+        await orig()
+
+    gw.ensure_connected = _slowish
+    cfg = _cfg(connect_timeout_s=0.1)
+    await _recording("ok", EventBus(), _audio_with_frames(0), gw, _playback(), cfg, asyncio.Event())
+    assert gw.connect_calls == 1 and ("end",) in gw.sent

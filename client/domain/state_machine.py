@@ -255,16 +255,15 @@ async def _recording(
     if cfg.gateway.persistent_session:
         # Modo persistente (issue #118): si la sesión está caída al empezar
         # el turno (cierre por inactividad, reinicio del gateway, corte...),
-        # reconectar AHORA de forma perezosa, acotado por connect_timeout_s.
-        # El audio que el usuario dice mientras tanto se acumula en la cola
-        # y se envía tras el handshake. Si no se puede, error visible.
+        # reconectar AHORA de forma perezosa. El plazo (connect_timeout_s
+        # para abrir + handshake) lo pone GatewayClient.connect(); no se
+        # envuelve en otro wait_for para no recortarlo. El audio que el
+        # usuario dice mientras tanto se acumula en la cola y se envía tras
+        # el handshake. Si no se puede, error visible.
         if not gateway.is_connected:
             log.warning("RECORDING: sesión con el gateway caída; reconectando")
             try:
-                await asyncio.wait_for(
-                    gateway.ensure_connected(),
-                    timeout=cfg.gateway.connect_timeout_s,
-                )
+                await gateway.ensure_connected()
             except GatewayHandshakeError as exc:
                 raise _GatewayError(
                     code="GATEWAY_HANDSHAKE_REJECTED",

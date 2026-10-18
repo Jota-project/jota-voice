@@ -334,6 +334,11 @@ class GatewayClient:
             raise
 
     async def _open_session(self) -> None:
+        # Un único plazo (connect_timeout_s) para abrir el socket Y recibir
+        # `ready` (revisión Fase R): antes eran dos plazos completos seguidos
+        # y _recording los recortaba con un tercero más corto.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._cfg.connect_timeout_s
         try:
             ws = await asyncio.wait_for(
                 websockets.connect(self._cfg.ws_url, **self._connect_kwargs()),
@@ -351,7 +356,7 @@ class GatewayClient:
         # leer ni enviar por ese socket.
         self._closed = True
         try:
-            await self._handshake(ws)
+            await self._handshake(ws, deadline)
         except BaseException:
             # Cualquier fallo (incluida la cancelación) cierra el socket:
             # sin esto quedaba una conexión medio abierta.
@@ -365,7 +370,7 @@ class GatewayClient:
         self._last_send_at = time.monotonic()
         self.fatal_error = None
 
-    async def _handshake(self, ws: Any) -> None:
+    async def _handshake(self, ws: Any, deadline: float) -> None:
         handshake = {
             "client_key": self._cfg.client_key,
             "input_mode": "audio",
@@ -379,7 +384,6 @@ class GatewayClient:
         # `ready` (health check, difusión del ClientRegistry): se reenvían al
         # bus y se sigue esperando, todo dentro de connect_timeout_s.
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._cfg.connect_timeout_s
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
