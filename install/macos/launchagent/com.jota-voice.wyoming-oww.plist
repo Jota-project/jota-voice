@@ -25,8 +25,17 @@
   </dict>
   <key>RunAtLoad</key>
   <true/>
+  <!-- Issue #46: relanzar solo tras un fallo, con backoff de 30 s y 10 s
+       de margen para cerrar antes del SIGKILL. -->
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>ExitTimeOut</key>
+  <integer>10</integer>
   <key>ProcessType</key>
   <string>Interactive</string>
   <key>StandardOutPath</key>
