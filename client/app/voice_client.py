@@ -183,7 +183,7 @@ async def main(
         bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": name}))
 
     audio = registry.make_audio(cfg)
-    oww = registry.make_oww(cfg, on_wake_word=_oww_on_wake, bus=bus)
+    oww = registry.make_oww(cfg, bus=bus)
     display_backend = registry.make_display(cfg, on_cancel=cancel_event.set)
     # bus=bus: sin él gateway_ready (session_id, capabilities, #110) y los
     # status previos a ready nunca llegaban al bus en producción.

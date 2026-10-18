@@ -375,7 +375,7 @@ async def _test_menubar_stops_after_async_cleanup(monkeypatch) -> None:
         pass
 
     monkeypatch.setattr(registry, "make_audio", lambda cfg: _AudioBackend())
-    monkeypatch.setattr(registry, "make_oww", lambda cfg, on_wake_word, **kw: _OwwBackend())
+    monkeypatch.setattr(registry, "make_oww", lambda cfg, **kw: _OwwBackend())
 
     class _Display(NullDisplayBackend):
         async def stop(self) -> None:

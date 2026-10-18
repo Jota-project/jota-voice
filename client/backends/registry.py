@@ -87,12 +87,12 @@ def make_display(cfg: Config, *, on_cancel: Callable[[], None] | None = None):
     raise ConfigError(f"display backend desconocido: {name!r}")
 
 
-def make_oww(cfg: Config, on_wake_word, bus=None):
+def make_oww(cfg: Config, bus=None):
     from .oww_wyoming import WyomingBackend
 
     name = cfg.oww.backend
     if name == "wyoming":
-        return WyomingBackend(cfg.oww, on_wake_word, audio_cfg=cfg.audio, bus=bus)
+        return WyomingBackend(cfg.oww, audio_cfg=cfg.audio, bus=bus)
     raise ConfigError(f"oww backend desconocido: {name!r}")
 
 
