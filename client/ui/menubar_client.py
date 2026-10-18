@@ -13,12 +13,70 @@ import threading
 
 from domain.event_bus import EventBus, VoiceEvent
 
-from .menubar_base import MenubarBackend
+from .menubar_base import (
+    HEALTH_FATAL,
+    HEALTH_INFO,
+    HEALTH_OK,
+    HEALTH_WARN,
+    MenubarBackend,
+)
 
 log = logging.getLogger(__name__)
 
 
 _HOLD_TRANSIENT_S_DEFAULT = 3.0
+
+# --- Salud del sistema (issues #108 y #7) ---------------------------------
+# Cada condición activa se guarda por "fuente"; el menubar muestra todas,
+# las más graves primero. El orden de esta tupla desempata a igual gravedad.
+_HEALTH_SOURCES = ("fatal", "gateway", "wake_word", "transcriber", "orchestrator", "tts")
+_SEVERITY = {HEALTH_INFO: 1, HEALTH_WARN: 2, HEALTH_FATAL: 3}
+
+# Servicios que el gateway reporta en {"type": "status", "service", "state"}.
+_SERVICE_LABELS = {
+    "transcriber": "Transcripción",
+    "orchestrator": "Orquestador",
+    "tts": "Síntesis de voz",
+}
+# Texto por estado de servicio.
+_SERVICE_TEXTS = {
+    "unavailable": (HEALTH_WARN, "{label} no disponible"),
+    "reconnecting": (HEALTH_WARN, "{label}: reconectando…"),
+}
+# "degraded" es solo del transcriber y es una señal de CALIDAD, no de
+# conectividad; además jota-gateway#227 la emite en reposo sin motivo, así
+# que va como aviso informativo (sin icono ni contador de errores).
+_SERVICE_DEGRADED_TEXT = {
+    "transcriber": "Transcripción degradada",
+    "orchestrator": "Orquestador degradado",
+    "tts": "Síntesis de voz degradada",
+}
+# Evento de un turno correcto que demuestra que el servicio funciona y
+# limpia su aviso aunque nunca llegue el "restored".
+_SERVICE_CLEARED_BY = {
+    "transcription": "transcriber",
+    "llm_token": "orchestrator",
+    "playback_started": "tts",
+}
+# Estados de la propia sesión (gateway_session._status).
+_GATEWAY_TEXTS = {
+    "reconnecting": "Gateway: reconectando…",
+    "disconnected": "Gateway: desconectado",
+}
+# kind de GatewayHandshakeError (backends.gateway_client.classify_handshake_close).
+_HANDSHAKE_TEXTS = {
+    "invalid_client_key": "Gateway: client_key inválida",
+    "agent_not_permitted": "Gateway: agente no permitido",
+    "agent_not_available": "Gateway: agente no disponible",
+    "policy_rejected": "Gateway: conexión rechazada",
+    "service_unavailable": "Gateway: servicio no disponible",
+}
+_MAX_DETAIL_CHARS = 60
+
+
+def _shorten(text: str, limit: int = _MAX_DETAIL_CHARS) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 class MenubarClient:
@@ -28,6 +86,8 @@ class MenubarClient:
         self._hold_transient_s = hold_transient_s
         self._hold_until: float = 0.0
         self._pending_idle_task: "asyncio.Task | None" = None
+        self._health: dict[str, tuple[str, str]] = {}
+        self._last_health: tuple[str, str] = (HEALTH_OK, "")
 
     async def run(
         self,
@@ -120,6 +180,8 @@ class MenubarClient:
         if not isinstance(event.data, dict):
             return
 
+        self._update_health(event)
+
         if event.type == "state_changed":
             state = event.data.get("state", "")
             if state == "idle":
@@ -145,6 +207,89 @@ class MenubarClient:
             self._set_transient_state("error")
         elif event.type == "cancelled":
             self._set_transient_state("cancelled")
+
+    # ------------------------------------------------------------------
+    # Salud: gateway, servicios del gateway y wake word (#108, #7)
+    # ------------------------------------------------------------------
+
+    def _update_health(self, event: VoiceEvent) -> None:
+        data = event.data
+        before = dict(self._health)
+
+        if event.type == "gateway_status":
+            service = data.get("service")
+            state = data.get("state")
+            if service == "gateway":
+                self._on_session_status(state)
+            elif service in _SERVICE_LABELS:
+                self._on_service_status(service, state)
+        elif event.type == "gateway_ready":
+            # Handshake completo: la sesión está viva y aceptada. No borra
+            # los status de servicios: llegan ANTES del ready.
+            self._health.pop("gateway", None)
+            self._health.pop("fatal", None)
+        elif event.type == "error":
+            self._on_error(data)
+        elif event.type == "oww_degraded":
+            self._health["wake_word"] = (HEALTH_WARN, "Wake word no disponible")
+        elif event.type == "oww_recovered":
+            self._health.pop("wake_word", None)
+        elif event.type in _SERVICE_CLEARED_BY:
+            if event.type != "transcription" or str(data.get("text", "")).strip():
+                self._health.pop(_SERVICE_CLEARED_BY[event.type], None)
+
+        if self._health != before:
+            self._push_health()
+
+    def _on_session_status(self, state) -> None:
+        if state == "connected":
+            self._health.pop("gateway", None)
+            self._health.pop("fatal", None)
+        elif state in _GATEWAY_TEXTS:
+            self._health["gateway"] = (HEALTH_WARN, _GATEWAY_TEXTS[state])
+            if state == "disconnected":
+                # Los status de servicios eran de la sesión que acaba de caer.
+                for service in _SERVICE_LABELS:
+                    self._health.pop(service, None)
+
+    def _on_service_status(self, service: str, state) -> None:
+        if state == "restored":
+            self._health.pop(service, None)
+        elif state == "degraded":
+            self._health[service] = (HEALTH_INFO, _SERVICE_DEGRADED_TEXT[service])
+        elif state in _SERVICE_TEXTS:
+            level, template = _SERVICE_TEXTS[state]
+            self._health[service] = (level, template.format(label=_SERVICE_LABELS[service]))
+        else:
+            log.debug("MenubarClient: status %r de %s ignorado", state, service)
+
+    def _on_error(self, data: dict) -> None:
+        code = data.get("code")
+        if data.get("fatal") is True:
+            # Un rechazo fatal (client_key inválida, agente no permitido…) no
+            # se reintenta solo: se queda visible hasta que una sesión vuelva
+            # a abrirse (gateway_ready / connected).
+            if code == "GATEWAY_HANDSHAKE_REJECTED":
+                text = _HANDSHAKE_TEXTS.get(data.get("kind"), "Gateway: conexión rechazada")
+            else:
+                text = f"Error grave: {_shorten(data.get('message') or code or 'desconocido')}"
+            self._health["fatal"] = (HEALTH_FATAL, text)
+        elif code == "GATEWAY_DISCONNECTED" and "gateway" not in self._health:
+            self._health["gateway"] = (HEALTH_WARN, "Gateway: sin conexión")
+
+    def _push_health(self) -> None:
+        entries = [
+            (_SEVERITY[level], -_HEALTH_SOURCES.index(source), level, text)
+            for source, (level, text) in self._health.items()
+        ]
+        if entries:
+            entries.sort(reverse=True)
+            health = (entries[0][2], " · ".join(e[3] for e in entries))
+        else:
+            health = (HEALTH_OK, "")
+        if health != self._last_health:
+            self._last_health = health
+            self._backend.set_health(*health)
 
     def _set_state_now(self, state: str) -> None:
         """Aplica un estado inmediatamente y cancela cualquier reversión a

@@ -15,6 +15,18 @@ class MenubarBackend(Protocol):
     def set_listening_paused(self, paused: bool) -> None: ...
     def set_errors_count(self, n: int) -> None: ...
     def set_commands(self, cmds: "MenubarCommands") -> None: ...
+    def set_health(self, level: str, text: str) -> None:
+        """Estado del sistema fuera del turno en curso (gateway, servicios,
+        wake word). ``level`` es uno de los ``HEALTH_*``; con
+        ``HEALTH_OK`` el texto es "" y el aviso se oculta."""
+        ...
+
+
+# Niveles de set_health(), de menos a más grave.
+HEALTH_OK = "ok"        # nada que avisar
+HEALTH_INFO = "info"    # aviso discreto (p.ej. transcripción degradada)
+HEALTH_WARN = "warn"    # algo no funciona pero se recupera solo
+HEALTH_FATAL = "fatal"  # requiere acción del usuario (client_key inválida…)
 
 
 @runtime_checkable
@@ -81,11 +93,22 @@ class _SharedState:
     last_text: str = ""
     errors_count: int = 0
     listening_paused: bool = False
+    health_level: str = HEALTH_OK
+    health_text: str = ""
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def read(self) -> tuple[str, str, int, bool]:
         with self._lock:
             return (self.state, self.last_text, self.errors_count, self.listening_paused)
+
+    def read_health(self) -> tuple[str, str]:
+        with self._lock:
+            return (self.health_level, self.health_text)
+
+    def set_health(self, level: str, text: str) -> None:
+        with self._lock:
+            self.health_level = level
+            self.health_text = text
 
     def update(
         self,

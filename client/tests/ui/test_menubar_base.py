@@ -83,6 +83,7 @@ def test_protocol_is_runtime_checkable():
         def set_listening_paused(self, paused: bool) -> None: ...
         def set_errors_count(self, n: int) -> None: ...
         def set_commands(self, cmds) -> None: ...
+        def set_health(self, level: str, text: str) -> None: ...
 
     assert isinstance(Fake(), MenubarBackend)
 
@@ -113,3 +114,14 @@ def test_null_backend_is_not_blocking():
 
     assert not isinstance(NullMenubarBackend(), BlockingMenubarBackend)
     assert not needs_main_thread(NullMenubarBackend())
+
+
+def test_shared_state_health_roundtrip():
+    from ui.menubar_base import HEALTH_INFO, HEALTH_OK
+
+    s = _SharedState()
+    assert s.read_health() == (HEALTH_OK, "")
+    s.set_health(HEALTH_INFO, "Transcripción degradada")
+    assert s.read_health() == (HEALTH_INFO, "Transcripción degradada")
+    # No altera la tupla de estado del turno.
+    assert s.read() == ("idle", "", 0, False)

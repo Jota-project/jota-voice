@@ -194,6 +194,93 @@ def test_show_about_uses_non_modal_standard_panel(backend, monkeypatch):
     assert calls[1][1]["ApplicationName"] == "jota-voice"
 
 
+def test_health_item_hidden_while_ok(backend):
+    backend.set_commands(_noop_commands())
+    backend.tick_(None)
+
+    assert backend._health_item.isHidden()
+    assert backend._menu.indexOfItem_(backend._health_item) == 1  # bajo la cabecera
+
+
+def test_health_item_shows_discreet_info(backend):
+    """#108: "Transcripción degradada" aparece como línea discreta bajo la
+    cabecera, sin cambiar el icono de la barra."""
+    from ui.menubar_cocoa import _icon_name
+
+    backend.set_commands(_noop_commands())
+    backend.set_health("info", "Transcripción degradada")
+    backend.tick_(None)
+
+    item = backend._health_item
+    assert not item.isHidden()
+    assert item.title() == "Transcripción degradada"
+    assert item.isEnabled()  # clic → Abrir logs
+    assert _icon_name("idle", "info") == "mic"
+    assert "Transcripción degradada" in backend.status_item.button().toolTip()
+
+    backend.set_health("ok", "")
+    backend.tick_(None)
+    assert item.isHidden()
+    assert backend.status_item.button().toolTip() == "jota-voice"
+
+
+def test_health_item_disabled_until_commands(backend):
+    backend.set_health("warn", "Gateway: reconectando…")
+    backend.tick_(None)
+
+    assert not backend._health_item.isHidden()
+    assert not backend._health_item.isEnabled()
+
+
+def test_fatal_health_is_red(backend):
+    backend.set_commands(_noop_commands())
+    backend.set_health("fatal", "Gateway: client_key inválida")
+    backend.tick_(None)
+
+    title = backend._health_item.attributedTitle()
+    color, _range = title.attribute_atIndex_effectiveRange_(
+        AppKit.NSForegroundColorAttributeName, 0, None
+    )
+    assert title.string() == "Gateway: client_key inválida"
+    assert color == AppKit.NSColor.systemRedColor()
+
+    # Al volver a un aviso normal se quita el color.
+    backend.set_health("info", "Transcripción degradada")
+    backend.tick_(None)
+    assert backend._health_item.title() == "Transcripción degradada"
+    plain = backend._health_item.attributedTitle()
+    assert plain is None or plain.attribute_atIndex_effectiveRange_(
+        AppKit.NSForegroundColorAttributeName, 0, None
+    )[0] != AppKit.NSColor.systemRedColor()
+
+
+@pytest.mark.parametrize(
+    "state, level, name",
+    [
+        ("idle", "ok", "mic"),
+        ("idle", "info", "mic"),
+        ("idle", "warn", "mic.slash"),
+        ("idle", "fatal", "exclamationmark.octagon"),
+        # Durante un turno manda el estado del turno.
+        ("listening", "fatal", "ear"),
+        ("speaking", "warn", "speaker.wave.2"),
+        ("error", "warn", "exclamationmark.triangle"),
+    ],
+)
+def test_icon_name_combines_state_and_health(state, level, name):
+    from ui.menubar_cocoa import _icon_name
+
+    assert _icon_name(state, level) == name
+
+
+def test_health_icons_exist_as_sf_symbols():
+    for name in ("mic.slash", "exclamationmark.octagon", "info.circle",
+                 "exclamationmark.triangle", "xmark.octagon"):
+        assert AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            name, None
+        ) is not None, name
+
+
 def test_status_item_created(backend):
     assert backend.status_item is not None
     assert backend.status_item.button() is not None
@@ -393,3 +480,16 @@ def test_run_forever_tears_down_when_run_loop_returns(backend, monkeypatch):
 
     assert backend.status_item is None
     assert backend._timer is None
+
+
+def test_startup_error_text_is_shown_in_header(backend):
+    """main() informa los errores de arranque (audio, handshake inicial) con
+    set_state("error") + set_status_text(...), antes de set_commands(). Ese
+    texto no se pintaba en ningún sitio."""
+    backend.set_state("error")
+    backend.set_status_text(
+        "Error: no se pudo iniciar el audio (revisa permisos de micrófono/dispositivo)"
+    )
+    backend.tick_(None)
+
+    assert backend._header_item.title().startswith("Error: no se pudo iniciar el audio")
