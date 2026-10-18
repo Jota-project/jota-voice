@@ -189,7 +189,11 @@ def test_load_config_rechaza_gateway_sin_url_ni_host() -> None:
 
 
 def test_load_config_carga_env_sibling_si_existe(monkeypatch) -> None:
-    monkeypatch.delenv("CF_ACCESS_CLIENT_ID", raising=False)
+    # setenv + delenv: delenv de una variable ausente no registra deshacer, y
+    # el setdefault de load_config se quedaría en os.environ para el resto de
+    # la suite (#39).
+    monkeypatch.setenv("CF_ACCESS_CLIENT_ID", "x")
+    monkeypatch.delenv("CF_ACCESS_CLIENT_ID")
     with tempfile.TemporaryDirectory() as workdir:
         cfg_path = os.path.join(workdir, "config.yaml")
         with open(cfg_path, "w") as f:
@@ -220,6 +224,45 @@ def test_load_config_no_pisa_variable_de_entorno_ya_definida(monkeypatch) -> Non
         from config import load_config
         load_config(cfg_path)
         assert os.environ.get("CF_ACCESS_CLIENT_ID") == "ya-estaba"
+
+
+def _env_from(tmp_path, text: str, environ: dict | None = None) -> dict:
+    from config import _load_env_file
+    path = tmp_path / ".env"
+    path.write_text(text)
+    env = {} if environ is None else environ
+    _load_env_file(path, environ=env)
+    return env
+
+
+@pytest.mark.parametrize("line,expected", [
+    ('GATEWAY_CLIENT_KEY="abc123"', "abc123"),
+    ("GATEWAY_CLIENT_KEY='abc123'", "abc123"),
+    ("GATEWAY_CLIENT_KEY=abc123", "abc123"),
+    ("GATEWAY_CLIENT_KEY=wss://host/x  # comentario", "wss://host/x"),
+    ('GATEWAY_CLIENT_KEY="abc123"   # comentario', "abc123"),
+    ('GATEWAY_CLIENT_KEY="a # dentro de comillas"', "a # dentro de comillas"),
+    ("GATEWAY_CLIENT_KEY=se#creto", "se#creto"),
+    ("export GATEWAY_CLIENT_KEY=abc123", "abc123"),
+    ("  GATEWAY_CLIENT_KEY = abc123  ", "abc123"),
+    ("GATEWAY_CLIENT_KEY=", ""),
+    ('GATEWAY_CLIENT_KEY=""', ""),
+    ("GATEWAY_CLIENT_KEY=a=b", "a=b"),
+])
+def test_env_file_quita_comillas_y_comentarios_inline(tmp_path, line, expected) -> None:
+    """Issue #51: mismo tratamiento que _cfg_val() del smoke-test de shell."""
+    env = _env_from(tmp_path, line + "\n")
+    assert env == {"GATEWAY_CLIENT_KEY": expected}
+
+
+def test_env_file_ignora_comentarios_y_lineas_invalidas(tmp_path) -> None:
+    env = _env_from(tmp_path, "# comentario\n\nSIN_IGUAL\n=sin_clave\nA=1\n")
+    assert env == {"A": "1"}
+
+
+def test_env_file_no_pisa_lo_ya_definido(tmp_path) -> None:
+    env = _env_from(tmp_path, "A=del-fichero\nB=nuevo\n", {"A": "ya-estaba"})
+    assert env == {"A": "ya-estaba", "B": "nuevo"}
 
 
 def test_menubar_default_enabled() -> None:

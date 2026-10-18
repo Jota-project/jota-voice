@@ -5,6 +5,7 @@ import math
 import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path
+from collections.abc import MutableMapping
 from typing import Any
 
 import yaml
@@ -214,16 +215,49 @@ class _Section:
         return text
 
 
-def _load_env_file(path: Path) -> None:
-    """Carga variables KEY=VALUE de un .env sin pisar las ya definidas en el entorno."""
+def _env_value(raw: str) -> str:
+    """Valor de una línea .env, con el mismo tratamiento que _cfg_val() de
+    install/shared/99-smoke-test.sh (issue #51):
+
+    - Entre comillas (simples o dobles): lo de dentro, tal cual (un ``#``
+      dentro de las comillas es parte del valor).
+    - Sin comillas: se quita un comentario inline, pero solo si el ``#`` va
+      precedido de espacio (``se#creto`` se conserva entero).
+    """
+    value = raw.strip()
+    if value[:1] in ('"', "'"):
+        end = value.find(value[0], 1)
+        if end != -1:
+            return value[1:end]
+    hash_at = next(
+        (i for i, ch in enumerate(value) if ch == "#" and i > 0 and value[i - 1].isspace()),
+        None,
+    )
+    if hash_at is not None:
+        value = value[:hash_at]
+    return value.strip()
+
+
+def _load_env_file(path: Path, environ: MutableMapping[str, str] | None = None) -> None:
+    """Carga variables KEY=VALUE de un .env sin pisar las ya definidas.
+
+    ``environ``: destino (por defecto ``os.environ``); inyectable en tests.
+    Acepta el prefijo ``export `` de los .env escritos para shell.
+    """
+    env = os.environ if environ is None else environ
     if not path.is_file():
         return
     for line in path.read_text().splitlines():
         line = line.strip()
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip())
+        key = key.strip()
+        if not key:
+            continue
+        env.setdefault(key, _env_value(value))
 
 
 @dataclass
