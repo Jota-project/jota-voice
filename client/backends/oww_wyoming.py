@@ -28,10 +28,12 @@ class WyomingBackend:
         cfg: OWWConfig,
         on_wake_word: Callable[[str], Awaitable[None]] | None = None,
         audio_cfg: Optional[AudioConfig] = None,
+        bus=None,
     ) -> None:
         self._cfg = cfg
         self._default_on_wake = on_wake_word
-        self._client = OWWClient(cfg, audio_cfg=audio_cfg)
+        # bus: para que OWWClient publique oww_degraded/oww_recovered.
+        self._client = OWWClient(cfg, audio_cfg=audio_cfg, bus=bus)
 
     async def connect_with_backoff(self) -> None:
         await self._client.connect_with_backoff()

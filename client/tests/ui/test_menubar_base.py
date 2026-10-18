@@ -83,5 +83,45 @@ def test_protocol_is_runtime_checkable():
         def set_listening_paused(self, paused: bool) -> None: ...
         def set_errors_count(self, n: int) -> None: ...
         def set_commands(self, cmds) -> None: ...
+        def set_health(self, level: str, text: str) -> None: ...
 
     assert isinstance(Fake(), MenubarBackend)
+
+
+def test_blocking_backend_protocol_requires_run_forever_and_stop():
+    """Issue #69: run_forever()/stop() forman un contrato explícito, no una
+    convención detectada con hasattr()."""
+    from ui.menubar_base import BlockingMenubarBackend, needs_main_thread
+
+    class WithLoop:
+        def run_forever(self) -> None: ...
+        def stop(self) -> None: ...
+
+    class OnlyRunForever:
+        def run_forever(self) -> None: ...
+
+    assert isinstance(WithLoop(), BlockingMenubarBackend)
+    assert needs_main_thread(WithLoop())
+    # Un backend con run_forever pero sin stop() no cumple el contrato: se
+    # quedaría el run loop vivo para siempre al apagar.
+    assert not isinstance(OnlyRunForever(), BlockingMenubarBackend)
+    assert not needs_main_thread(OnlyRunForever())
+
+
+def test_null_backend_is_not_blocking():
+    from ui.menubar_base import BlockingMenubarBackend, needs_main_thread
+    from ui.menubar_null import NullMenubarBackend
+
+    assert not isinstance(NullMenubarBackend(), BlockingMenubarBackend)
+    assert not needs_main_thread(NullMenubarBackend())
+
+
+def test_shared_state_health_roundtrip():
+    from ui.menubar_base import HEALTH_INFO, HEALTH_OK
+
+    s = _SharedState()
+    assert s.read_health() == (HEALTH_OK, "")
+    s.set_health(HEALTH_INFO, "Transcripción degradada")
+    assert s.read_health() == (HEALTH_INFO, "Transcripción degradada")
+    # No altera la tupla de estado del turno.
+    assert s.read() == ("idle", "", 0, False)

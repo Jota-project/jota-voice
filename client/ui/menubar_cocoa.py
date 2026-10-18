@@ -2,6 +2,18 @@
 
 IMPORTANTE: este módulo importa AppKit al cargarse. El registry solo lo
 intenta en darwin Y captura ImportError si pyobjc no está instalado.
+
+Hilos (issue #67; contrato en ``menubar_base.BlockingMenubarBackend``):
+
+- El hilo principal real del proceso construye el backend y luego llama a
+  ``run_forever()``, que corre ``NSApp.run()`` y bloquea hasta ``stop()``.
+  NO hay ``start()`` ni hilo daemon para Cocoa: correr ``NSApp.run()`` en
+  un hilo distinto del que construyó el NSStatusItem cuelga el proceso.
+- asyncio corre en un hilo de trabajo (``voice_client._run_with_cocoa_menubar``)
+  y solo llama a los ``set_*``, que escriben en ``_SharedState`` y piden un
+  repintado al hilo principal; nunca tocan AppKit directamente.
+- Todo lo que toca AppKit (``tick_``, teardown, acciones de menú) corre en
+  el hilo principal.
 """
 from __future__ import annotations
 
@@ -10,10 +22,18 @@ from typing import Optional
 
 import AppKit
 import Foundation
+from PyObjCTools import AppHelper
 
 from config import MenubarConfig
 
-from .menubar_base import MenubarCommands, _SharedState
+from .menubar_base import (
+    HEALTH_FATAL,
+    HEALTH_INFO,
+    HEALTH_OK,
+    HEALTH_WARN,
+    MenubarCommands,
+    _SharedState,
+)
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +49,45 @@ _STATE_ICONS = {
     "cancelled": "xmark.circle",
 }
 
+# Icono de la barra en reposo cuando hay un aviso de salud (#108, #7). Un
+# aviso informativo (transcripción degradada) no cambia el icono; durante un
+# turno manda siempre el icono del turno.
+_IDLE_HEALTH_ICONS = {
+    HEALTH_WARN: "mic.slash",
+    HEALTH_FATAL: "exclamationmark.octagon",
+}
+
+# Icono de la línea de aviso del menú, por nivel.
+_HEALTH_ITEM_ICONS = {
+    HEALTH_INFO: "info.circle",
+    HEALTH_WARN: "exclamationmark.triangle",
+    HEALTH_FATAL: "xmark.octagon",
+}
+
+
+def _icon_name(state: str, health_level: str) -> str:
+    """SF Symbol de la barra para un estado de turno y un nivel de salud."""
+    if state == "idle" and health_level in _IDLE_HEALTH_ICONS:
+        return _IDLE_HEALTH_ICONS[health_level]
+    return _STATE_ICONS.get(state, "mic")
+
+
+def _ellipsize(text: str, limit: int) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+# Etiquetas de la cabecera del menú (issue #97: antes state.upper(), que
+# mostraba "CANCELLED" en inglés entre etiquetas en español).
+_STATE_LABELS = {
+    "idle":      "En espera",
+    "listening": "Escuchando",
+    "thinking":  "Pensando",
+    "speaking":  "Hablando",
+    "error":     "Error",
+    "cancelled": "Cancelado",
+}
+
 
 class CocoaMenubarBackend:
     def __init__(self, cfg: MenubarConfig, shared: Optional[_SharedState] = None) -> None:
@@ -40,7 +99,12 @@ class CocoaMenubarBackend:
         self._menu: Optional[AppKit.NSMenu] = None
         self._header_item: Optional[AppKit.NSMenuItem] = None
         self._pause_menu_item: Optional[AppKit.NSMenuItem] = None
+        self._health_item: Optional[AppKit.NSMenuItem] = None
+        # Items que solo funcionan con MenubarCommands: deshabilitados hasta
+        # que set_commands() llegue (issue #71).
+        self._command_items: list[AppKit.NSMenuItem] = []
         self._timer: Optional[Foundation.NSTimer] = None
+        self._status_bar = AppKit.NSStatusBar.systemStatusBar()
 
         self._build_status_item()
 
@@ -49,15 +113,18 @@ class CocoaMenubarBackend:
     # ------------------------------------------------------------------
 
     def _build_status_item(self) -> None:
-        self.status_item = AppKit.NSStatusBar.systemStatusBar().statusItemWithLength_(
+        self.status_item = self._status_bar.statusItemWithLength_(
             AppKit.NSVariableStatusItemLength
         )
         if self.status_item.button() is not None:
-            self.status_item.button().setImage_(self._icon_for_state(self._shared.state))
+            self.status_item.button().setImage_(self._symbol_image(_STATE_ICONS["idle"]))
             self.status_item.button().setImagePosition_(AppKit.NSImageOnly)
             self.status_item.button().setToolTip_("jota-voice")
 
         self._menu = AppKit.NSMenu.alloc().init()
+        # Sin esto NSMenu recalcula el enabled de cada item por su cuenta e
+        # ignoraría el setEnabled_ de los items de comandos.
+        self._menu.setAutoenablesItems_(False)
         self.status_item.setMenu_(self._menu)
 
         # 1. Cabecera no seleccionable
@@ -67,20 +134,34 @@ class CocoaMenubarBackend:
         self._header_item.setEnabled_(False)
         self._menu.addItem_(self._header_item)
 
+        # 1b. Aviso de salud (gateway, servicios, wake word). Oculto mientras
+        # todo va bien; al pulsarlo abre los logs, donde está el detalle.
+        self._health_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "", "openLogs:", ""
+        )
+        self._health_item.setTarget_(self)
+        self._health_item.setToolTip_("Abrir logs")
+        self._health_item.setHidden_(True)
+        self._command_items.append(self._health_item)
+        self._menu.addItem_(self._health_item)
+
         # 2. Submenú "Servicio"
         servicio_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "Servicio", None, ""
         )
         servicio_menu = AppKit.NSMenu.alloc().init()
+        servicio_menu.setAutoenablesItems_(False)
         self._pause_menu_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "Pausar escucha", "togglePause:", ""
         )
         self._pause_menu_item.setTarget_(self)
+        self._command_items.append(self._pause_menu_item)
         servicio_menu.addItem_(self._pause_menu_item)
         shutdown_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "Apagar servicio", "shutdownService:", ""
         )
         shutdown_item.setTarget_(self)
+        self._command_items.append(shutdown_item)
         servicio_menu.addItem_(shutdown_item)
         servicio_item.setSubmenu_(servicio_menu)
         self._menu.addItem_(servicio_item)
@@ -92,6 +173,7 @@ class CocoaMenubarBackend:
             "Abrir logs", "openLogs:", ""
         )
         logs_item.setTarget_(self)
+        self._command_items.append(logs_item)
         self._menu.addItem_(logs_item)
 
         # 5. Abrir configuración
@@ -99,6 +181,7 @@ class CocoaMenubarBackend:
             "Abrir configuración", "openConfig:", ""
         )
         cfg_item.setTarget_(self)
+        self._command_items.append(cfg_item)
         self._menu.addItem_(cfg_item)
 
         self._menu.addItem_(AppKit.NSMenuItem.separatorItem())
@@ -117,8 +200,16 @@ class CocoaMenubarBackend:
         quit_item.setTarget_(self)
         self._menu.addItem_(quit_item)
 
-    def _icon_for_state(self, state: str) -> AppKit.NSImage:
-        symbol_name = _STATE_ICONS.get(state, "mic")
+        self._apply_commands_ready()
+
+    def _apply_commands_ready(self) -> None:
+        """Habilita los items de comandos solo cuando set_commands() ya
+        corrió. Salir y Acerca de no dependen de ellos. Hilo principal."""
+        ready = self._commands is not None
+        for item in self._command_items:
+            item.setEnabled_(ready)
+
+    def _symbol_image(self, symbol_name: str) -> AppKit.NSImage:
         image = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(
             symbol_name, None
         )
@@ -131,11 +222,22 @@ class CocoaMenubarBackend:
         )
 
     def _header_title(self) -> str:
-        state, _, errors, paused = self._shared.read()
+        state, last_text, errors, paused = self._shared.read()
+        if self._commands is None:
+            if state != "error":
+                # Ventana de arranque (issue #71): audio.start() aún no
+                # terminó.
+                return "Arrancando…"
+            if last_text:
+                # Error de arranque: main() lo describe con set_status_text
+                # y set_commands() ya no llegará; es lo único que verá el
+                # usuario.
+                return _ellipsize(last_text, 80)
         suffix = " (pausado)" if paused else ""
+        label = _STATE_LABELS.get(state, state.capitalize())
         if errors:
-            return f"{state.upper()} — {errors} error(es){suffix}"
-        return f"{state.upper()}{suffix}"
+            return f"{label} — {errors} error(es){suffix}"
+        return f"{label}{suffix}"
 
     # ------------------------------------------------------------------
     # API pública (llamada desde asyncio a través de _SharedState o
@@ -158,8 +260,13 @@ class CocoaMenubarBackend:
         self._shared.update(errors_count=n)
         self._request_repaint()
 
+    def set_health(self, level: str, text: str) -> None:
+        self._shared.set_health(level, text)
+        self._request_repaint()
+
     def set_commands(self, cmds: MenubarCommands) -> None:
         self._commands = cmds
+        self._request_repaint()  # habilita los items en el hilo principal
 
     def _request_repaint(self) -> None:
         """Fuerza un repintado inmediato en vez de esperar al siguiente
@@ -167,11 +274,21 @@ class CocoaMenubarBackend:
         default de 5Hz, hasta 200ms). El icono debe reaccionar en el
         instante en que cambia el estado (p.ej. al detectar la wake word),
         no en el siguiente tick periódico. No-op si run_forever() todavía
-        no arrancó (self._app sigue en None)."""
+        no arrancó (self._app sigue en None).
+
+        Antes se enviaba ``tick:`` a NSApplication, que no responde a ese
+        selector (cada set_* acababa en un unrecognized selector en el hilo
+        principal); ahora se ejecuta ``tick_`` del propio backend."""
         if self._app is not None:
-            self._app.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "tick:", None, False
-            )
+            self._call_on_main(self.tick_, None)
+
+    def _call_on_main(self, fn, *args) -> None:
+        """Ejecuta ``fn(*args)`` en el hilo principal, asíncronamente.
+
+        AppHelper.callAfter usa performSelectorOnMainThread en los modos
+        comunes del run loop, así que también se atiende con el menú
+        abierto. Los tests lo sustituyen para observar qué se programa."""
+        AppHelper.callAfter(fn, *args)
 
     # ------------------------------------------------------------------
     # Runloop Cocoa
@@ -199,39 +316,85 @@ class CocoaMenubarBackend:
             self._timer, Foundation.NSRunLoopCommonModes
         )
         self._app.run()
+        # NSApp.run() retornó (stop:): seguimos en el hilo principal, que es
+        # donde se instaló el timer y donde vive el NSStatusItem. Sin run
+        # loop, _app ya no sirve para repintar ni para otro stop:.
+        self._teardown()
+        self._app = None
 
     def stop(self) -> None:
-        """Detiene NSApp. Seguro de llamar desde cualquier hilo: salta al
-        hilo principal (donde corre run_forever) vía
-        performSelectorOnMainThread_withObject_waitUntilDone_. ``stop:`` hace
-        retornar el run loop; ``terminate:`` llamaría a exit() y podría cortar
-        el apagado asíncrono a mitad."""
+        """Detiene NSApp y libera los recursos Cocoa. Seguro de llamar
+        desde cualquier hilo y más de una vez.
+
+        Todo ocurre en UN único callback del hilo principal
+        (:meth:`_stop_on_main`): teardown, ``stop:`` y el NSEvent que
+        despierta al run loop. Antes el teardown se encolaba por separado
+        antes de ``stop:`` y el evento de despertar se consumía antes de
+        procesarse ``stop:``; sin icono ni timer que generasen más eventos,
+        NSApp.run() no retornaba y quedaba un proceso invisible.
+        ``terminate:`` llamaría a exit() y cortaría el apagado asíncrono."""
+        if Foundation.NSThread.isMainThread():
+            self._stop_on_main()
+        else:
+            self._call_on_main(self._stop_on_main)
+
+    def _stop_on_main(self) -> None:
+        """Hilo principal. Libera recursos (issue #68/#70) y para NSApp."""
+        self._teardown()
+        app = self._app
+        if app is None:
+            return
+        app.stop_(None)
+        # stop: solo se observa al terminar de procesar un NSEvent; postear
+        # uno garantiza que el run loop lo compruebe y retorne.
+        make_event = getattr(
+            AppKit.NSEvent,
+            "otherEventWithType_location_modifierFlags_timestamp_"
+            "windowNumber_context_subtype_data1_data2_",
+        )
+        wake_event = make_event(
+            AppKit.NSEventTypeApplicationDefined, (0.0, 0.0), 0, 0.0, 0, None, 0, 0, 0,
+        )
+        app.postEvent_atStart_(wake_event, True)
+
+    def _paint_health(self, level: str, text: str) -> None:
+        """Muestra u oculta la línea de aviso. Hilo principal."""
+        item = self._health_item
+        if item is None:
+            return
+        if level == HEALTH_OK or not text:
+            item.setHidden_(True)
+            return
+        item.setHidden_(False)
+        item.setImage_(self._symbol_image(_HEALTH_ITEM_ICONS.get(level, "info.circle")))
+        if level == HEALTH_FATAL:
+            # Un rechazo fatal no se arregla solo: en rojo para que se vea.
+            item.setAttributedTitle_(
+                AppKit.NSAttributedString.alloc().initWithString_attributes_(
+                    text,
+                    {AppKit.NSForegroundColorAttributeName: AppKit.NSColor.systemRedColor()},
+                )
+            )
+        else:
+            item.setAttributedTitle_(None)
+            item.setTitle_(text)
+
+    def _teardown(self) -> None:
+        """Libera los recursos Cocoa: timer, NSStatusItem y NSMenu (issue
+        #68). Solo en el hilo principal (issue #70). Idempotente: stop()
+        puede llamarse más de una vez y run_forever() lo repite al salir."""
         if self._timer is not None:
             self._timer.invalidate()
             self._timer = None
-        if self._app is not None:
-            self._app.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "stop:", None, False
-            )
-            # stop: solo se observa al terminar de procesar un NSEvent; el
-            # selector del run loop no genera uno por sí mismo.
-            make_event = getattr(
-                AppKit.NSEvent,
-                "otherEventWithType_location_modifierFlags_timestamp_"
-                "windowNumber_context_subtype_data1_data2_",
-            )
-            wake_event = make_event(
-                AppKit.NSEventTypeApplicationDefined,
-                (0.0, 0.0),
-                0,
-                0.0,
-                0,
-                None,
-                0,
-                0,
-                0,
-            )
-            self._app.postEvent_atStart_(wake_event, True)
+        if self.status_item is not None:
+            self.status_item.setMenu_(None)
+            self._status_bar.removeStatusItem_(self.status_item)
+            self.status_item = None
+        self._menu = None
+        self._header_item = None
+        self._pause_menu_item = None
+        self._health_item = None
+        self._command_items = []
 
     # ------------------------------------------------------------------
     # Tick del NSTimer (corre en hilo Cocoa)
@@ -239,23 +402,24 @@ class CocoaMenubarBackend:
 
     def tick_(self, _timer) -> None:  # noqa: D401 — selector name
         state, last_text, _errors, paused = self._shared.read()
+        health_level, health_text = self._shared.read_health()
 
         if self.status_item and self.status_item.button():
-            self.status_item.button().setImage_(self._icon_for_state(state))
-            self.status_item.button().setTitle_(self._title_for_state(state))
+            button = self.status_item.button()
+            button.setImage_(self._symbol_image(_icon_name(state, health_level)))
+            button.setToolTip_(f"jota-voice — {health_text}" if health_text else "jota-voice")
+
+        self._paint_health(health_level, health_text)
 
         if self._header_item is not None:
             self._header_item.setTitle_(self._header_title())
+
+        self._apply_commands_ready()
 
         if self._pause_menu_item is not None:
             self._pause_menu_item.setTitle_(
                 "Reanudar escucha" if paused else "Pausar escucha"
             )
-
-    def _title_for_state(self, state: str) -> str:
-        # El estado se ve también en el icono de la cabecera; dejamos el
-        # botón solo con el icono salvo que el sistema no soporte SF Symbol.
-        return ""
 
     # ------------------------------------------------------------------
     # Acciones de menú (corren en hilo Cocoa)
@@ -278,10 +442,23 @@ class CocoaMenubarBackend:
             self._commands.on_open_config()
 
     def showAbout_(self, _sender) -> None:
-        alert = AppKit.NSAlert.alloc().init()
-        alert.setMessageText_("jota-voice")
-        alert.setInformativeText_("Cliente de voz universal del ecosistema Jota.")
-        alert.runModal()
+        """Panel estándar de "Acerca de", no modal (issue #98).
+
+        Antes era NSAlert.runModal(), que bloqueaba el run loop principal
+        mientras el diálogo estaba abierto: sin repintados del icono y sin
+        atender el observer de señales (#104). Como la app es "accessory"
+        (sin Dock), hay que activarla para que el panel salga al frente."""
+        app = self._app
+        if app is None:
+            return
+        credits = AppKit.NSAttributedString.alloc().initWithString_(
+            "Cliente de voz universal del ecosistema Jota."
+        )
+        app.activateIgnoringOtherApps_(True)
+        app.orderFrontStandardAboutPanelWithOptions_({
+            "ApplicationName": "jota-voice",
+            "Credits": credits,
+        })
 
     def quitApp_(self, _sender) -> None:
         if self._commands is not None:
