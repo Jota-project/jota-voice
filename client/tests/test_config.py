@@ -639,6 +639,19 @@ def test_placeholder_sin_rellenar_falla_al_cargar(tmp_path, section, key, value)
     assert "sin rellenar" in msg
 
 
+@pytest.mark.parametrize("scheme", ["WSS", "Ws", "wss"])
+def test_scheme_no_distingue_mayusculas(tmp_path, scheme) -> None:
+    """Revisión: `scheme: "WSS"` funcionaba antes de la validación."""
+    cfg = _load_tmp(tmp_path, _with("gateway", {"scheme": scheme}))
+    assert cfg.gateway.scheme == scheme.lower()
+
+
+def test_url_con_scheme_en_mayusculas_se_acepta(tmp_path) -> None:
+    data = _with("gateway", {"url": "WSS://gw.example.org/ws"})
+    data["gateway"].pop("host")
+    assert _load_tmp(tmp_path, data).gateway.url == "WSS://gw.example.org/ws"
+
+
 @pytest.mark.parametrize("section,key,value", [
     ("menubar", "log_path", "/Users/x/YOUR_logs/stdout.log"),
     ("menubar", "config_path", "/Users/x/CHANGE_ME/config.yaml"),

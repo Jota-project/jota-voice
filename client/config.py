@@ -464,6 +464,17 @@ def _finish(problems: list[str], own: bool) -> None:
         raise ConfigError(problems)
 
 
+def _scheme(s: _Section, default: str) -> str:
+    """ws/wss sin distinguir mayúsculas (`scheme: "WSS"` funcionaba antes de
+    validar); se normaliza a minúsculas para construir la URL."""
+    raw = s.get_str("scheme", default)
+    scheme = raw.strip().lower()
+    if scheme not in ("ws", "wss"):
+        s._bad("scheme", raw, "debe ser 'ws' o 'wss'")
+        return default
+    return scheme
+
+
 def _gateway_from_dict(d: Any, problems: list[str] | None = None) -> GatewayConfig:
     problems, own = _start(problems)
     s = _Section("gateway", d, problems)
@@ -484,7 +495,7 @@ def _gateway_from_dict(d: Any, problems: list[str] | None = None) -> GatewayConf
         host=s.get_str("host", "", secret_or_endpoint=True),
         port=s.get_int("port", None, optional=True, **_PORT),
         path=s.get_str("path", ""),
-        scheme=s.get_str("scheme", default.scheme, choices=("ws", "wss")),
+        scheme=_scheme(s, default.scheme),
         connect_timeout_s=s.get_float("connect_timeout_s", default.connect_timeout_s, gt=0),
         url=s.get_str("url", None, optional=True, secret_or_endpoint=True),
         persistent_session=s.get_bool("persistent_session", default.persistent_session),
@@ -504,7 +515,7 @@ def _gateway_from_dict(d: Any, problems: list[str] | None = None) -> GatewayConf
         ),
         turn_end_grace_s=s.get_float("turn_end_grace_s", default.turn_end_grace_s, min=0),
     )
-    if cfg.url and not cfg.url.startswith(("ws://", "wss://")):
+    if cfg.url and not cfg.url.lower().startswith(("ws://", "wss://")):
         s._bad("url", cfg.url, "debe empezar por ws:// o wss://")
     if cfg.keepalive_interval_s >= GATEWAY_IDLE_TIMEOUT_S:
         log.warning(
