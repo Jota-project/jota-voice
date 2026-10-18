@@ -55,6 +55,19 @@ async def test_safe_send_cancel_con_sesion_cerrada_solo_debug(caplog) -> None:
 
 
 @pytest.mark.asyncio
+async def test_safe_send_cancel_sin_conexion_solo_debug(caplog) -> None:
+    """En modo efímero, cancelar antes de conectar (o tras desconectar) da
+    RuntimeError("GatewayClient: no conectado"): es esperable, no un WARNING."""
+    gateway = MagicMock(spec=GatewayClient)
+    gateway.is_connected = False
+    gateway.send_cancel.side_effect = RuntimeError("GatewayClient: no conectado")
+    with caplog.at_level(logging.DEBUG, logger="domain.state_machine"):
+        await state_machine._safe_send_cancel(gateway)
+    assert caplog.records
+    assert all(r.levelno == logging.DEBUG for r in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_cleanup_registra_fallo_de_disconnect_y_resetea_playback(caplog) -> None:
     gateway = MagicMock(spec=GatewayClient)
     gateway.disconnect.side_effect = OSError("disconnect falló")

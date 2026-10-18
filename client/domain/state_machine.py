@@ -184,7 +184,12 @@ async def _safe_send_cancel(gateway: GatewayClient) -> None:
     except GatewayDisconnected as exc:
         log.debug("cancel no enviado: la sesión con el gateway ya está cerrada (%s)", exc)
     except Exception as exc:
-        log.warning("cancel no enviado al gateway: %r", exc)
+        if not gateway.is_connected:
+            # Modo efímero: cancel antes de conectar o tras desconectar
+            # (RuntimeError "no conectado"). Esperable, no un fallo.
+            log.debug("cancel no enviado: sin conexión con el gateway (%r)", exc)
+        else:
+            log.warning("cancel no enviado al gateway: %r", exc)
 
 
 async def _idle(
