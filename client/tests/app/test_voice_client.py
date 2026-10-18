@@ -7,6 +7,7 @@ señal inválidos, y que el run loop Cocoa se detenga tras el cleanup asíncrono
 from __future__ import annotations
 
 import asyncio
+import os
 
 import pytest
 from unittest.mock import MagicMock, create_autospec
@@ -23,6 +24,7 @@ from config import Config, GatewayConfig
 
 from tests.fakes.cocoa import requires_cocoa
 from tests.fakes.gateway import make_ws, never
+from tests.fakes.waiting import wait_until
 
 # Los tests que invocan _run_with_cocoa_menubar hacen AppKit/Foundation
 # en runtime (signal.set_wakeup_fd + NSFileHandle watcher, fix de #20).
@@ -123,8 +125,28 @@ def test_call_soon_threadsafe_safe_sets_event_on_open_loop() -> None:
     assert stop_event.is_set()
 
 
+def _patch_gateway(monkeypatch) -> MagicMock:
+    """Sustituye GatewayClient en main(): sin esto, con persistent_session
+    (default) main() abría una conexión real a localhost."""
+    gateway = _gateway_mock()
+    monkeypatch.setattr(voice_client, "GatewayClient", lambda *a, **kw: gateway)
+    return gateway
+
+
 async def _test_audio_start_failure_is_visible_and_shuts_down_cleanly(monkeypatch) -> None:
     monkeypatch.setattr(registry, "make_audio", lambda cfg: _FailingAudioBackend())
+    gateway = _patch_gateway(monkeypatch)
+    mounted: list[str] = []
+
+    class _Display(NullDisplayBackend):
+        async def start(self) -> None:
+            mounted.append("display.start")
+
+    async def _sm(*a, **kw) -> None:
+        mounted.append("sm_run")
+
+    monkeypatch.setattr(registry, "make_display", lambda cfg, **kw: _Display())
+    monkeypatch.setattr(voice_client, "sm_run", _sm)
 
     menubar = _SpyMenubarBackend()
     cfg = _make_cfg()
@@ -134,8 +156,12 @@ async def _test_audio_start_failure_is_visible_and_shuts_down_cleanly(monkeypatc
 
     assert "error" in menubar.states
     assert menubar.status_texts, "el usuario debe ver un texto descriptivo del fallo"
-    # El pipeline no debe seguir montándose sobre un backend de audio muerto.
+    # El pipeline no debe seguir montándose sobre un backend de audio muerto
+    # (#112: antes solo se miraba commands, que se asigna al final).
     assert menubar.commands is None
+    assert mounted == [], f"se montó parte del pipeline tras el fallo de audio: {mounted}"
+    # La sesión eager no se queda abierta.
+    gateway.disconnect.assert_awaited_once_with()
 
 
 def test_audio_start_failure_is_visible_and_shuts_down_cleanly(monkeypatch) -> None:
@@ -153,6 +179,7 @@ def test_main_passes_bus_to_oww_backend(monkeypatch) -> None:
 
     monkeypatch.setattr(registry, "make_audio", lambda cfg: _FailingAudioBackend())
     monkeypatch.setattr(registry, "make_oww", _make_oww)
+    _patch_gateway(monkeypatch)
 
     asyncio.run(
         voice_client.main(_make_cfg(), _SpyMenubarBackend(), external_stop_event=asyncio.Event())
@@ -168,6 +195,7 @@ class _ExplodingMenubarBackend(_SpyMenubarBackend):
 
 async def _test_audio_start_failure_does_not_propagate_if_menubar_reporting_fails(monkeypatch) -> None:
     monkeypatch.setattr(registry, "make_audio", lambda cfg: _FailingAudioBackend())
+    _patch_gateway(monkeypatch)
 
     menubar = _ExplodingMenubarBackend()
     cfg = _make_cfg()
@@ -251,9 +279,9 @@ def test_run_with_cocoa_menubar_sets_wakeup_fd(monkeypatch) -> None:
     despierta NSApp inmediatamente. Sin esto, SIGTERM puede tardar
     hasta 1/refresh_hz en procesarse (peor caso: 1s con refresh_hz=1.0).
 
-    El unit test verifica solo el wiring (set_wakeup_fd + pipe); la
-    latencia real se mide empíricamente arrancando voice_client.py como
-    subprocess y midiendo SIGTERM → "Apagando".
+    El unit test verifica el wiring (set_wakeup_fd + pipe no bloqueante);
+    el camino completo con señales reales (pipe → NSFileHandle → apagado)
+    está en test_voice_client_cocoa_signals.py.
     """
     async def _fake_main(cfg, menubar_backend, *, external_stop_event=None):
         raise RuntimeError("fallo antes de construir nada")
@@ -264,12 +292,16 @@ def test_run_with_cocoa_menubar_sets_wakeup_fd(monkeypatch) -> None:
         lambda sig, handler: None,
     )
 
-    # Capturar set_wakeup_fd.
+    # Capturar set_wakeup_fd y el modo del fd en el momento de instalarlo
+    # (luego el test no puede mirarlo: el pipe es interno).
     wakeup_calls: list[int] = []
-    monkeypatch.setattr(
-        voice_client.signal, "set_wakeup_fd",
-        lambda fd: wakeup_calls.append(fd),
-    )
+    blocking_at_install: list[bool] = []
+
+    def _set_wakeup_fd(fd: int) -> None:
+        wakeup_calls.append(fd)
+        blocking_at_install.append(os.get_blocking(fd))
+
+    monkeypatch.setattr(voice_client.signal, "set_wakeup_fd", _set_wakeup_fd)
 
     # Stub de Foundation: NSNotificationCenter y NSFileHandle son objetos
     # PyObjC reales y no se pueden monkey-patchear en atributos individuales.
@@ -290,6 +322,9 @@ def test_run_with_cocoa_menubar_sets_wakeup_fd(monkeypatch) -> None:
         f"set_wakeup_fd debe recibir el extremo de escritura del pipe; "
         f"got {wakeup_calls[0]}"
     )
+    # 2. #112: CPython escribe en el wakeup fd desde el handler de C; si el
+    #    fd fuese bloqueante, un pipe lleno colgaría el proceso.
+    assert blocking_at_install == [False], "el wakeup fd debe ser O_NONBLOCK"
 
 
 async def _test_menubar_stops_after_async_cleanup(monkeypatch) -> None:
@@ -767,66 +802,63 @@ def test_main_shutdown_desconecta_una_vez(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_shutdown_service_puts_sentinel_in_ui_queue() -> None:
+def test_shutdown_service_puts_sentinel_in_ui_queue(monkeypatch) -> None:
     """Issue #30: invocar la callback on_shutdown_service debe depositar
-    'shutdown_service' en ui_queue (no ejecutar subprocess.run sync)."""
-    import queue as _queue
+    'shutdown_service' en ui_queue (no ejecutar subprocess.run sync).
 
-    ui_queue: _queue.Queue = _queue.Queue()
-    received: list = []
+    Antes el test replicaba la callback dentro del propio test y no tocaba
+    voice_client (#112). Ahora usa los MenubarCommands reales que main()
+    entrega al menubar y la ui_queue real que pasa a MenubarClient."""
+    got: dict = {}
 
-    # Simular lo que ocurre cuando el consumer de ui_queue recibe el sentinel:
-    # drain_task lee de la cola en un executor y registra lo que recibió.
-    def _drain_like_consumer(q: _queue.Queue) -> str:
-        try:
-            return q.get(timeout=0.5)
-        except _queue.Empty:
-            return ""
+    class _MenubarClient:
+        def __init__(self, *a, **kw) -> None:
+            pass
 
-    # Capturar lo que llega a la cola tras invocar la callback.
-    # Replicamos el patrón de voice_client.main: la callback hace
-    # ui_queue.put_nowait("shutdown_service").
-    def _fake_shutdown_service() -> None:
-        ui_queue.put_nowait("shutdown_service")
+        async def run(self, bus, ui_queue, *a, **kw) -> None:
+            got["ui_queue"] = ui_queue
+            await asyncio.Future()
 
-    _fake_shutdown_service()
+    class _IdleClient:
+        def __init__(self, *a, **kw) -> None:
+            pass
 
-    # El sentinel debe estar en la cola.
-    cmd = _drain_like_consumer(ui_queue)
-    assert cmd == "shutdown_service", (
-        f"Expected 'shutdown_service' in ui_queue, got {cmd!r}. "
-        "La callback debe delegar via ui_queue, no ejecutar subprocess.run."
-    )
+        async def run(self, *a, **kw) -> None:
+            await asyncio.Future()
+
+    menubar = _SpyMenubarBackend()
+
+    async def _sm(*a, **kw) -> None:
+        # Deja arrancar a MenubarClient antes de pulsar el botón.
+        await wait_until(lambda: "ui_queue" in got)
+        menubar.commands.on_shutdown_service()
+
+    def _no_sync_subprocess(*a, **kw):
+        raise AssertionError("on_shutdown_service no debe ejecutar subprocess.run en el hilo de UI")
+
+    monkeypatch.setattr(voice_client.subprocess, "run", _no_sync_subprocess)
+    monkeypatch.setattr(registry, "make_audio", lambda cfg: _audio_mock())
+    monkeypatch.setattr(registry, "make_oww", lambda cfg, **kw: _oww_mock(run_forever=never))
+    monkeypatch.setattr(registry, "make_display", lambda cfg, **kw: NullDisplayBackend())
+    _patch_gateway(monkeypatch)
+    monkeypatch.setattr(voice_client, "MenubarClient", _MenubarClient)
+    monkeypatch.setattr(voice_client, "DisplayClient", _IdleClient)
+    monkeypatch.setattr(voice_client, "sm_run", _sm)
+
+    asyncio.run(asyncio.wait_for(
+        voice_client.main(_make_cfg(), menubar, external_stop_event=asyncio.Event()),
+        timeout=5.0,
+    ))
+
+    assert got["ui_queue"].get_nowait() == "shutdown_service"
+    assert got["ui_queue"].empty()
 
 
-# ---------------------------------------------------------------------------
-# Issue #104: NSFileHandle observer debe loguear cuando recibe datos.
-# Como NSFileHandle es PyObjC y no se mockea fácilmente, verificamos que
-# _on_wakeup_fd_data (el callback del observer) loguea al llamar a
-# _cancel_main equivalente. El test comprueba que el logging está
-# configurado (log.info no lanza) y que el handler no raisea.
-# ---------------------------------------------------------------------------
-
-
-def test_on_wakeup_fd_data_handler_logs_and_does_not_raise(caplog) -> None:
-    """Issue #104: el handler del pipe de wakeup_fd debe loguear 'senial
-    recibida' y NO lanzar. Como NSFileHandle real necesita NSRunLoop,
-    probamos la lógica del handler con un mock que simula lo que hace
-    _on_wakeup_fd_data: leer el fd, llamar a call_soon_threadsafe.
-    """
-    import logging as _logging
-
-    # El handler de _on_wakeup_fd_data loguea ANTES de invocar
-    # call_soon_threadsafe. Verificamos que log.info no raisea.
-    with caplog.at_level(_logging.INFO, logger="voice_client"):
-        # Simulamos la línea que se añade en el fix:
-        #   log.info("voice_client: señal recibida, cancelando run loop")
-        _logging.getLogger("voice_client").info(
-            "voice_client: señal recibida, cancelando run loop"
-        )
-
-    assert "señal recibida" in caplog.text
-    assert "cancelando run loop" in caplog.text
+# Issue #104 (el observer de NSFileHandle loguea "señal recibida"): el test
+# que había aquí escribía él mismo esa línea en el log y comprobaba que
+# estaba (#112: nunca tocaba voice_client). La comprobación vive ahora en
+# test_voice_client_cocoa_signals.py, contra el handler real y con una
+# señal real.
 
 
 # ---------------------------------------------------------------------------

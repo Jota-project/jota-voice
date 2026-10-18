@@ -28,8 +28,9 @@ CLIENT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 TIMEOUT_S = 20.0
 
 _SCRIPT = """
-import asyncio, sys, time
+import asyncio, logging, sys, time
 sys.path.insert(0, {client!r})
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 from PyObjCTools import AppHelper
 from app import voice_client
 from config import Config, GatewayConfig, MenubarConfig
@@ -111,6 +112,9 @@ def test_signal_triggers_orderly_shutdown_and_run_loop_returns(sig):
     assert code == 0, f"exit {code} (¿muerto por la señal?)\nstdout={out}\nstderr={err}"
     assert "ORDERLY_SHUTDOWN" in out, out + err
     assert "RUNLOOP_RETURNED" in out, out + err
+    # #104: el observer de NSFileHandle es el único handler activo en modo
+    # Cocoa; su log es la única pista si el proceso se cuelga tras la señal.
+    assert "señal recibida, cancelando run loop" in err, err
 
 
 def test_menubar_stops_even_if_cleanup_raises_before_stop():
