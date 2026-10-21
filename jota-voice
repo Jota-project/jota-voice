@@ -299,6 +299,12 @@ cmd_update() {
         source install/07-boot.sh
     '"
 
+    # 06-configs reescribe ~/supervisord.conf, pero supervisord no relee su
+    # configuración con stop/start: sin reread+update los cambios de
+    # [program:*] (p.ej. OWW pasando a 127.0.0.1) no se aplicaban nunca.
+    _info "[$DEVICE_NAME] Recargando la configuración de supervisord..."
+    _ssh "supervisorctl -c ~/supervisord.conf reread && supervisorctl -c ~/supervisord.conf update"
+
     # Reiniciar servicios SECUENCIALMENTE para evitar races con PID files
     # (pulseaudio deja daemon running si arrancas dos a la vez).
     _info "[$DEVICE_NAME] Reiniciando servicios (secuencial)..."
