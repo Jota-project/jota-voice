@@ -136,7 +136,7 @@ def test_menubar_refresh_clamped_high():
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/alfonsogarre/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/test_config.py -v`
+Run: `cd /Users/usuario/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/test_config.py -v`
 Expected: `ImportError` for `MenubarConfig` (or 5 collection errors).
 
 - [ ] **Step 3: Add `MenubarConfig` dataclass**
@@ -194,13 +194,13 @@ and pass `menubar=_menubar_from_dict(menubar_section)` instead.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd /Users/alfonsogarre/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/test_config.py -v`
+Run: `cd /Users/usuario/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/test_config.py -v`
 Expected: all 4 new tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/alfonsogarre/Workspace/jota-voice
+cd /Users/usuario/Workspace/jota-voice
 git add client/config.py client/tests/test_config.py
 git commit -m "feat(config): añadir MenubarConfig con env override JOTA_DISABLE_MENUBAR
 
@@ -232,13 +232,13 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 2: Verify packages import**
 
-Run: `cd /Users/alfonsogarre/Workspace/jota-voice/client && PYTHONPATH=. python -c "import ui; import tests.ui"`
+Run: `cd /Users/usuario/Workspace/jota-voice/client && PYTHONPATH=. python -c "import ui; import tests.ui"`
 Expected: no error.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/alfonsogarre/Workspace/jota-voice
+cd /Users/usuario/Workspace/jota-voice
 git add client/ui/__init__.py client/tests/ui/__init__.py
 git commit -m "chore(ui): crear paquetes vacíos client/ui y client/tests/ui
 
@@ -355,7 +355,7 @@ def test_protocol_is_runtime_checkable():
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/alfonsogarre/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/ui/test_menubar_base.py -v`
+Run: `cd /Users/usuario/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/ui/test_menubar_base.py -v`
 Expected: collection error, `ModuleNotFoundError: No module named 'ui.menubar_base'`.
 
 - [ ] **Step 3: Implement `menubar_base.py`**
@@ -432,13 +432,13 @@ class _SharedState:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd /Users/alfonsogarre/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/ui/test_menubar_base.py -v`
+Run: `cd /Users/usuario/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/ui/test_menubar_base.py -v`
 Expected: all 6 tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/alfonsogarre/Workspace/jota-voice
+cd /Users/usuario/Workspace/jota-voice
 git add client/ui/menubar_base.py client/tests/ui/test_menubar_base.py
 git commit -m "feat(ui): Protocol MenubarBackend + _SharedState thread-safe
 
@@ -497,7 +497,7 @@ def test_null_methods_return_none(caplog):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/alfonsogarre/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/ui/test_menubar_null.py -v`
+Run: `cd /Users/usuario/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/ui/test_menubar_null.py -v`
 Expected: `ModuleNotFoundError: No module named 'ui.menubar_null'`.
 
 - [ ] **Step 3: Implement `menubar_null.py`**
@@ -535,13 +535,13 @@ class NullMenubarBackend:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd /Users/alfonsogarre/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/ui/test_menubar_null.py -v`
+Run: `cd /Users/usuario/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/ui/test_menubar_null.py -v`
 Expected: 2 tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/alfonsogarre/Workspace/jota-voice
+cd /Users/usuario/Workspace/jota-voice
 git add client/ui/menubar_null.py client/tests/ui/test_menubar_null.py
 git commit -m "feat(ui): NullMenubarBackend no-op
 
@@ -702,7 +702,7 @@ def test_run_returns_on_bus_close():
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/alfonsogarre/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/ui/test_menubar_client.py -v`
+Run: `cd /Users/usuario/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/ui/test_menubar_client.py -v`
 Expected: `ModuleNotFoundError: No module named 'ui.menubar_client'`.
 
 - [ ] **Step 3: Implement `menubar_client.py`**
@@ -795,13 +795,13 @@ class MenubarClient:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd /Users/alfonsogarre/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/ui/test_menubar_client.py -v`
+Run: `cd /Users/usuario/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/ui/test_menubar_client.py -v`
 Expected: all 4 tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/alfonsogarre/Workspace/jota-voice
+cd /Users/usuario/Workspace/jota-voice
 git add client/ui/menubar_client.py client/tests/ui/test_menubar_client.py
 git commit -m "feat(ui): MenubarClient suscribe al bus y drena cola UI
 
@@ -892,7 +892,7 @@ def test_make_menubar_darwin_with_pyobjc_returns_cocoa(monkeypatch: pytest.Monke
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/alfonsogarre/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/backends/test_registry.py -v`
+Run: `cd /Users/usuario/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/backends/test_registry.py -v`
 Expected: collection error / `AttributeError: module 'backends.registry' has no attribute 'make_menubar'`.
 
 - [ ] **Step 3: Add `make_menubar` to `registry.py`**
@@ -929,13 +929,13 @@ import logging
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd /Users/alfonsogarre/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/backends/test_registry.py -v`
+Run: `cd /Users/usuario/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/backends/test_registry.py -v`
 Expected: all existing tests still pass + 4 new tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/alfonsogarre/Workspace/jota-voice
+cd /Users/usuario/Workspace/jota-voice
 git add client/backends/registry.py client/tests/backends/test_registry.py
 git commit -m "feat(registry): make_menubar factory
 
@@ -1031,7 +1031,7 @@ def test_set_commands_does_not_raise(backend):
 
 - [ ] **Step 2: Run tests to verify they fail (or skip on non-darwin)**
 
-Run: `cd /Users/alfonsogarre/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/ui/test_menubar_cocoa.py -v`
+Run: `cd /Users/usuario/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/ui/test_menubar_cocoa.py -v`
 Expected: skip on non-darwin, otherwise `ModuleNotFoundError: No module named 'ui.menubar_cocoa'`.
 
 - [ ] **Step 3: Implement `menubar_cocoa.py`**
@@ -1298,13 +1298,13 @@ class CocoaMenubarBackend:
 
 - [ ] **Step 4: Run tests to verify they pass (or skip on non-darwin)**
 
-Run: `cd /Users/alfonsogarre/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/ui/test_menubar_cocoa.py -v`
+Run: `cd /Users/usuario/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests/ui/test_menubar_cocoa.py -v`
 Expected: skipped on Linux; on macOS with pyobjc, all 4 pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/alfonsogarre/Workspace/jota-voice
+cd /Users/usuario/Workspace/jota-voice
 git add client/ui/menubar_cocoa.py client/tests/ui/test_menubar_cocoa.py
 git commit -m "feat(ui): CocoaMenubarBackend con NSStatusItem + NSMenu + SF Symbols
 
@@ -1380,7 +1380,7 @@ Expected: ends with `_ok "Dependencias Python instaladas"`. No errors. Re-run pr
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/alfonsogarre/Workspace/jota-voice
+cd /Users/usuario/Workspace/jota-voice
 git add client/requirements.txt requirements-macos.txt install/macos/03-venv.sh
 git commit -m "chore(deps): crear client/requirements.txt + requirements-macos.txt
 
@@ -1558,18 +1558,18 @@ d) In the `finally` block, add menubar cleanup BEFORE the existing teardown:
 
 - [ ] **Step 2: Verify imports compile**
 
-Run: `cd /Users/alfonsogarre/Workspace/jota-voice/client && PYTHONPATH=. python -c "from app.voice_client import main; print('OK')"`
+Run: `cd /Users/usuario/Workspace/jota-voice/client && PYTHONPATH=. python -c "from app.voice_client import main; print('OK')"`
 Expected: prints `OK`. (If pyobjc is missing on Mac, the `make_menubar` call returns `NullMenubarBackend`, which has no `start`/`stop`, so this still passes.)
 
 - [ ] **Step 3: Run the full test suite**
 
-Run: `cd /Users/alfonsogarre/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests -v`
+Run: `cd /Users/usuario/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests -v`
 Expected: all existing tests + all new tests pass. No regressions.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/alfonsogarre/Workspace/jota-voice
+cd /Users/usuario/Workspace/jota-voice
 git add client/app/voice_client.py
 git commit -m "feat(app): wire menubar UI y OWW pausable en voice_client
 
@@ -1634,16 +1634,16 @@ Para desactivar el UI sin desinstalar pyobjc: `export JOTA_DISABLE_MENUBAR=1` an
 
 - [ ] **Step 3: Verify YAML and Markdown parse**
 
-Run: `cd /Users/alfonsogarre/Workspace/jota-voice && python -c "import yaml; yaml.safe_load(open('config.example.yaml')); print('YAML OK')"`
+Run: `cd /Users/usuario/Workspace/jota-voice && python -c "import yaml; yaml.safe_load(open('config.example.yaml')); print('YAML OK')"`
 Expected: `YAML OK`.
 
-Run: `cd /Users/alfonsogarre/Workspace/jota-voice && python -c "import re; re.search(r'^### Barra de menú nativa$', open('README.md').read(), re.M); print('README OK')"`
+Run: `cd /Users/usuario/Workspace/jota-voice && python -c "import re; re.search(r'^### Barra de menú nativa$', open('README.md').read(), re.M); print('README OK')"`
 Expected: `README OK`.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/alfonsogarre/Workspace/jota-voice
+cd /Users/usuario/Workspace/jota-voice
 git add config.example.yaml README.md
 git commit -m "docs: documentar sección menubar en YAML ejemplo y README
 
@@ -1658,22 +1658,22 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 1: Full test suite passes**
 
-Run: `cd /Users/alfonsogarre/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests -v`
+Run: `cd /Users/usuario/Workspace/jota-voice/client && PYTHONPATH=. pytest ../client/tests -v`
 Expected: all tests pass. Cocoa tests skip on non-darwin.
 
 - [ ] **Step 2: Smoke test still passes**
 
-Run: `cd /Users/alfonsogarre/Workspace/jota-voice && bash install/shared/99-smoke-test.sh`
+Run: `cd /Users/usuario/Workspace/jota-voice && bash install/shared/99-smoke-test.sh`
 Expected: smoke test exits 0.
 
 - [ ] **Step 3: Voice client imports without errors on the current platform**
 
-Run: `cd /Users/alfonsogarre/Workspace/jota-voice/client && PYTHONPATH=. python -c "from app.voice_client import main; print('imports OK')"`
+Run: `cd /Users/usuario/Workspace/jota-voice/client && PYTHONPATH=. python -c "from app.voice_client import main; print('imports OK')"`
 Expected: `imports OK`.
 
 - [ ] **Step 4: Verify no new top-level dependency on non-macOS**
 
-Run: `cd /Users/alfonsogarre/Workspace/jota-voice && grep -rn "pyobjc" client/ --include='*.py' --include='*.txt' --include='*.toml' | grep -v 'menubar_cocoa\\|requirements-macos\\|test_menubar_cocoa'`
+Run: `cd /Users/usuario/Workspace/jota-voice && grep -rn "pyobjc" client/ --include='*.py' --include='*.txt' --include='*.toml' | grep -v 'menubar_cocoa\\|requirements-macos\\|test_menubar_cocoa'`
 Expected: no output (pyobjc is only referenced in `menubar_cocoa.py`, `test_menubar_cocoa.py`, and `requirements-macos.txt`, which is the macOS-only file).
 
 - [ ] **Step 5: Manual smoke checklist (Mac only — out of agent scope; mark as user action)**
@@ -1693,7 +1693,7 @@ Verify on a Mac:
 - [ ] **Step 6: Final commit if any doc fixups were needed**
 
 ```bash
-cd /Users/alfonsogarre/Workspace/jota-voice
+cd /Users/usuario/Workspace/jota-voice
 git status
 # If clean, no commit. If not, commit fixups:
 # git add -A && git commit -m "chore: smoke-test fixups"

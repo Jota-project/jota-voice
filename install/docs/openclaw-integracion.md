@@ -41,7 +41,7 @@ No requiere ninguna configuración manual.
 
 ## Acceso desde la LAN
 
-nginx expone OpenClaw en `http://green-house/api/openclaw/` (HTTP, sin SSL).  
+nginx expone OpenClaw en `http://mi-servidor/api/openclaw/` (HTTP, sin SSL).  
 Esto es suficiente para scripts internos, herramientas de la LAN y futuros clientes.
 
 ---
@@ -54,8 +54,8 @@ OpenClaw no lo expone nativamente. Solución: **`jota-gateway` (puerto 8004) act
 ### Arquitectura del bridge
 
 ```
-HA (worker-01)
-  POST http://green-house/api/gateway/v1/chat/completions
+HA (mi-asistente)
+  POST http://mi-servidor/api/gateway/v1/chat/completions
        ▼
 jota-gateway :8004
   recibe JSON OpenAI-compatible
@@ -115,7 +115,7 @@ HA puede añadir `[voice]` al principio del texto transcrito antes de enviarlo a
 ### Skill de control HA
 
 OpenClaw puede llamar a la REST API de HA directamente con un skill que incluya:
-- URL de HA: `http://worker-01.local:8123`
+- URL de HA: `http://mi-asistente.local:8123`
 - Long-lived access token (generado en HA → Perfil → Tokens)
 - Tool calls a `/api/services/light/turn_on`, `/api/states`, etc.
 
@@ -127,7 +127,7 @@ Una vez el bridge esté activo, en HA:
 
 1. **Settings → Devices & Services → Add Integration → "OpenAI Conversation"**
 2. API Key: el token de OpenClaw (o un dummy si el bridge no lo requiere)
-3. Base URL: `http://green-house/api/gateway/v1`
+3. Base URL: `http://mi-servidor/api/gateway/v1`
 4. Model: el que devuelva `/v1/models` del bridge
 
 Luego en **Settings → Voice Assistants → Add Assistant**:

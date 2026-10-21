@@ -1,4 +1,4 @@
-# nginx — Proxy inverso en green-house
+# nginx — Proxy inverso en mi-servidor
 
 ## Estructura de ficheros
 
@@ -6,7 +6,7 @@
 /etc/nginx/
 ├── nginx.conf                    # config principal (no tocar)
 ├── certs/
-│   ├── server.crt                # cert mkcert (SANs: green-house.local, localhost, <IP_SERVIDOR>)
+│   ├── server.crt                # cert mkcert (SANs: mi-servidor.local, localhost, <IP_SERVIDOR>)
 │   └── server.key
 ├── includes/
 │   └── api-locations.conf        # ← rutas compartidas entre HTTP y HTTPS
@@ -67,16 +67,16 @@ OpenClaw tiene `proxy_read_timeout 3600s` por sesiones largas de agente.
 ## Certificado SSL
 
 Generado con `mkcert` (desarrollo). No es de confianza pública.  
-SANs actuales: `green-house.local`, `greenhouse.local`, `localhost`, `<IP_SERVIDOR>`
+SANs actuales: `mi-servidor.local`, `mi-servidor.local`, `localhost`, `<IP_SERVIDOR>`
 
 **Nota:** la IP dinámica actual es `<IP_SERVIDOR>` — el cert tiene `.105` (IP anterior).  
-Para HTTPS desde la LAN se recomienda usar `green-house.local` (está en los SANs) o regenerar el cert añadiendo la IP actual.
+Para HTTPS desde la LAN se recomienda usar `mi-servidor.local` (está en los SANs) o regenerar el cert añadiendo la IP actual.
 
 Para regenerar:
 ```bash
 mkcert -cert-file /etc/nginx/certs/server.crt \
        -key-file  /etc/nginx/certs/server.key \
-       green-house.local greenhouse.local localhost \
+       mi-servidor.local mi-servidor.local localhost \
        <IP_SERVIDOR> 127.0.0.1
 sudo systemctl reload nginx
 ```
@@ -104,5 +104,5 @@ sudo journalctl -u nginx -f
 
 ## IP dinámica
 
-Green-house tiene IP DHCP en `192.168.1.x`. El DNS local resuelve `green-house` automáticamente.  
+Mi-servidor tiene IP DHCP en `192.168.1.x`. El DNS local resuelve `mi-servidor` automáticamente.  
 **Recomendación:** fijar reserva DHCP en el router para la MAC de `eno2` y así evitar que cambie entre reinicios.

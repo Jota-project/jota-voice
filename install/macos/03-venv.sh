@@ -3,13 +3,25 @@
 set -e
 . "$(dirname "$0")/00-lib.sh"
 
-_info "Creando venv en $VENV_DIR…"
+# Intérprete explícito (python@3.12 de Homebrew), no el python3 del PATH
+# (issue #45). El cliente exige >= 3.11.
+PY="$(jota_find_python)" || exit 1
+_info "Python: $PY ($(jota_python_version "$PY"))"
+
+# Un venv previo creado con un Python < 3.11 (p.ej. el python3 de Xcode)
+# no sirve: se recrea. Es regenerable, no guarda datos del usuario.
+if [ -d "$VENV_DIR" ] && ! jota_python_ok "$VENV_DIR/bin/python"; then
+    _warn "venv $VENV_DIR con Python $(jota_python_version "$VENV_DIR/bin/python" || echo '?') (< 3.11 o roto): se recrea"
+    rm -rf "$VENV_DIR"
+fi
+
+_info "Creando venv en ${VENV_DIR}…"
 mkdir -p "$(dirname "$VENV_DIR")"
 if [ ! -d "$VENV_DIR" ]; then
-    python3 -m venv "$VENV_DIR"
+    "$PY" -m venv "$VENV_DIR"
     _ok "venv creado"
 else
-    _ok "venv ya existe"
+    _ok "venv ya existe ($(jota_python_version "$VENV_DIR/bin/python"))"
 fi
 
 _info "Actualizando pip e instalando requirements…"

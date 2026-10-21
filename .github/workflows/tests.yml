@@ -39,3 +39,21 @@ jobs:
         working-directory: client
         # timeout global y asyncio_mode en client/pytest.ini
         run: python -m pytest -q
+
+  shell:
+    # Tests de los scripts de instalación (install/shared/tests/). Corren con
+    # el /bin/sh del runner; ubuntu da dash, el sh más estricto de los que
+    # ejecutan estos scripts (Termux también usa dash).
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tests de shell
+        run: |
+          rc=0
+          for t in install/shared/tests/test_*.sh; do
+            echo "::group::$t"
+            sh "$t" || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc

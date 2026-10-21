@@ -40,7 +40,7 @@ if [ "$CMD" = "uninstall" ]; then
     PLIST="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
 
     if launchctl print "gui/${USER_UID}/${PLIST_LABEL}" >/dev/null 2>&1; then
-        _info "Parando servicio $PLIST_LABEL…"
+        _info "Parando servicio ${PLIST_LABEL}…"
         launchctl bootout "gui/${USER_UID}/${PLIST_LABEL}" 2>/dev/null || true
         _ok "Servicio parado"
     else
@@ -62,10 +62,13 @@ if [ "$CMD" = "uninstall" ]; then
 fi
 
 # ------------------------------------------------------------------- install
-_info "Asegurando venv en $OWW_VENV_DIR…"
+# Mismo intérprete explícito que el venv del cliente (issue #45): el pin de
+# wyoming-openwakeword/ai-edge-litert es frágil ante cambios de versión.
+PY="$(jota_find_python)" || exit 1
+_info "Asegurando venv en $OWW_VENV_DIR (Python $(jota_python_version "$PY"))…"
 mkdir -p "$(dirname "$OWW_VENV_DIR")"
 if [ ! -d "$OWW_VENV_DIR" ]; then
-    python3 -m venv "$OWW_VENV_DIR"
+    "$PY" -m venv "$OWW_VENV_DIR"
     _ok "venv creado"
 else
     _ok "venv ya existe"
@@ -113,12 +116,11 @@ PLIST_TEMPLATE="$REPO_DIR/install/macos/launchagent/com.jota-voice.wyoming-oww.p
 mkdir -p "$PLIST_DIR" "$LOG_DIR"
 
 _info "Generando LaunchAgent…"
-sed \
-    -e "s|__VENV_DIR__|$OWW_VENV_DIR|g" \
-    -e "s|__DATA_DIR__|$OWW_DATA_DIR|g" \
-    -e "s|__THRESHOLD__|${OWW_THRESHOLD}|g" \
-    -e "s|__HOME__|$HOME|g" \
-    "$PLIST_TEMPLATE" > "$PLIST"
+# Rutas escapadas para XML y sed (launchd-plist.sh, issue #46).
+. "$(dirname "$0")/launchd-plist.sh"
+jota_oww_plist "$PLIST_TEMPLATE" "$OWW_VENV_DIR" "$OWW_DATA_DIR" "$OWW_THRESHOLD" "$HOME" > "$PLIST.tmp" \
+    || { rm -f "$PLIST.tmp"; exit 1; }
+mv -f "$PLIST.tmp" "$PLIST"
 chmod 644 "$PLIST"
 _ok "plist generado: $PLIST"
 
@@ -130,15 +132,18 @@ launchctl bootout "gui/${USER_UID}/com.jota-voice.wyoming-oww" 2>/dev/null || tr
 # servicio anterior. Un bootstrap inmediato puede fallar con
 # "Input/output error" (reproducido en la práctica); un reintento tras
 # una breve espera lo resuelve sin intervención manual.
-if ! launchctl bootstrap "gui/${USER_UID}" "$PLIST" 2>/tmp/oww-bootstrap-err; then
+# Temporal propio (mktemp, issue #52) en vez de un nombre fijo en /tmp:
+# sin carreras entre instalaciones paralelas ni ataques de symlink.
+BOOTSTRAP_ERR="$(mktemp "${TMPDIR:-/tmp}/oww-bootstrap-err.XXXXXX")"
+trap 'rm -f "$BOOTSTRAP_ERR"' EXIT
+if ! launchctl bootstrap "gui/${USER_UID}" "$PLIST" 2>"$BOOTSTRAP_ERR"; then
     _info "bootstrap falló en el primer intento (posible race con bootout), reintentando…"
     sleep 2
     if ! launchctl bootstrap "gui/${USER_UID}" "$PLIST"; then
-        _err "launchctl bootstrap falló dos veces. Detalle: $(cat /tmp/oww-bootstrap-err 2>/dev/null)"
+        _err "launchctl bootstrap falló dos veces. Detalle: $(cat "$BOOTSTRAP_ERR" 2>/dev/null)"
         exit 1
     fi
 fi
-rm -f /tmp/oww-bootstrap-err
 launchctl enable "gui/${USER_UID}/com.jota-voice.wyoming-oww"
 launchctl kickstart -k "gui/${USER_UID}/com.jota-voice.wyoming-oww"
 _ok "Servicio com.jota-voice.wyoming-oww arrancado"
@@ -146,9 +151,10 @@ _info "Logs: tail -f $LOG_DIR/com.jota-voice.wyoming-oww.log"
 
 # ------------------------------------------------- esperar a que el puerto
 _info "Esperando a que el puerto ${PORT} responda…"
-deadline=$((SECONDS + 30))
+tries=0
 until bash -c "exec 3<>/dev/tcp/127.0.0.1/${PORT} && exec 3>&-" 2>/dev/null; do
-    if [ $SECONDS -ge $deadline ]; then
+    tries=$((tries + 1))
+    if [ "$tries" -ge 30 ]; then
         _err "Timeout esperando puerto ${PORT}. Comprueba: tail -50 $LOG_DIR/com.jota-voice.wyoming-oww.log"
         exit 1
     fi

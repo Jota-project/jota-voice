@@ -3,7 +3,8 @@ set -e
 source "$REPO_DIR"/lib/output.sh
 
 DISPLAY_DIR="$HOME/jota-display"
-DISPLAY_REPO="https://github.com/SitoSt/jota-display.git"
+# Sobrescribible para forks o mirrors (issue #101).
+DISPLAY_REPO="${JOTA_DISPLAY_REPO:-https://github.com/SitoSt/jota-display.git}"
 
 _check() {
     [ -d "$DISPLAY_DIR/.git" ] && [ -f "$DISPLAY_DIR/server/server.py" ]

@@ -17,11 +17,31 @@ _list_device_files() {
     find "$DEVICES_DIR" -maxdepth 1 -name "*.env" -not -name "example.env" 2>/dev/null | sort
 }
 
+# _shq VALOR — VALOR entre comillas simples, apto para un .env que luego se
+# carga con `.`: dentro de comillas dobles un "$", "`" o '"' en la contraseña
+# rompía el fichero o ejecutaba código al cargarlo.
+_shq() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# Nombre de dispositivo seguro para rutas (devices/<nombre>.env): issue #55.
+_valid_device_name() {
+    case "$1" in
+        ""|-*|*[!A-Za-z0-9_-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 64 ]
+}
+
 _load_device() {
     local name="$1"
+    _valid_device_name "$name" || { _err "Nombre de dispositivo inválido: '$name' (solo letras, dígitos, _ y -)"; exit 1; }
     local file="$DEVICES_DIR/${name}.env"
     [ -f "$file" ] || { _err "Dispositivo '$name' no encontrado en $DEVICES_DIR/"; exit 1; }
-    set -a; . "$file"; set +a
+    chmod 600 "$file" 2>/dev/null || true   # credenciales: issue #56
+    set -a
+    # shellcheck source=devices/example.env
+    . "$file"
+    set +a
 }
 
 _auto_device() {
@@ -32,22 +52,40 @@ _auto_device() {
     count=$(echo "$files" | grep -c "^" || true)
     [ "$count" -gt 1 ] && { _err "Hay $count dispositivos — especifica el nombre: jota-voice <device> $*"; exit 1; }
     # Un solo dispositivo → cargarlo
-    set -a; . "$files"; set +a
+    set -a
+    # shellcheck source=devices/example.env
+    . "$files"
+    set +a
 }
 
 # ── Helpers SSH ───────────────────────────────────────────────────────────────
 
+# Autenticación (issue #56): con PHONE_PASS vacío se usa la clave SSH
+# (recomendado); con contraseña, sshpass -e la lee de $SSHPASS en vez de
+# -p, que la dejaba visible en `ps`.
 _check_sshpass() {
-    command -v sshpass >/dev/null 2>&1 || { _err "sshpass no está instalado. Instalar con: brew install hudochenkov/sshpass/sshpass"; exit 1; }
+    if [ -n "${PHONE_PASS:-}" ]; then
+        command -v sshpass >/dev/null 2>&1 || { _err "PHONE_PASS definido pero sshpass no está instalado (brew install hudochenkov/sshpass/sshpass). Mejor: clave SSH y PHONE_PASS vacío."; exit 1; }
+        export SSHPASS="$PHONE_PASS"
+    else
+        unset SSHPASS   # --all: no heredar la contraseña del dispositivo anterior
+    fi
 }
 
+_sshpass() {
+    if [ -n "${SSHPASS:-}" ]; then sshpass -e "$@"; else "$@"; fi
+}
+
+# StrictHostKeyChecking=accept-new: guarda la clave del teléfono la primera
+# vez y rechaza la conexión si después cambia (con "no" se aceptaba
+# cualquier clave, también la de un equipo que suplantara al teléfono).
 _ssh() {
-    sshpass -p "$PHONE_PASS" ssh -o StrictHostKeyChecking=no -p "$PHONE_PORT" "$PHONE_USER@$PHONE_HOST" "$@"
+    _sshpass ssh -o StrictHostKeyChecking=accept-new -p "$PHONE_PORT" "$PHONE_USER@$PHONE_HOST" "$@"
 }
 
 _rsync() {
-    sshpass -p "$PHONE_PASS" rsync -av \
-        -e "ssh -o StrictHostKeyChecking=no -p $PHONE_PORT" \
+    _sshpass rsync -av \
+        -e "ssh -o StrictHostKeyChecking=accept-new -p $PHONE_PORT" \
         --exclude='.git' --exclude='.venv' --exclude='__pycache__' \
         --exclude='.claude' --exclude='.agents' \
         --exclude='devices/' --exclude='scripts/' \
@@ -75,7 +113,7 @@ cmd_devices() {
         local name
         name=$(basename "$f" .env)
         local host
-        host=$(grep "PHONE_HOST" "$f" | cut -d= -f2 | tr -d '"')
+        host=$(grep "PHONE_HOST" "$f" | cut -d= -f2 | tr -d "\"'")
         printf "  %-15s %s\n" "$name" "$host"
     done
 }
@@ -116,7 +154,7 @@ cmd_init() {
             if [ -n "$_ip" ] && [ -n "$_name" ]; then
                 # Añadir al config.yaml
                 sed -i '' "/^hosts:/a\\  - ip: \"$_ip\"\\n    name: \"$_name\"" "$REPO_DIR/config.yaml" 2>/dev/null || \
-                echo "  - ip: \"$_ip\"\n    name: \"$_name\"" >> "$REPO_DIR/config.yaml"
+                printf '  - ip: "%s"\n    name: "%s"\n' "$_ip" "$_name" >> "$REPO_DIR/config.yaml"
                 _ok "$_name -> $_ip"
             fi
         }
@@ -143,6 +181,7 @@ cmd_init() {
     printf "  Nombre del dispositivo (ej: salon, cocina): "
     read -r DEVICE_NAME
     [ -z "$DEVICE_NAME" ] && { _err "Nombre no puede estar vacío"; exit 1; }
+    _valid_device_name "$DEVICE_NAME" || { _err "Nombre inválido: solo letras, dígitos, _ y - (máx. 64)"; exit 1; }
 
     local device_file="$DEVICES_DIR/${DEVICE_NAME}.env"
     if [ -f "$device_file" ]; then
@@ -153,17 +192,28 @@ cmd_init() {
         printf "  Puerto SSH [8022]: "
         read -r PHONE_PORT
         PHONE_PORT="${PHONE_PORT:-8022}"
-        printf "  Contraseña SSH: "
+        # Usuario de Termux en el teléfono (`whoami` allí, p.ej. u0_a123):
+        # deploy.sh y _ssh lo necesitan.
+        printf "  Usuario SSH de Termux (whoami en el teléfono): "
+        read -r PHONE_USER
+        while [ -z "$PHONE_USER" ]; do
+            printf "  El usuario no puede estar vacío: "
+            read -r PHONE_USER || { _err "Entrada cerrada"; exit 1; }
+        done
+        printf "  Contraseña SSH (vacío = usar clave SSH, recomendado): "
         read -rs PHONE_PASS
         echo ""
 
-        cat > "$device_file" << EOF
-DEVICE_NAME="${DEVICE_NAME}"
-PHONE_HOST="${PHONE_HOST}"
-PHONE_PORT="${PHONE_PORT}"
-PHONE_PASS="${PHONE_PASS}"
-PHONE_DIR="/data/data/com.termux/files/home/jota-voice"
-EOF
+        # Creado ya con 600: lleva credenciales (issue #56).
+        ( umask 077; : > "$device_file" )
+        {
+            printf 'DEVICE_NAME=%s\n' "$(_shq "$DEVICE_NAME")"
+            printf 'PHONE_HOST=%s\n' "$(_shq "$PHONE_HOST")"
+            printf 'PHONE_PORT=%s\n' "$(_shq "$PHONE_PORT")"
+            printf 'PHONE_USER=%s\n' "$(_shq "$PHONE_USER")"
+            printf 'PHONE_PASS=%s\n' "$(_shq "$PHONE_PASS")"
+            printf 'PHONE_DIR=%s\n' "'/data/data/com.termux/files/home/jota-voice'"
+        } > "$device_file"
         _ok "Creado $device_file"
     fi
 
@@ -171,6 +221,7 @@ EOF
     echo ""
     _info "Verificando conexión SSH..."
     _load_device "$DEVICE_NAME"
+    _check_sshpass
     if _ssh "echo 'SSH OK'" 2>/dev/null; then
         _ok "SSH conecta correctamente"
     else
@@ -206,6 +257,8 @@ cmd_logs() {
     _check_sshpass
     local svc="${1:-jota-voice}"
     local logfile
+    # La "~" se expande en el teléfono (va dentro del comando remoto de _ssh).
+    # shellcheck disable=SC2088
     case "$svc" in
         jota-voice)   logfile="~/jota-voice.log" ;;
         oww)          logfile="~/oww.log" ;;
@@ -230,7 +283,7 @@ cmd_update() {
 
     _info "[$DEVICE_NAME] Sincronizando código..."
     _ssh "mkdir -p $PHONE_DIR"
-    _rsync "$REPO_DIR/" "$PHONE_HOST:$PHONE_DIR/"
+    _rsync "$REPO_DIR/" "$PHONE_USER@$PHONE_HOST:$PHONE_DIR/"
 
     # rsync -a debería preservar permisos, pero en la práctica entre Mac y
     # Termux (Android) los pierde. Aplicamos chmod explícito post-sync a
@@ -252,6 +305,12 @@ cmd_update() {
         source install/06-configs.sh
         source install/07-boot.sh
     '"
+
+    # 06-configs reescribe ~/supervisord.conf, pero supervisord no relee su
+    # configuración con stop/start: sin reread+update los cambios de
+    # [program:*] (p.ej. OWW pasando a 127.0.0.1) no se aplicaban nunca.
+    _info "[$DEVICE_NAME] Recargando la configuración de supervisord..."
+    _ssh "supervisorctl -c ~/supervisord.conf reread && supervisorctl -c ~/supervisord.conf update"
 
     # Reiniciar servicios SECUENCIALMENTE para evitar races con PID files
     # (pulseaudio deja daemon running si arrancas dos a la vez).
@@ -289,7 +348,14 @@ run_all() {
     [ -z "$files" ] && { _err "No hay dispositivos configurados"; exit 1; }
     local exit_code=0
     for f in $files; do
-        set -a; . "$f"; set +a
+        # Cada .env parte de cero: si uno no define PHONE_PASS o PHONE_USER,
+        # no debe heredar los del dispositivo anterior.
+        unset DEVICE_NAME PHONE_HOST PHONE_PORT PHONE_USER PHONE_PASS PHONE_DIR SSHPASS
+        chmod 600 "$f" 2>/dev/null || true   # credenciales: issue #56
+        set -a
+        # shellcheck source=devices/example.env
+        . "$f"
+        set +a
         printf "\n${YELLOW}[%s]${NC}\n" "$DEVICE_NAME"
         case "$subcmd" in
             status)  cmd_status  ;;
@@ -336,7 +402,7 @@ case "$1" in
     --all)
         shift
         [ $# -eq 0 ] && { _err "--all requiere un comando (ej: --all status)"; exit 1; }
-        run_all "$@"; exit $?
+        run_all "$@"
         ;;
     -h|--help|help) usage; exit 0 ;;
 esac

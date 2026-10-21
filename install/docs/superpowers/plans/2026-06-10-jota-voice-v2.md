@@ -2,7 +2,7 @@
 
 **Fecha:** 2026-06-10
 **Estado:** aprobado
-**Autor:** Alfonso Garre + Claude
+**Autor:** Sito + Claude
 
 ---
 
@@ -245,4 +245,4 @@ F5 y F6 son paralelizables entre sí (ambos dependen solo de F1).
 - `install.sh`, `deploy.sh`, `boot/start.sh` — funcionan
 - `config.yaml` en el teléfono — sin cambios
 - Protocolo OWW, protocolo gateway — sin cambios
-- Infraestructura (green-house, worker-01) — sin cambios
+- Infraestructura (mi-servidor, mi-asistente) — sin cambios

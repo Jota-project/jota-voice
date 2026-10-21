@@ -65,15 +65,15 @@ Generate: `openclaw doctor --generate-gateway-token`
 
 ---
 
-## This Deployment: green-house
+## This Deployment: mi-servidor
 
-See `references/green-house.md` for full deployment details.
+See `references/deployment.md` for full deployment details.
 
 Key facts:
 - Server: `mi-servidor` (<IP_SERVIDOR> dynamic, local DNS resolves `mi-servidor`)
 - Process: `node openclaw/dist/index.js gateway --port 18789`
-- LAN proxy: `http://green-house/api/openclaw/` → nginx → :18789
-- HA bridge: `http://green-house/api/gateway/v1/` → jota-gateway → OpenClaw REST
+- LAN proxy: `http://mi-servidor/api/openclaw/` → nginx → :18789
+- HA bridge: `http://mi-servidor/api/gateway/v1/` → jota-gateway → OpenClaw REST
 
 ---
 
@@ -88,7 +88,7 @@ Load these when you need depth on a specific topic:
 | `references/skills-system.md` | Creating or debugging skills |
 | `references/tools.md` | Tool configuration, groups, permissions |
 | `references/channels.md` | Setting up Telegram, WhatsApp, Discord, etc. |
-| `references/green-house.md` | This specific server deployment |
+| `references/deployment.md` | This specific server deployment |
 | `references/ha-bridge.md` | Home Assistant integration via jota-gateway |
 
 ---
