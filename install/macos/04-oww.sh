@@ -116,12 +116,11 @@ PLIST_TEMPLATE="$REPO_DIR/install/macos/launchagent/com.jota-voice.wyoming-oww.p
 mkdir -p "$PLIST_DIR" "$LOG_DIR"
 
 _info "Generando LaunchAgent…"
-sed \
-    -e "s|__VENV_DIR__|$OWW_VENV_DIR|g" \
-    -e "s|__DATA_DIR__|$OWW_DATA_DIR|g" \
-    -e "s|__THRESHOLD__|${OWW_THRESHOLD}|g" \
-    -e "s|__HOME__|$HOME|g" \
-    "$PLIST_TEMPLATE" > "$PLIST"
+# Rutas escapadas para XML y sed (launchd-plist.sh, issue #46).
+. "$(dirname "$0")/launchd-plist.sh"
+jota_oww_plist "$PLIST_TEMPLATE" "$OWW_VENV_DIR" "$OWW_DATA_DIR" "$OWW_THRESHOLD" "$HOME" > "$PLIST.tmp" \
+    || { rm -f "$PLIST.tmp"; exit 1; }
+mv -f "$PLIST.tmp" "$PLIST"
 chmod 644 "$PLIST"
 _ok "plist generado: $PLIST"
 

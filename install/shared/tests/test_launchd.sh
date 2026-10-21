@@ -43,13 +43,26 @@ if command -v plutil >/dev/null 2>&1; then
     [ "$(extract "$TMP/n.plist" ThrottleInterval)" = "60" ] && ok "JOTA_THROTTLE_INTERVAL respetado" || bad "throttle override"
 
     if jota_voice_plist p r c l nonsense > /dev/null 2>&1; then bad "modo inválido aceptado"; else ok "modo inválido rechazado"; fi
+    if (JOTA_THROTTLE_INTERVAL=30s jota_voice_plist p r c l on-failure) > /dev/null 2>&1; then bad "throttle no entero aceptado"; else ok "throttle no entero rechazado"; fi
+    if (JOTA_EXIT_TIMEOUT=-5 jota_voice_plist p r c l on-failure) > /dev/null 2>&1; then bad "exit timeout negativo aceptado"; else ok "exit timeout no entero rechazado"; fi
+    if jota_oww_plist "$ROOT/install/macos/launchagent/com.jota-voice.wyoming-oww.plist" /v /d "0.4;x" /h > /dev/null 2>&1; then bad "threshold inválido aceptado"; else ok "threshold inválido rechazado"; fi
+
+    # Rutas con caracteres especiales de XML y de sed: plist válido y valor
+    # literal al leerlo (antes un "&" o "<" rompía el plist).
+    WEIRD='/Users/x/Proyectos & <pruebas> "a" | b\c'
+    jota_voice_plist "$WEIRD/py" "$WEIRD" "$WEIRD/cfg.yaml" "$WEIRD/logs" on-failure > "$TMP/w.plist"
+    plutil -lint -s "$TMP/w.plist" && ok "rutas raras: plist válido" || bad "rutas raras: plist inválido"
+    [ "$(extract "$TMP/w.plist" WorkingDirectory)" = "$WEIRD" ] && ok "rutas raras: valor literal" || bad "rutas raras: '$(extract "$TMP/w.plist" WorkingDirectory)'"
+    jota_oww_plist "$ROOT/install/macos/launchagent/com.jota-voice.wyoming-oww.plist" "$WEIRD/venv" /d 0.4 "$WEIRD" > "$TMP/ow.plist"
+    plutil -lint -s "$TMP/ow.plist" && ok "OWW rutas raras: plist válido" || bad "OWW rutas raras: plist inválido"
+    [ "$(extract "$TMP/ow.plist" ProgramArguments.0)" = "$WEIRD/venv/bin/python" ] && ok "OWW rutas raras: valor literal" \
+        || bad "OWW rutas raras: '$(extract "$TMP/ow.plist" ProgramArguments.0)'"
 
     jota_logrotate_plist /repo 3600 /logs > "$TMP/r.plist"
     plutil -lint -s "$TMP/r.plist" && ok "plist logrotate válido" || bad "plist logrotate inválido"
     [ "$(extract "$TMP/r.plist" StartInterval)" = "3600" ] && ok "logrotate cada hora" || bad "StartInterval"
 
-    sed -e "s|__VENV_DIR__|/v|g" -e "s|__DATA_DIR__|/d|g" -e "s|__THRESHOLD__|0.4|g" -e "s|__HOME__|/h|g" \
-        "$ROOT/install/macos/launchagent/com.jota-voice.wyoming-oww.plist" > "$TMP/o.plist"
+    jota_oww_plist "$ROOT/install/macos/launchagent/com.jota-voice.wyoming-oww.plist" /v /d 0.4 /h > "$TMP/o.plist"
     plutil -lint -s "$TMP/o.plist" && ok "plist OWW válido" || bad "plist OWW inválido"
     [ "$(extract "$TMP/o.plist" KeepAlive.SuccessfulExit)" = "false" ] && ok "OWW SuccessfulExit=false" || bad "OWW KeepAlive"
     [ -n "$(extract "$TMP/o.plist" ThrottleInterval)" ] && ok "OWW ThrottleInterval" || bad "OWW ThrottleInterval"
