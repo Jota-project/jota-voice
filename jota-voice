@@ -348,6 +348,10 @@ run_all() {
     [ -z "$files" ] && { _err "No hay dispositivos configurados"; exit 1; }
     local exit_code=0
     for f in $files; do
+        # Cada .env parte de cero: si uno no define PHONE_PASS o PHONE_USER,
+        # no debe heredar los del dispositivo anterior.
+        unset DEVICE_NAME PHONE_HOST PHONE_PORT PHONE_USER PHONE_PASS PHONE_DIR SSHPASS
+        chmod 600 "$f" 2>/dev/null || true   # credenciales: issue #56
         set -a
         # shellcheck source=devices/example.env
         . "$f"

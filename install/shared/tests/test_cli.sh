@@ -47,6 +47,20 @@ else
     bad "update sin reread/update: $(cat "$LOG")"
 fi
 
+# --- --all: cada dispositivo parte de cero (sin credenciales heredadas) ---
+mkdir -p "$TMP/all/devices"
+cp "$ROOT/jota-voice" "$TMP/all/"
+printf '%s\n' 'DEVICE_NAME=a' 'PHONE_HOST=192.0.2.1' 'PHONE_PORT=8022' 'PHONE_USER=ua' 'PHONE_PASS=secreto-a' > "$TMP/all/devices/a.env"
+printf '%s\n' 'DEVICE_NAME=b' 'PHONE_HOST=192.0.2.2' 'PHONE_PORT=8022' > "$TMP/all/devices/b.env"
+: > "$LOG"
+PATH="$TMP/bin:$PATH" bash "$TMP/all/jota-voice" --all status > "$TMP/out" 2>&1
+if grep "192.0.2.2" "$LOG" | grep -q "sshpass\|ua@"; then
+    bad "--all: b heredó credenciales de a: $(grep 192.0.2.2 "$LOG")"
+else
+    ok "--all: b no hereda PHONE_PASS ni PHONE_USER de a"
+fi
+grep "192.0.2.1" "$LOG" | grep -q "^sshpass -e" && ok "--all: a usa su contraseña" || bad "--all: a sin sshpass: $(cat "$LOG")"
+
 # --- init: el .env se escribe con comillas simples escapadas --------------
 # Contraseña con $( ), comillas dobles y simples y backticks: al cargar el
 # .env con `.` no debe ejecutar nada y debe conservarse literal.
