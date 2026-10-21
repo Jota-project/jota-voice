@@ -38,10 +38,10 @@ case "$TARGET" in
         # hostname (issue #101: sin ids reales en el código).
         # shellcheck source=lib/device.sh
         . "$REPO_LOCAL_SELF/lib/device.sh"
-        MAC_ID="$(jota_default_device_id "$REPO_LOCAL")"
+        MAC_ID="$(jota_default_device_id "$REPO_LOCAL")" || exit 1
         # Copia de despliegue aún sin config propio: el id del checkout origen.
         if [ ! -f "$REPO_LOCAL/devices/$MAC_ID/config.yaml" ]; then
-            MAC_ID="$(jota_default_device_id "$REPO_LOCAL_SELF")"
+            MAC_ID="$(jota_default_device_id "$REPO_LOCAL_SELF")" || exit 1
         fi
         if ! jota_valid_id "$MAC_ID"; then
             echo "ERROR: DEVICE_ID inválido: '$MAC_ID'"

@@ -45,7 +45,7 @@ _info() { printf "  ${C}→${N} %s\n" "$1"; }
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 if [ -f "$REPO_DIR/lib/device.sh" ]; then
     . "$REPO_DIR/lib/device.sh"
-    DEVICE_ID="$(jota_default_device_id "$REPO_DIR")"
+    DEVICE_ID="$(jota_default_device_id "$REPO_DIR")" || DEVICE_ID=""
 else
     DEVICE_ID="${DEVICE_ID:-}"
 fi

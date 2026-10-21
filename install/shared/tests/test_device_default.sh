@@ -26,7 +26,12 @@ check "DEVICE_ID manda"        "$(DEVICE_ID=fijo jota_default_device_id "$TMP/un
 check "único config"           "$(unset DEVICE_ID; jota_default_device_id "$TMP/uno")" "mi-mac"
 host_id="$(unset DEVICE_ID; jota_default_device_id "$TMP/cero")"
 if jota_valid_id "$host_id"; then echo "ok: sin configs → hostname saneado ($host_id)"; else echo "FAIL: id de hostname inválido '$host_id'"; fail=1; fi
-check "varios configs → hostname" "$(unset DEVICE_ID; jota_default_device_id "$TMP/dos")" "$host_id"
+if out=$(unset DEVICE_ID; jota_default_device_id "$TMP/dos" 2>&1); then
+    echo "FAIL: varios configs sin DEVICE_ID devolvió '$out'"; fail=1
+else
+    case "$out" in *DEVICE_ID*) echo "ok: varios configs → falla pidiendo DEVICE_ID" ;; *) echo "FAIL: mensaje: $out"; fail=1 ;; esac
+fi
+check "varios configs con DEVICE_ID" "$(DEVICE_ID=b jota_default_device_id "$TMP/dos")" "b"
 
 # Ningún script fija un id de dispositivo literal como default
 # (antes: DEVICE_ID="${DEVICE_ID:-<id real>}").

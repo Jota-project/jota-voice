@@ -12,7 +12,7 @@ _MACOS_LIB_DIR="$(cd "$(dirname "$0")" && pwd)"
 # contiene este script y el id sale de devices/ o del hostname.
 REPO_DIR="${REPO_DIR:-$(cd "$_MACOS_LIB_DIR/../.." && pwd)}"
 VENV_DIR="${VENV_DIR:-$HOME/venvs/jota-voice}"
-DEVICE_ID="$(jota_default_device_id "$REPO_DIR")"
+DEVICE_ID="$(jota_default_device_id "$REPO_DIR")" || exit 1
 OWW_DATA_DIR="${OWW_DATA_DIR:-$HOME/wyoming-data}"
 OWW_VENV_DIR="${OWW_VENV_DIR:-$HOME/wyoming-oww-venv}"
 

@@ -23,6 +23,8 @@ sh install.sh            # sh install.sh --detect solo dice qué plataforma ve
 
 Todos los instaladores son idempotentes: se pueden relanzar para reparar o actualizar. Exigen **Python ≥ 3.11**.
 
+> **No ejecutes el instalador desde un git worktree** ni desde una copia temporal: el LaunchAgent (o supervisord) apunta al repo desde el que se instala, así que pasaría a correr desde ese worktree y dejaría de funcionar al borrarlo. Instala desde la copia estable y despliega a ella con `deploy.sh`.
+
 ### macOS
 
 `install/macos/install.sh` encadena estos pasos (cada uno se puede ejecutar suelto con `sh install/macos/<paso>`):
@@ -39,7 +41,7 @@ Variables de entorno opcionales:
 
 | Variable | Defecto | Para qué |
 |---|---|---|
-| `DEVICE_ID` | el único `devices/*/config.yaml`, o el hostname | id del dispositivo (`[A-Za-z0-9_-]`) |
+| `DEVICE_ID` | el único `devices/*/config.yaml`, o el hostname si no hay ninguno (obligatorio si hay varios) | id del dispositivo (`[A-Za-z0-9_-]`) |
 | `GATEWAY_URL`, `GATEWAY_CLIENT_KEY` | se preguntan | para que el wizard no pregunte |
 | `JOTA_PYTHON` | `python@3.12` de Homebrew | intérprete de los venvs (≥ 3.11) |
 | `JOTA_KEEP_ALIVE` | `on-failure` | `on-failure` relanza solo tras un fallo; `always`; `never` |
