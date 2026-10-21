@@ -2,7 +2,7 @@
 
 **Fecha:** 2026-05-26
 **Estado:** aprobado por el usuario
-**Autor:** Alfonso Garre + Claude
+**Autor:** Sito + Claude
 
 ---
 
