@@ -4,8 +4,8 @@
 # ThrottleInterval y ExitTimeOut explícitos, plists válidos, y rotación de
 # logs copy-truncate.
 #
-# La validación de plists necesita plutil (macOS); en Linux se salta esa
-# parte y solo se prueba rotate-logs.sh.
+# Los plists se validan con plutil (macOS) o, si falta, con plistlib de
+# Python (Linux/CI): ya no se salta la validación fuera de macOS.
 #
 # Uso: sh install/shared/tests/test_launchd.sh
 set -u
@@ -21,11 +21,27 @@ ok()  { echo "ok: $1"; }
 bad() { echo "FAIL: $1"; fail=1; }
 
 # --- plists ---------------------------------------------------------------
+# plutil en macOS; en Linux (CI) la misma validación con plistlib de Python.
+PLIST_PY='
+import plistlib, sys
+d = plistlib.load(open(sys.argv[2], "rb"))
+if sys.argv[1] == "extract":
+    for k in sys.argv[3].split("."):
+        d = d[int(k)] if isinstance(d, list) else d[k]
+    print(str(d).lower() if isinstance(d, bool) else d)
+'
 if command -v plutil >/dev/null 2>&1; then
+    lint()    { plutil -lint -s "$1"; }
     extract() { plutil -extract "$2" raw -o - "$1" 2>/dev/null; }
+elif command -v python3 >/dev/null 2>&1; then
+    echo "info: sin plutil, se validan los plists con plistlib"
+    lint()    { python3 -c "$PLIST_PY" lint "$1" 2>/dev/null; }
+    extract() { python3 -c "$PLIST_PY" extract "$1" "$2" 2>/dev/null; }
+fi
+if command -v lint >/dev/null 2>&1; then
 
     jota_voice_plist /v/bin/python3 /repo "/cfg dir/config.yaml" /logs on-failure > "$TMP/v.plist"
-    plutil -lint -s "$TMP/v.plist" && ok "plist cliente válido" || bad "plist cliente inválido"
+    lint "$TMP/v.plist" && ok "plist cliente válido" || bad "plist cliente inválido"
     [ "$(extract "$TMP/v.plist" KeepAlive.SuccessfulExit)" = "false" ] \
         && ok "on-failure → SuccessfulExit=false" || bad "on-failure sin SuccessfulExit=false"
     [ "$(extract "$TMP/v.plist" ThrottleInterval)" = "30" ] && ok "ThrottleInterval=30" || bad "ThrottleInterval"
@@ -51,23 +67,23 @@ if command -v plutil >/dev/null 2>&1; then
     # literal al leerlo (antes un "&" o "<" rompía el plist).
     WEIRD='/Users/x/Proyectos & <pruebas> "a" | b\c'
     jota_voice_plist "$WEIRD/py" "$WEIRD" "$WEIRD/cfg.yaml" "$WEIRD/logs" on-failure > "$TMP/w.plist"
-    plutil -lint -s "$TMP/w.plist" && ok "rutas raras: plist válido" || bad "rutas raras: plist inválido"
+    lint "$TMP/w.plist" && ok "rutas raras: plist válido" || bad "rutas raras: plist inválido"
     [ "$(extract "$TMP/w.plist" WorkingDirectory)" = "$WEIRD" ] && ok "rutas raras: valor literal" || bad "rutas raras: '$(extract "$TMP/w.plist" WorkingDirectory)'"
     jota_oww_plist "$ROOT/install/macos/launchagent/com.jota-voice.wyoming-oww.plist" "$WEIRD/venv" /d 0.4 "$WEIRD" > "$TMP/ow.plist"
-    plutil -lint -s "$TMP/ow.plist" && ok "OWW rutas raras: plist válido" || bad "OWW rutas raras: plist inválido"
+    lint "$TMP/ow.plist" && ok "OWW rutas raras: plist válido" || bad "OWW rutas raras: plist inválido"
     [ "$(extract "$TMP/ow.plist" ProgramArguments.0)" = "$WEIRD/venv/bin/python" ] && ok "OWW rutas raras: valor literal" \
         || bad "OWW rutas raras: '$(extract "$TMP/ow.plist" ProgramArguments.0)'"
 
     jota_logrotate_plist /repo 3600 /logs > "$TMP/r.plist"
-    plutil -lint -s "$TMP/r.plist" && ok "plist logrotate válido" || bad "plist logrotate inválido"
+    lint "$TMP/r.plist" && ok "plist logrotate válido" || bad "plist logrotate inválido"
     [ "$(extract "$TMP/r.plist" StartInterval)" = "3600" ] && ok "logrotate cada hora" || bad "StartInterval"
 
     jota_oww_plist "$ROOT/install/macos/launchagent/com.jota-voice.wyoming-oww.plist" /v /d 0.4 /h > "$TMP/o.plist"
-    plutil -lint -s "$TMP/o.plist" && ok "plist OWW válido" || bad "plist OWW inválido"
+    lint "$TMP/o.plist" && ok "plist OWW válido" || bad "plist OWW inválido"
     [ "$(extract "$TMP/o.plist" KeepAlive.SuccessfulExit)" = "false" ] && ok "OWW SuccessfulExit=false" || bad "OWW KeepAlive"
     [ -n "$(extract "$TMP/o.plist" ThrottleInterval)" ] && ok "OWW ThrottleInterval" || bad "OWW ThrottleInterval"
 else
-    echo "skip: sin plutil (no es macOS), no se validan los plists"
+    bad "sin plutil ni python3: no se pueden validar los plists"
 fi
 
 # --- OWW solo en loopback (macOS y Termux) ---------------------------------
