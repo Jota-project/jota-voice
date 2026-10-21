@@ -17,6 +17,13 @@ _list_device_files() {
     find "$DEVICES_DIR" -maxdepth 1 -name "*.env" -not -name "example.env" 2>/dev/null | sort
 }
 
+# _shq VALOR — VALOR entre comillas simples, apto para un .env que luego se
+# carga con `.`: dentro de comillas dobles un "$", "`" o '"' en la contraseña
+# rompía el fichero o ejecutaba código al cargarlo.
+_shq() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
 # Nombre de dispositivo seguro para rutas (devices/<nombre>.env): issue #55.
 _valid_device_name() {
     case "$1" in
@@ -106,7 +113,7 @@ cmd_devices() {
         local name
         name=$(basename "$f" .env)
         local host
-        host=$(grep "PHONE_HOST" "$f" | cut -d= -f2 | tr -d '"')
+        host=$(grep "PHONE_HOST" "$f" | cut -d= -f2 | tr -d "\"'")
         printf "  %-15s %s\n" "$name" "$host"
     done
 }
@@ -199,14 +206,14 @@ cmd_init() {
 
         # Creado ya con 600: lleva credenciales (issue #56).
         ( umask 077; : > "$device_file" )
-        cat > "$device_file" << EOF
-DEVICE_NAME="${DEVICE_NAME}"
-PHONE_HOST="${PHONE_HOST}"
-PHONE_PORT="${PHONE_PORT}"
-PHONE_USER="${PHONE_USER}"
-PHONE_PASS="${PHONE_PASS}"
-PHONE_DIR="/data/data/com.termux/files/home/jota-voice"
-EOF
+        {
+            printf 'DEVICE_NAME=%s\n' "$(_shq "$DEVICE_NAME")"
+            printf 'PHONE_HOST=%s\n' "$(_shq "$PHONE_HOST")"
+            printf 'PHONE_PORT=%s\n' "$(_shq "$PHONE_PORT")"
+            printf 'PHONE_USER=%s\n' "$(_shq "$PHONE_USER")"
+            printf 'PHONE_PASS=%s\n' "$(_shq "$PHONE_PASS")"
+            printf 'PHONE_DIR=%s\n' "'/data/data/com.termux/files/home/jota-voice'"
+        } > "$device_file"
         _ok "Creado $device_file"
     fi
 

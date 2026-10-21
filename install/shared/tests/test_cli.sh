@@ -47,4 +47,20 @@ else
     bad "update sin reread/update: $(cat "$LOG")"
 fi
 
+# --- init: el .env se escribe con comillas simples escapadas --------------
+# Contraseña con $( ), comillas dobles y simples y backticks: al cargar el
+# .env con `.` no debe ejecutar nada y debe conservarse literal.
+: > "$TMP/repo/config.yaml"
+PASS='a$(touch "$TMPDIR_PWN/pwned")"b'"'"'c`id`$HOME'
+export TMPDIR_PWN="$TMP"
+printf '%s\n' "N" "" "nuevo" "192.0.2.9" "" "u0_aXXX" "$PASS" | cli init > "$TMP/out" 2>&1 \
+    || bad "init falló: $(cat "$TMP/out")"
+if [ -e "$TMP/pwned" ]; then bad "init: la contraseña ejecutó código"; else ok "init: nada ejecutado al cargar el .env"; fi
+got=$(bash -c '. "$1"; printf "%s" "$PHONE_PASS"' _ "$TMP/repo/devices/nuevo.env")
+[ "$got" = "$PASS" ] && ok "init: contraseña literal" || bad "init: contraseña '$got' (esperada '$PASS')"
+got=$(bash -c '. "$1"; printf "%s|%s|%s" "$PHONE_HOST" "$PHONE_PORT" "$PHONE_USER"' _ "$TMP/repo/devices/nuevo.env")
+[ "$got" = "192.0.2.9|8022|u0_aXXX" ] && ok "init: host/puerto/usuario" || bad "init: $got"
+[ ! -e "$TMP/pwned" ] || bad "init: código ejecutado al releer"
+rm -f "$TMP/repo/devices/nuevo.env" "$TMP/repo/config.yaml"
+
 exit $fail
