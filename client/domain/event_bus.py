@@ -54,6 +54,9 @@ EventType = Literal[
     # reenvía al display como `health` (parte display de #7).
     "oww_degraded",
     "oww_recovered",
+    # Telemetría `pipeline_event` del gateway (stage, elapsed_ms, turn), ver
+    # domain/pipeline_stats.py. Ningún consumidor la usa todavía.
+    "pipeline_stage",
 ]
 
 

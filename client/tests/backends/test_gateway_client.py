@@ -1077,3 +1077,52 @@ def test_cierre_1009_es_recuperable_y_tiene_etiqueta():
 
     assert close_is_fatal(1009) is False
     assert "demasiado grande" in close_code_label(1009)
+
+
+# ---------------------------------------------------------------------------
+# pipeline_event (prueba real 2026-10-21): el gateway (pipeline_tracker.py)
+# los manda cuando el handshake pide `status` en output_mode.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_receive_pipeline_event_normalizado():
+    client = GatewayClient(GatewayConfig(host="h", client_key="k"))
+    client._ws = FakeWS([
+        json.dumps({"type": "pipeline_event", "stage": "llm_start",
+                    "elapsed_ms": 12, "turn": 3}),
+        json.dumps({"type": "pipeline_event", "stage": "tts_done"}),
+    ])
+    events = [ev async for ev in client.receive()]
+    assert [e.type for e in events] == ["pipeline_event", "pipeline_event"]
+    assert events[0].data == {"stage": "llm_start", "elapsed_ms": 12.0, "turn": 3}
+    # Campos ausentes o de tipo raro: None, nunca un valor inventado.
+    assert events[1].data == {"stage": "tts_done", "elapsed_ms": None, "turn": None}
+
+
+@pytest.mark.asyncio
+async def test_receive_pipeline_event_sin_stage_valido_se_descarta():
+    client = GatewayClient(GatewayConfig(host="h", client_key="k"))
+    client._ws = FakeWS([
+        json.dumps({"type": "pipeline_event", "stage": 5, "elapsed_ms": 1}),
+        json.dumps({"type": "pipeline_event", "elapsed_ms": "x"}),
+        json.dumps({"type": "pipeline_event", "stage": "llm_done", "elapsed_ms": "x",
+                    "turn": True}),
+    ])
+    events = [ev async for ev in client.receive()]
+    assert [e.data for e in events] == [
+        {"stage": "llm_done", "elapsed_ms": None, "turn": None},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_connect_ignora_pipeline_event_antes_de_ready(ws_connect):
+    """Un pipeline_event antes de `ready` (p. ej. client_slow) no debe tumbar
+    el handshake como "tipo inesperado"."""
+    cfg = GatewayConfig(host="127.0.0.1", client_key="test", connect_timeout_s=1.0)
+    pe = json.dumps({"type": "pipeline_event", "stage": "client_slow",
+                     "elapsed_ms": 1, "turn": 0})
+    ws = _ws_with_recv([pe, _READY])
+    ws_connect(AsyncMock(return_value=ws))
+    client = GatewayClient(cfg)
+    await client.connect()
+    assert client.is_connected
