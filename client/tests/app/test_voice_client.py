@@ -330,7 +330,7 @@ def test_run_with_cocoa_menubar_sets_wakeup_fd(monkeypatch) -> None:
     assert blocking_at_install == [False], "el wakeup fd debe ser O_NONBLOCK"
 
 
-async def _test_menubar_stops_after_async_cleanup(monkeypatch) -> None:
+async def _test_menubar_stops_after_async_cleanup(monkeypatch, sm_raises: bool = False) -> None:
     cleanup_order: list[str] = []
 
     class _AudioBackend:
@@ -375,7 +375,8 @@ async def _test_menubar_stops_after_async_cleanup(monkeypatch) -> None:
             cleanup_order.append("menubar.stop")
 
     async def _completed_state_machine(*args, **kwargs) -> None:
-        pass
+        if sm_raises:
+            raise RuntimeError("crash de la state machine")
 
     monkeypatch.setattr(registry, "make_audio", lambda cfg: _AudioBackend())
     monkeypatch.setattr(registry, "make_oww", lambda cfg, **kw: _OwwBackend())
@@ -390,9 +391,15 @@ async def _test_menubar_stops_after_async_cleanup(monkeypatch) -> None:
     monkeypatch.setattr(voice_client, "MenubarClient", _IdleClient)
     monkeypatch.setattr(voice_client, "sm_run", _completed_state_machine)
 
-    await voice_client.main(
-        _make_cfg(), _MenubarBackend(), external_stop_event=asyncio.Event()
-    )
+    if sm_raises:
+        with pytest.raises(RuntimeError, match="crash de la state machine"):
+            await voice_client.main(
+                _make_cfg(), _MenubarBackend(), external_stop_event=asyncio.Event()
+            )
+    else:
+        await voice_client.main(
+            _make_cfg(), _MenubarBackend(), external_stop_event=asyncio.Event()
+        )
 
     # El display va detrás de audio/gateway/OWW: su stop() puede tardar
     # hasta ~2 s con un display que no lee, y launchd mata a los 20 s.
@@ -407,6 +414,13 @@ async def _test_menubar_stops_after_async_cleanup(monkeypatch) -> None:
 
 def test_menubar_stops_after_async_cleanup(monkeypatch) -> None:
     asyncio.run(_test_menubar_stops_after_async_cleanup(monkeypatch))
+
+
+def test_crash_de_la_state_machine_limpia_y_se_relanza(monkeypatch) -> None:
+    """#46: con KeepAlive.SuccessfulExit=false launchd solo relanza si el
+    proceso sale con != 0. Un crash de la state machine hace la limpieza
+    completa y main() relanza la excepción (antes devolvía normal → exit 0)."""
+    asyncio.run(_test_menubar_stops_after_async_cleanup(monkeypatch, sm_raises=True))
 
 
 @pytest.mark.asyncio

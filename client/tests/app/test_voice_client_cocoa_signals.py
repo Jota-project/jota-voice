@@ -49,6 +49,10 @@ async def _fake_main(cfg, menubar_backend, *, external_stop_event=None):
         else:
             # Solo cuando el run loop de Cocoa ya corre.
             AppHelper.callAfter(_ready)
+        if MODE == "main_raises":
+            # Crash sin apagado pedido (p.ej. la state machine revienta).
+            await asyncio.sleep(0.3)
+            raise RuntimeError("crash en main")
         await external_stop_event.wait()
         print("ORDERLY_SHUTDOWN", flush=True)
         if MODE == "cleanup_raises":
@@ -64,8 +68,9 @@ if MODE == "cleanup_raises":
     # La señal llega igual; la limpieza revienta antes de stop().
     AppHelper.callLater(0.5, _ready)
 t0 = time.time()
-voice_client._run_with_cocoa_menubar(cfg, backend)
+rc = voice_client._run_with_cocoa_menubar(cfg, backend)
 print("RUNLOOP_RETURNED %.2f" % (time.time() - t0), flush=True)
+sys.exit(rc)  # como el __main__ real
 """
 
 
@@ -138,3 +143,16 @@ def test_quit_while_starting_also_stops_asyncio():
     assert code == 0, f"exit {code}\nstdout={out}\nstderr={err}"
     assert "ORDERLY_SHUTDOWN" in out, out + err
     assert "RUNLOOP_RETURNED" in out, out + err
+
+
+def test_crash_en_main_sale_con_codigo_distinto_de_cero():
+    """#46: con KeepAlive.SuccessfulExit=false launchd solo relanza si el
+    proceso sale con != 0. Antes, una excepción en el hilo asyncio se
+    registraba, paraba el menubar y el proceso salía con 0: no se relanzaba."""
+    proc = _spawn("main_raises")
+    _wait_ready(proc)
+    code, out, err = _finish(proc)
+
+    assert code != 0, f"exit {code}: launchd no lo relanzaría\nstdout={out}\nstderr={err}"
+    assert "RUNLOOP_RETURNED" in out, out + err
+    assert "crash en main" in err, err
