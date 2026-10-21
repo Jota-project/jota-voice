@@ -1,5 +1,5 @@
 #!/bin/sh
-# shellcheck disable=SC2015  # ok/bad siempre devuelven 0: "A && B || C" es seguro aquí
+# shellcheck disable=SC2015,SC2016  # ok/bad siempre devuelven 0; los $ de los printf son de los pasos falsos
 # Test de install/install-termux.sh (issue #43): cada paso corre en un
 # subproceso; un `exit 1` en un paso no crítico no mata el runner, se sigue
 # con el resto y se resume al final. Un fallo en un paso crítico aborta.
