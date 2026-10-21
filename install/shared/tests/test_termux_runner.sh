@@ -19,7 +19,7 @@ mk_repo() {
     d="$1"
     mkdir -p "$d/install" "$d/lib" "$d/devices/tel"
     cp "$ROOT/install/install-termux.sh" "$d/install/"
-    cp "$ROOT/lib/output.sh" "$d/lib/"
+    cp "$ROOT/lib/output.sh" "$ROOT/lib/secure.sh" "$d/lib/"
     printf 'gateway:\n  client_key: "k"\n# client_key: "RELLENAR" (comentario, no cuenta)\n' > "$d/devices/tel/config.yaml"
     for s in 01-packages 02-hosts 03-venv 04-oww 05-supervisord 06-configs 07-boot 08-jota-display 99-smoke-test; do
         if [ "$s.sh" = "$2" ]; then
@@ -72,6 +72,15 @@ printf '%s' "$out" | grep -q "corre 02-hosts" && bad "crítico: siguió tras el 
 mk_repo "$TMP/c" ninguno
 out=$(bash "$TMP/c/install/install-termux.sh" 2>&1); rc=$?
 [ "$rc" -eq 0 ] && ok "todo ok: rc=0" || bad "todo ok: rc=$rc ($out)"
+
+# 3b. Teléfono recién clonado: el symlink config.yaml existe ANTES de
+#     02-hosts.sh (lee $REPO_DIR/config.yaml vía lib/yaml.sh).
+mk_repo "$TMP/e" ninguno
+printf '#!/bin/sh\nif [ -f "$REPO_DIR/config.yaml" ]; then echo "02 ve config"; else echo "02 sin config"; fi\n' > "$TMP/e/install/02-hosts.sh"
+out=$(bash "$TMP/e/install/install-termux.sh" 2>&1); rc=$?
+printf '%s' "$out" | grep -q "02 ve config" && ok "orden: 02 ya ve config.yaml" || bad "orden: 02 sin config ($out)"
+[ -L "$TMP/e/config.yaml" ] && [ "$(readlink "$TMP/e/config.yaml")" = "devices/tel/config.yaml" ] \
+    && ok "symlink relativo a devices/tel" || bad "symlink: $(readlink "$TMP/e/config.yaml")"
 
 # 4. Placeholder real (no comentario) → no instala nada.
 mk_repo "$TMP/d" ninguno

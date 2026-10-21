@@ -11,6 +11,7 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 export REPO_DIR
 
 . "$REPO_DIR/lib/output.sh"
+. "$REPO_DIR/lib/secure.sh"
 
 # ── Validación ────────────────────────────────────────────────
 # config.yaml en la raíz es un symlink que crea 06-configs.sh; en un teléfono
@@ -49,6 +50,17 @@ if grep -v '^[[:space:]]*#' "$CFG" | grep -qE 'RELLENAR|YOUR_|CHANGE-ME'; then
 fi
 
 _ok "Configuración válida: ${CFG#"$REPO_DIR"/}"
+
+# El symlink config.yaml → devices/<id>/config.yaml se crea AQUÍ, antes de
+# los pasos: 02-hosts.sh (lib/yaml.sh) lee $REPO_DIR/config.yaml y en un
+# teléfono recién clonado corría antes de 06, escribiendo un /etc/hosts sin
+# las entradas de `hosts:`. 06-configs.sh lo ve ya creado (no-op).
+if [ ! -e "$REPO_DIR/config.yaml" ] && [ ! -L "$REPO_DIR/config.yaml" ]; then
+    _id="$(basename "$(dirname "$CFG")")"
+    jota_valid_id "$_id" || _fail "device id inválido: '$_id' (solo letras, dígitos, _ y -)"
+    ln -s "devices/$_id/config.yaml" "$REPO_DIR/config.yaml"
+    _ok "symlink creado: config.yaml → devices/$_id/config.yaml"
+fi
 
 # ── Ejecutar pasos ────────────────────────────────────────────
 # Lista explícita (no un glob de install/*.sh): este runner y otros ficheros
