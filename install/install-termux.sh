@@ -54,11 +54,20 @@ _ok "Configuración válida: ${CFG#"$REPO_DIR"/}"
 # Lista explícita (no un glob de install/*.sh): este runner y otros ficheros
 # viven en install/ y no son pasos.
 STEPS="01-packages.sh 02-hosts.sh 03-venv.sh 04-oww.sh 05-supervisord.sh 06-configs.sh 07-boot.sh 08-jota-display.sh 99-smoke-test.sh"
-# Sin estos no tiene sentido seguir: el resto de pasos fallaría en cascada.
-CRITICAL="01-packages.sh"
+# Sin estos no tiene sentido seguir: el resto fallaría en cascada o, peor,
+# 99 reiniciaría supervisord con un venv, un OWW o una config rotos y
+# tumbaría la versión anterior que seguía funcionando.
+CRITICAL="01-packages.sh 03-venv.sh 04-oww.sh 06-configs.sh"
+# 99 para y rearranca supervisord: solo si todo lo anterior salió bien.
+RESTART_STEP="99-smoke-test.sh"
 
 _failed_steps=""
 for name in $STEPS; do
+    if [ "$name" = "$RESTART_STEP" ] && [ -n "$_failed_steps" ]; then
+        echo ""
+        _warn "Se omite $name (reinicia supervisord): fallaron pasos previos y los servicios actuales siguen en marcha."
+        continue
+    fi
     echo ""
     echo "=== $name ==="
     # bash explícito: los pasos usan `source` (el sh de Termux es dash).

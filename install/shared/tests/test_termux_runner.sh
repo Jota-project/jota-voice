@@ -35,12 +35,32 @@ ok()  { echo "ok: $1"; }
 bad() { echo "FAIL: $1"; fail=1; }
 
 # 1. Falla un paso NO crítico → los siguientes corren, resumen, rc=1.
-mk_repo "$TMP/a" 04-oww.sh
+mk_repo "$TMP/a" 05-supervisord.sh
 out=$(bash "$TMP/a/install/install-termux.sh" 2>&1); rc=$?
 [ "$rc" -eq 1 ] && ok "no crítico: rc=1" || bad "no crítico: rc=$rc"
 printf '%s' "$out" | grep -q "corre 07-boot" && ok "no crítico: siguió hasta 07-boot" || bad "no crítico: no siguió ($out)"
-printf '%s' "$out" | grep -q "corre 99-smoke-test" && ok "no crítico: llegó al último paso" || bad "no crítico: no llegó al último paso"
-printf '%s' "$out" | grep -q "errores en: 04-oww.sh" && ok "no crítico: resumen nombra el paso" || bad "no crítico: sin resumen ($out)"
+printf '%s' "$out" | grep -q "corre 08-jota-display" && ok "no crítico: llegó al último paso antes de 99" || bad "no crítico: no llegó a 08"
+printf '%s' "$out" | grep -q "errores en: 05-supervisord.sh" && ok "no crítico: resumen nombra el paso" || bad "no crítico: sin resumen ($out)"
+
+# 1b. Falla un paso no crítico → NO se ejecuta 99 (reinicia supervisord con
+#     algo roto y tumbaría la versión anterior).
+mk_repo "$TMP/a2" 07-boot.sh
+out=$(bash "$TMP/a2/install/install-termux.sh" 2>&1); rc=$?
+[ "$rc" -eq 1 ] && ok "fallo previo: rc=1" || bad "fallo previo: rc=$rc"
+printf '%s' "$out" | grep -q "corre 08-jota-display" && ok "fallo previo: sigue con 08" || bad "fallo previo: no siguió"
+printf '%s' "$out" | grep -q "corre 99-smoke-test" && bad "fallo previo: ejecutó 99" || ok "fallo previo: omite 99"
+
+# 1c. 03 (venv), 04 (OWW) y 06 (configs) son críticos.
+for crit in 03-venv.sh 04-oww.sh 06-configs.sh; do
+    mk_repo "$TMP/c_$crit" "$crit"
+    out=$(bash "$TMP/c_$crit/install/install-termux.sh" 2>&1); rc=$?
+    if [ "$rc" -eq 1 ] && ! printf '%s' "$out" | grep -q "corre 99-smoke-test" \
+       && printf '%s' "$out" | grep -q "crítico"; then
+        ok "$crit crítico: aborta sin 99"
+    else
+        bad "$crit no aborta: rc=$rc ($out)"
+    fi
+done
 
 # 2. Falla el paso crítico → aborta, no corre el resto.
 mk_repo "$TMP/b" 01-packages.sh
