@@ -32,15 +32,10 @@ yaml_get_nested() {
 }
 
 yaml_get_hosts() {
-    local in_hosts=false
     local ip="" name=""
     grep -A 30 "^hosts:" "$YAML_FILE" 2>/dev/null | while read -r line; do
         case "$line" in
-            "hosts:")
-                in_hosts=true
-                ;;
-            "")
-                in_hosts=false
+            "hosts:"|"")
                 ;;
             *ip:*)
                 ip=$(echo "$line" | sed 's/.*ip: *"\([^"]*\)".*/\1/')

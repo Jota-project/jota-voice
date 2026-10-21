@@ -1,5 +1,5 @@
 #!/bin/sh
-# Crea symlink ~/Library/Application Support/jota-voice/config.yaml → devices/macbook_sito/config.yaml
+# Crea symlink ~/Library/Application Support/jota-voice/config.yaml → devices/<DEVICE_ID>/config.yaml
 set -e
 . "$(dirname "$0")/00-lib.sh"
 
@@ -16,3 +16,6 @@ fi
 mkdir -p "$DEST_DIR"
 ln -sf "$SRC" "$DEST"
 _ok "Symlink creado: $DEST → $SRC"
+
+# Issue #44: re-aplicar 600 en cada instalación (no solo al crear).
+jota_secure_perms "$REPO_DIR"

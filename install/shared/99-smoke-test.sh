@@ -41,8 +41,14 @@ _warn() { printf "  ${Y}!${N} %s\n" "$1"; }
 _info() { printf "  ${C}→${N} %s\n" "$1"; }
 
 # ---------- Detección de paths ----------
-REPO_DIR="${REPO_DIR:-$HOME/Work/jota-voice}"
-DEVICE_ID="${DEVICE_ID:-macbook_sito}"
+# Sin rutas ni ids del despliegue real (issue #101).
+REPO_DIR="${REPO_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
+if [ -f "$REPO_DIR/lib/device.sh" ]; then
+    . "$REPO_DIR/lib/device.sh"
+    DEVICE_ID="$(jota_default_device_id "$REPO_DIR")" || DEVICE_ID=""
+else
+    DEVICE_ID="${DEVICE_ID:-}"
+fi
 
 # Si el usuario exporta CONFIG explícitamente (CI, test, etc.), respetarlo.
 # Si no, buscar en las ubicaciones estándar.
@@ -66,6 +72,13 @@ fi
 # de asumir un host privado del despliegue del usuario.
 OWW_HOST="${OWW_HOST:-127.0.0.1}"
 OWW_PORT="${OWW_PORT:-10401}"
+# Overrides del gateway por entorno, capturados ANTES de inicializar las
+# variables internas (issue #53: antes se hacía GW_HOST="$GW_HOST" después
+# de vaciarlas, un no-op). Nombres: GATEWAY_URL, GATEWAY_HOST, GATEWAY_PORT
+# (GW_HOST/GW_PORT se aceptan por compatibilidad).
+ENV_GW_URL="${GATEWAY_URL:-}"
+ENV_GW_HOST="${GATEWAY_HOST:-${GW_HOST:-}}"
+ENV_GW_PORT="${GATEWAY_PORT:-${GW_PORT:-}}"
 GW_HOST=""
 GW_PORT=""
 GW_URL=""
@@ -128,9 +141,21 @@ fi
 
 # Las variables de entorno tienen prioridad sobre el config (útil para CI o
 # para apuntar el smoke test a otro despliegue sin tocar el config).
-[ -n "${GATEWAY_URL:-}" ]   && GW_URL="$GATEWAY_URL"
-[ -n "${GW_HOST:-}" ]       && GW_HOST="$GW_HOST"
-[ -n "${GW_PORT:-}" ]       && GW_PORT="$GW_PORT"
+# GATEWAY_URL gana a todo; GATEWAY_HOST sustituye también a un gateway.url
+# del config (si no, el override de host nunca se usaría).
+if [ -n "$ENV_GW_URL" ]; then
+    GW_URL="$ENV_GW_URL"
+elif [ -n "$ENV_GW_HOST" ]; then
+    GW_URL=""
+    GW_HOST="$ENV_GW_HOST"
+fi
+[ -n "$ENV_GW_PORT" ] && GW_PORT="$ENV_GW_PORT"
+
+# Modo diagnóstico/test: imprime lo resuelto y sale sin comprobar nada.
+if [ "${JOTA_SMOKE_RESOLVE_ONLY:-0}" = "1" ]; then
+    echo "url=$GW_URL host=$GW_HOST port=$GW_PORT oww=$OWW_HOST:$OWW_PORT"
+    exit 0
+fi
 
 # Si no tenemos ni url ni host+port, fallamos con un mensaje claro
 # indicando dónde se configura — NUNCA asumimos un host privado por defecto.
@@ -140,8 +165,11 @@ if [ -z "$GW_URL" ] && { [ -z "$GW_HOST" ] || [ -z "$GW_PORT" ]; }; then
 fi
 
 # Logs en macOS están en ~/Library/Logs/jota-voice/
-# En Termux aún no tenemos logging unificado, así que fallback a stdout.log
-if [ -f "$HOME/Library/Logs/jota-voice/stdout.log" ]; then
+# El logging del cliente va a stderr: en macOS el LaunchAgent lo deja en
+# stderr.log (stdout.log queda casi vacío).
+if [ -f "$HOME/Library/Logs/jota-voice/stderr.log" ]; then
+    LOGFILE="$HOME/Library/Logs/jota-voice/stderr.log"
+elif [ -f "$HOME/Library/Logs/jota-voice/stdout.log" ]; then
     LOGFILE="$HOME/Library/Logs/jota-voice/stdout.log"
 elif [ -f "$HOME/.local/share/jota-voice/stdout.log" ]; then
     LOGFILE="$HOME/.local/share/jota-voice/stdout.log"
@@ -169,8 +197,12 @@ TOTAL=$((TOTAL+1))
 _info "Check 1/5 — Servicio launchd cargado"
 if command -v launchctl >/dev/null 2>&1; then
     # macOS: launchctl list muestra una línea por servicio cargado
-    if launchctl list 2>/dev/null | grep -q "com.jota.voice"; then
-        PID=$(launchctl list 2>/dev/null | grep "com.jota.voice" | awk '{print $1}')
+    # Etiqueta exacta: con grep, los "." comodín casaban también con
+    # com.jota-voice.wyoming-oww y com.jota-voice.logrotate, y el check daba
+    # OK aunque el cliente no estuviera cargado.
+    LINE=$(launchctl list 2>/dev/null | awk '$3 == "com.jota.voice"')
+    if [ -n "$LINE" ]; then
+        PID=$(printf '%s\n' "$LINE" | awk '{print $1}')
         _ok "com.jota.voice cargado (pid=${PID:-N/A})"
         PASSED=$((PASSED+1))
     else
@@ -251,8 +283,8 @@ if command -v curl >/dev/null 2>&1; then
         "${HTTP_URL%/}" 2>/dev/null \
         | head -1 | awk '{print $2}')
     case "$HTTP_CODE" in
-        2*|3*|4*|405)
-            # 2xx/3xx/4xx/405 todos válidos — al menos el puerto está abierto
+        2*|3*|4*)
+            # 2xx/3xx/4xx (405 incluido) todos válidos — al menos el puerto está abierto
             _ok "gateway responde HTTP ${HTTP_CODE:-?}"
             GW_OK=1
             ;;
@@ -273,7 +305,7 @@ fi
 if [ "$GW_OK" = "1" ]; then
     PASSED=$((PASSED+1))
 else
-    _fail "gateway NO reachable en ${GW_HOST}:${GW_PORT}. Comprueba DNS/red/VPN."
+    _fail "gateway NO reachable en ${HTTP_URL}. Comprueba DNS/red/VPN."
 fi
 echo ""
 
@@ -302,7 +334,7 @@ if [ "$PASSED" -eq "$TOTAL" ]; then
     echo ""
     echo "  Siguiente paso (MANUAL):"
     echo "    Di \"Ok jota\" cerca del Mac y observa el log:"
-    echo "      tail -f ~/Library/Logs/jota-voice/stdout.log | grep --line-buffered 'wake\\|RESPONDING\\|transcription'"
+    echo "      tail -f ~/Library/Logs/jota-voice/stderr.log | grep --line-buffered 'wake\\|RESPONDING\\|transcription'"
     echo ""
     echo "  Si wake-word no dispara, prueba:"
     echo "    launchctl bootout gui/\$(id -u)/com.jota.voice"
@@ -316,7 +348,7 @@ else
     echo "  Revisa los ✗ arriba. Comunes:"
     echo "    - Servicio no cargado → bash install/macos/07-launchd.sh"
     echo "    - Wyoming no responde → sh install/macos/04-oww.sh"
-    echo "    - gateway unreachable → ping ${GW_HOST} o revisa /etc/hosts"
+    echo "    - gateway unreachable → curl -sI ${HTTP_URL} o revisa DNS//etc/hosts"
     echo "════════════════════════════════════════════════════════════"
     exit 1
 fi

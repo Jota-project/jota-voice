@@ -176,13 +176,18 @@ class MenubarClient:
             # KeepAlive=true no desactiva el agente (launchd lo relanza en
             # ~1s), así que enviamos SIGTERM al proceso actual: el observer
             # NSFileHandle (issue #104) lo captura, stop_event se dispara,
-            # main() apaga y NSApp.run() retorna. launchd puede relanzarlo
-            # (KeepAlive=true); para desactivarlo del todo:
-            # 'launchctl unload -w ~/Library/LaunchAgents/com.jota.voice.plist'.
+            # main() apaga y NSApp.run() retorna con exit 0. Desde #46 el
+            # LaunchAgent usa KeepAlive.SuccessfulExit=false por defecto: una
+            # salida limpia NO se relanza, así que el servicio queda parado
+            # hasta el próximo inicio de sesión o
+            # 'launchctl kickstart gui/$(id -u)/com.jota.voice'. Solo con
+            # JOTA_KEEP_ALIVE=always (install/macos/07-launchd.sh) launchd
+            # lo relanzaría.
             pid = os.getpid()
             log.info(
                 "MenubarClient: shutdown_service received, enviando SIGTERM "
-                "a PID %d (KeepAlive=true puede relanzar el proceso)", pid,
+                "a PID %d (apagado limpio; launchd no lo relanza salvo "
+                "JOTA_KEEP_ALIVE=always)", pid,
             )
             try:
                 os.kill(pid, signal.SIGTERM)

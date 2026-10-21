@@ -1,0 +1,5 @@
+# Dialecto de los scripts de instalación (issue #57/#43, revisión de shellcheck):
+# - Los pasos de Termux se ejecutan con bash (install/install-termux.sh) y usan
+#   `source`; `local` lo soportan bash, dash y el sh de macOS.
+# - Los `. "$dir/..."` con rutas calculadas no se pueden seguir en estático.
+disable=SC3043,SC3046,SC3051,SC1091

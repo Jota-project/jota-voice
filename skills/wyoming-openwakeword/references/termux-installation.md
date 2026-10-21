@@ -42,7 +42,7 @@ Para capturar audio en Android/Termux hay tres opciones:
   proceso indefinidamente si Termux:API no está listo. Solo usar interactivamente.
 
 Los 7 bugs resueltos del pipeline de audio Android están documentados en
-`~/.claude/projects/-Users-alfonsogarre-Workspace-jota-voice/memory/feedback_audio_android.md`
+`~/.claude/projects/-Users-usuario-Workspace-jota-voice/memory/feedback_audio_android.md`
 (memoria del proyecto). Los que más afectan a OWW:
 
 - `parec` lee del source sin crear `source-output` en PulseAudio → el

@@ -12,7 +12,7 @@ y respuesta, se apaga sola tras unos segundos.
 Teléfono (<IP_TELEFONO>)
   wyoming-satellite → hook scripts → POST http://<IP_ASISTENTE>:8766/state
                                           ↓
-                               worker-01: kiosk-server.py
+                               mi-asistente: kiosk-server.py
                                  • actualiza estado SSE
                                  • adb shell KEYCODE_WAKEUP / KEYCODE_SLEEP
 
@@ -22,7 +22,7 @@ Teléfono (<IP_TELEFONO>)
 
 ---
 
-## Servicio en worker-01
+## Servicio en mi-asistente
 
 **Archivo:** `/home/tu-usuario/kiosk_server.py`
 **Archivos estáticos:** `/home/tu-usuario/index.html`, `/home/tu-usuario/manifest.json`
@@ -61,9 +61,9 @@ journalctl --user -u kiosk-server -f
 
 ---
 
-## ADB WiFi desde worker-01
+## ADB WiFi desde mi-asistente
 
-El teléfono tiene **Depuración inalámbrica** activa. Worker-01 usa las mismas claves ADB
+El teléfono tiene **Depuración inalámbrica** activa. Mi-asistente usa las mismas claves ADB
 del Mac (copiadas en `~/.android/`), así que conecta sin re-emparejar.
 
 **Puerto de conexión ADB:** `<IP_TELEFONO>:32906`
@@ -145,9 +145,9 @@ bash deploy.sh
 
 ---
 
-## DNS local (dnsmasq en worker-01)
+## DNS local (dnsmasq en mi-asistente)
 
-Se instaló `dnsmasq` para que el teléfono resuelva `worker-01` por nombre.
+Se instaló `dnsmasq` para que el teléfono resuelva `mi-asistente` por nombre.
 Android Chrome no soporta `.local` (mDNS), así que el teléfono necesita un DNS real.
 
 **Config:** `/etc/dnsmasq.d/local.conf`
@@ -156,7 +156,7 @@ no-resolv
 no-hosts
 server=8.8.8.8
 server=8.8.4.4
-address=/worker-01/<IP_ASISTENTE>
+address=/mi-asistente/<IP_ASISTENTE>
 listen-address=<IP_ASISTENTE>
 bind-interfaces
 ```
@@ -207,7 +207,7 @@ tail -30 ~/wyoming-satellite.log
 # Desde el Mac:
 nc -z -w 2 <IP_TELEFONO> 10401 && echo "OK" || echo "CAÍDO"
 
-# ¿Kiosk server en worker-01?
+# ¿Kiosk server en mi-asistente?
 systemctl --user status kiosk-server
 
 # ¿ADB conectado?

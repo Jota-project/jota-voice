@@ -162,7 +162,7 @@ The `jota-voice init` command should:
 
 | File | Hardcoded | Fix |
 |------|-----------|-----|
-| `kiosk/hooks/*.sh` | `http://192.168.1.109:8766/state` | Read from `~/.jota-display-url` |
+| `kiosk/hooks/*.sh` | `http://192.168.X.X:8766/state` | Read from `~/.jota-display-url` |
 | `kiosk/deploy.sh` | IP, PORT, PASS | Use `devices/*.env` |
 | `boot/hook.sh` | `192.168.1.1` (DNS) | Read from config.yaml |
 

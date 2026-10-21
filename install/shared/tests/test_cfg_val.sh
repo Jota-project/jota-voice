@@ -16,7 +16,7 @@ trap 'rm -f "$CONFIG"' EXIT
 
 cat > "$CONFIG" <<'EOF'
 gateway:
-  url: "wss://green-house.alfonsogarre.com/api/gateway/ws/stream"
+  url: "wss://gateway.example.com/api/gateway/ws/stream"
   client_key: "test-key"
   connect_timeout_s: 10
 
@@ -47,7 +47,7 @@ check() {
     fi
 }
 
-check "gateway.url"   "wss://green-house.alfonsogarre.com/api/gateway/ws/stream"
+check "gateway.url"   "wss://gateway.example.com/api/gateway/ws/stream"
 check "oww.host"      "127.0.0.1"
 check "oww.port"      "10401"
 check "device.id"     "test-device"

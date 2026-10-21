@@ -5,6 +5,7 @@
 set -e
 source "$REPO_DIR"/lib/output.sh
 source "$REPO_DIR"/lib/yaml.sh
+source "$REPO_DIR"/lib/secure.sh
 
 # Detecta si REPO_DIR == HOME/jota-voice (mismo sistema de ficheros, mismo path)
 SAME_TREE=0
@@ -45,6 +46,10 @@ _ensure_device_config_symlink() {
             _info "Migra el campo manualmente (añade device: / id: \"...\") y reintenta."
             return 1
         fi
+        if ! jota_valid_id "$existing_id"; then
+            _err "device.id inválido en config.yaml: '$existing_id' (solo letras, dígitos, _ y -)."
+            return 1
+        fi
         mkdir -p "$REPO_DIR/devices/$existing_id"
         mv "$cfg_path" "$REPO_DIR/devices/$existing_id/config.yaml"
         ln -s "devices/$existing_id/config.yaml" "$cfg_path"
@@ -53,6 +58,10 @@ _ensure_device_config_symlink() {
     fi
 
     if [ -n "${DEVICE_ID:-}" ]; then
+        if ! jota_valid_id "$DEVICE_ID"; then
+            _err "DEVICE_ID inválido: '$DEVICE_ID' (solo letras, dígitos, _ y -)."
+            return 1
+        fi
         if [ ! -f "$REPO_DIR/devices/$DEVICE_ID/config.yaml" ]; then
             _err "DEVICE_ID=$DEVICE_ID pero no existe devices/$DEVICE_ID/config.yaml"
             return 1
@@ -94,6 +103,10 @@ _check() {
 
 _apply() {
     _ensure_device_config_symlink || exit 1
+
+    # Issue #44: config.yaml (client_key) a 600 en cada instalación/update;
+    # antes Termux no aplicaba ningún chmod.
+    jota_secure_perms "$REPO_DIR"
 
     _install_file "$REPO_DIR/boot/supervisord.conf.tpl" "$HOME/supervisord.conf" 0600
     _ok "supervisord.conf generado"

@@ -109,6 +109,13 @@ def _call_soon_threadsafe_safe(loop: asyncio.AbstractEventLoop, stop_event: asyn
         )
 
 
+# Fichero que abre "Abrir logs" si menubar.log_path no lo fija. El logging
+# (logging.basicConfig) escribe en stderr, y el LaunchAgent lo redirige a
+# StandardErrorPath = ~/Library/Logs/jota-voice/stderr.log
+# (install/macos/launchd-plist.sh); stdout.log queda casi vacío.
+DEFAULT_LOG_PATH = "~/Library/Logs/jota-voice/stderr.log"
+
+
 def _setup_logging(level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
@@ -280,9 +287,7 @@ async def main(
 
     def _open_logs() -> None:
         import platform
-        path = cfg.menubar.log_path or os.path.expanduser(
-            "~/Library/Logs/jota-voice/stdout.log"
-        )
+        path = cfg.menubar.log_path or os.path.expanduser(DEFAULT_LOG_PATH)
         try:
             if platform.system() == "Darwin":
                 subprocess.Popen(["open", "-a", "Console", path])
@@ -347,11 +352,18 @@ async def main(
 
     stop_task = asyncio.create_task(stop_event.wait(), name="stop_signal")
 
+    # Excepción de la state machine, si fue ella (y no un stop) la que acabó
+    # con main(). Se relanza tras la limpieza para que el proceso salga con
+    # código distinto de 0: con KeepAlive.SuccessfulExit=false (#46) launchd
+    # solo relanza los fallos, y antes un crash acababa en exit 0.
+    crash: BaseException | None = None
     try:
         done, pending = await asyncio.wait(
             [sm_task, stop_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
+        if sm_task in done and not sm_task.cancelled():
+            crash = sm_task.exception()
         for t in pending:
             t.cancel()
     finally:
@@ -389,13 +401,17 @@ async def main(
         if needs_main_thread(menubar_backend):
             menubar_backend.stop()
 
+    if crash is not None:
+        log.error("La máquina de estados terminó con un error: %r", crash)
+        raise crash
+
 
 async def _on_wake(bus: EventBus, name: str) -> None:
     """Callback por defecto de wake word — publica en el bus."""
     bus.publish(VoiceEvent(type="wake_word_detected", data={"wake_word": name}))
 
 
-def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
+def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> int:
     """Corre asyncio en un hilo de trabajo y deja el hilo principal libre
     para NSApp.run().
 
@@ -418,6 +434,9 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
     loop_holder: dict = {}
     stop_holder: dict = {}
     loop_ready = threading.Event()
+    # El hilo asyncio terminó por un error y no por un apagado pedido
+    # (señal, "Salir", "Apagar servicio"): el proceso debe salir con != 0.
+    crashed = threading.Event()
 
     def _asyncio_thread() -> None:
         async def _runner() -> None:
@@ -431,6 +450,11 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
             asyncio.run(_runner())
         except Exception:
             log.exception("El hilo de asyncio terminó con un error no controlado")
+            # Un error durante un apagado ya pedido no es un fallo que launchd
+            # deba relanzar ("Apagar servicio" debe seguir siendo definitivo).
+            stop_event = stop_holder.get("stop_event")
+            if stop_event is None or not stop_event.is_set():
+                crashed.set()
             # Por si el fallo ocurrió antes de que _runner() llegara a
             # loop_ready.set(): el hilo principal no debe quedarse
             # esperando los 5s completos del timeout.
@@ -534,6 +558,8 @@ def _run_with_cocoa_menubar(cfg: Config, menubar_backend) -> None:
     if loop is not None and stop_event is not None:
         _call_soon_threadsafe_safe(loop, stop_event)
     t.join(timeout=10.0)
+    # Código de salida para launchd (#46: solo relanza si es != 0).
+    return 1 if crashed.is_set() else 0
 
 
 if __name__ == "__main__":
@@ -552,6 +578,8 @@ if __name__ == "__main__":
     _menubar_backend = registry.make_menubar(_cfg)
 
     if needs_main_thread(_menubar_backend):
-        _run_with_cocoa_menubar(_cfg, _menubar_backend)
+        sys.exit(_run_with_cocoa_menubar(_cfg, _menubar_backend))
     else:
+        # Sin menubar una excepción de main() (incluido un crash de la state
+        # machine, que main relanza tras limpiar) sale con código 1.
         asyncio.run(main(_cfg, _menubar_backend))

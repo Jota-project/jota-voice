@@ -26,7 +26,10 @@ _apply() {
     "$OWW_VENV/bin/pip" install -q audioop-lts "wyoming==1.1.0" requests joblib tqdm
 
     # Verificar que ok_nabu está disponible (v1.3.0 lo bundlea; descarga como fallback)
-    MODELS_DIR="$OWW_VENV/lib/python3.13/site-packages/wyoming_openwakeword/models"
+    # Ruta derivada del propio venv (antes fija a python3.13: se rompía con
+    # cualquier otra versión de Python de Termux).
+    MODELS_DIR="$("$OWW_VENV/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/wyoming_openwakeword/models"
+    mkdir -p "$MODELS_DIR"
     if ! find "$MODELS_DIR" -name "ok_nabu*" 2>/dev/null | grep -q "ok_nabu"; then
         _info "Descargando modelo ok_nabu (no bundleado)"
         curl -fsSL -o "$MODELS_DIR/ok_nabu_v0.1.tflite" \
