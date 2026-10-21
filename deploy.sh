@@ -2,14 +2,15 @@
 # deploy.sh — despliega jota-voice al target indicado (phone | macbook)
 #
 # Uso: ./deploy.sh phone [device_name]
-#      ./deploy.sh macbook
+#      REPO_LOCAL=<copia de despliegue> ./deploy.sh macbook
 #
 # phone   -> rsync al teléfono Android vía Termux (ssh) y reinicia jota-voice
 #            vía supervisorctl. Lee la conexión de devices/<device_name>.env
 #            (ver devices/example.env). Si solo hay un devices/*.env, se
 #            autodetecta. Autenticación: clave SSH (recomendado, PHONE_PASS
 #            vacío) o contraseña vía sshpass -e (nunca en la línea de órdenes).
-# macbook -> rsync local a $HOME/Work/jota-voice y reinicia el launchd service.
+# macbook -> rsync de ESTE checkout (el directorio del script, no el actual)
+#            a $REPO_LOCAL, que es obligatorio, y reinicia el LaunchAgent.
 
 set -euo pipefail
 
@@ -20,7 +21,19 @@ TARGET="${1:-phone}"
 
 case "$TARGET" in
     macbook)
-        REPO_LOCAL="${REPO_LOCAL:-$HOME/Work/jota-voice}"
+        # Sin default: un rsync --delete hacia una ruta supuesta es peligroso.
+        if [ -z "${REPO_LOCAL:-}" ]; then
+            echo "ERROR: define REPO_LOCAL=<copia de despliegue> (la ruta desde la que corre el LaunchAgent)."
+            exit 1
+        fi
+        mkdir -p "$REPO_LOCAL"
+        REPO_LOCAL="$(cd "$REPO_LOCAL" && pwd)"
+        case "$REPO_LOCAL" in
+            /|"$HOME"|"$REPO_LOCAL_SELF")
+                echo "ERROR: REPO_LOCAL=$REPO_LOCAL no es un destino válido (raíz, \$HOME o este mismo checkout)."
+                exit 1
+                ;;
+        esac
         # Id del Mac: DEVICE_ID, o el único devices/<id>/config.yaml, o el
         # hostname (issue #101: sin ids reales en el código).
         # shellcheck source=lib/device.sh
@@ -41,11 +54,11 @@ case "$TARGET" in
             exit 1
         fi
 
-        echo "[deploy macbook] rsync local en $REPO_LOCAL…"
+        echo "[deploy macbook] rsync local en ${REPO_LOCAL}…"
         rsync -a --delete \
-            --exclude '.venv' --exclude '__pycache__' --exclude '.git' \
+            --exclude '.venv' --exclude '__pycache__' --exclude '.git' --exclude '.claude' \
             --exclude 'devices/*/.env' --exclude 'devices/*/config.yaml' \
-            ./ "$REPO_LOCAL/"
+            "$REPO_LOCAL_SELF/" "$REPO_LOCAL/"
 
         # Symlink del config (install/macos/06-configs.sh lo crea también;
         # aquí solo aseguramos que existe tras el rsync).

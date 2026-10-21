@@ -49,7 +49,7 @@ Variables de entorno opcionales:
 
 Por defecto launchd solo relanza el cliente si sale con error, esperando 30 s entre intentos. "Apagar servicio" en el menú lo para hasta el próximo inicio de sesión o hasta `launchctl kickstart gui/$(id -u)/com.jota.voice`.
 
-Desplegar cambios del repo al Mac: `bash deploy.sh macbook` (rsync a `$REPO_LOCAL`, por defecto `~/Work/jota-voice`, y reinicio del servicio).
+Desplegar cambios del repo al Mac: `REPO_LOCAL=<copia de despliegue> bash deploy.sh macbook`. Hace rsync de este checkout a `$REPO_LOCAL` (obligatorio, sin valor por defecto) y reinicia el servicio. `$REPO_LOCAL` debe ser la ruta desde la que se instaló el LaunchAgent.
 
 ### Termux (Android)
 

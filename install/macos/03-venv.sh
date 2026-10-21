@@ -15,7 +15,7 @@ if [ -d "$VENV_DIR" ] && ! jota_python_ok "$VENV_DIR/bin/python"; then
     rm -rf "$VENV_DIR"
 fi
 
-_info "Creando venv en $VENV_DIR…"
+_info "Creando venv en ${VENV_DIR}…"
 mkdir -p "$(dirname "$VENV_DIR")"
 if [ ! -d "$VENV_DIR" ]; then
     "$PY" -m venv "$VENV_DIR"

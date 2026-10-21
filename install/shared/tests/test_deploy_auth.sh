@@ -56,4 +56,33 @@ PATH="$TMP/bin:$PATH" bash "$TMP/repo/deploy.sh" phone tel > "$TMP/out" 2>&1 || 
 if grep -q "^sshpass" "$LOG"; then bad "usó sshpass sin contraseña"; else ok "clave SSH: sin sshpass"; fi
 grep -q "^ssh -p 8022 u@192.0.2.1" "$LOG" && ok "ssh directo" || bad "no llamó a ssh: $(cat "$LOG")"
 
+# --- macbook: origen = directorio del script; destino obligatorio ---------
+cp "$ROOT/lib/device.sh" "$TMP/repo/lib/"
+mkdir -p "$TMP/repo/devices/mac" "$TMP/home" "$TMP/otro-cwd"
+echo "x: y" > "$TMP/repo/devices/mac/config.yaml"
+printf '#!/bin/sh\necho "launchctl $*" >> "%s"\n' "$LOG" > "$TMP/bin/launchctl"
+chmod +x "$TMP/bin/launchctl"
+
+: > "$LOG"
+if (cd "$TMP/otro-cwd" && env -u REPO_LOCAL HOME="$TMP/home" PATH="$TMP/bin:$PATH" bash "$TMP/repo/deploy.sh" macbook) > "$TMP/out" 2>&1; then
+    bad "macbook sin REPO_LOCAL no falló"
+else
+    grep -q "^rsync" "$LOG" && bad "macbook sin REPO_LOCAL hizo rsync" || ok "macbook: REPO_LOCAL obligatorio"
+fi
+
+: > "$LOG"
+if (cd "$TMP/otro-cwd" && REPO_LOCAL="$TMP/repo" HOME="$TMP/home" PATH="$TMP/bin:$PATH" bash "$TMP/repo/deploy.sh" macbook) > "$TMP/out" 2>&1; then
+    bad "macbook hacia sí mismo no falló"
+else
+    ok "macbook: rechaza REPO_LOCAL = este checkout"
+fi
+
+# Copia de despliegue ya instalada (con su config) y lanzado desde otro cwd.
+mkdir -p "$TMP/dest/devices/mac" && echo "x: y" > "$TMP/dest/devices/mac/config.yaml"
+: > "$LOG"
+(cd "$TMP/otro-cwd" && REPO_LOCAL="$TMP/dest" DEVICE_ID=mac HOME="$TMP/home" PATH="$TMP/bin:$PATH" bash "$TMP/repo/deploy.sh" macbook) > "$TMP/out" 2>&1 \
+    || bad "macbook válido falló: $(cat "$TMP/out")"
+grep "^rsync" "$LOG" | grep -q " $TMP/repo/ $TMP/dest/$" && ok "macbook: rsync desde el directorio del script" \
+    || bad "macbook: origen incorrecto: $(grep '^rsync' "$LOG")"
+
 exit $fail

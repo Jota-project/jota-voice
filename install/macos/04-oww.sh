@@ -40,7 +40,7 @@ if [ "$CMD" = "uninstall" ]; then
     PLIST="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
 
     if launchctl print "gui/${USER_UID}/${PLIST_LABEL}" >/dev/null 2>&1; then
-        _info "Parando servicio $PLIST_LABEL…"
+        _info "Parando servicio ${PLIST_LABEL}…"
         launchctl bootout "gui/${USER_UID}/${PLIST_LABEL}" 2>/dev/null || true
         _ok "Servicio parado"
     else

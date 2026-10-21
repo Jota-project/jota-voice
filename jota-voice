@@ -283,7 +283,7 @@ cmd_update() {
 
     _info "[$DEVICE_NAME] Sincronizando código..."
     _ssh "mkdir -p $PHONE_DIR"
-    _rsync "$REPO_DIR/" "$PHONE_HOST:$PHONE_DIR/"
+    _rsync "$REPO_DIR/" "$PHONE_USER@$PHONE_HOST:$PHONE_DIR/"
 
     # rsync -a debería preservar permisos, pero en la práctica entre Mac y
     # Termux (Android) los pierde. Aplicamos chmod explícito post-sync a

@@ -47,6 +47,10 @@ else
     bad "update sin reread/update: $(cat "$LOG")"
 fi
 
+# rsync de update con usuario (antes "$PHONE_HOST:" sin PHONE_USER@).
+grep "^rsync" "$LOG" | grep -q " u0_aXXX@192.0.2.1:/data/data/com.termux/files/home/jota-voice/$" \
+    && ok "update: rsync a usuario@host" || bad "update: rsync sin usuario: $(grep '^rsync' "$LOG")"
+
 # --- --all: cada dispositivo parte de cero (sin credenciales heredadas) ---
 mkdir -p "$TMP/all/devices"
 cp "$ROOT/jota-voice" "$TMP/all/"
