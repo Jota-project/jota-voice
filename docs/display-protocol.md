@@ -253,6 +253,14 @@ siguiente `text_update` antes de terminar, salta al final del anterior.
 mensaje: un display que no anime puede mostrar directamente
 `cumulative_text`.
 
+Si el texto llega antes que el audio (el gateway con OpenClaw entrega la
+respuesta entera de golpe), el cliente lo reparte entre los chunks a un
+ritmo de habla estimado (`CHARS_PER_SECOND` en `playback_engine.py`, unos
+15 car/s), cortando siempre al final de una palabra. Al terminar el turno
+manda lo que quede en un último `text_update` con `duration_s: 0`, que se
+pinta sin animar. Siempre se cumple que `cumulative_text` es el
+`cumulative_text` anterior más `chunk_text`.
+
 ### `tool_call` — herramienta del agente
 
 ```json

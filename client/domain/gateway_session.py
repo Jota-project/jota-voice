@@ -25,7 +25,8 @@ El supervisor:
   2. Si el último rechazo fue fatal (1008 de auth/política, HTTP 401/403) NO
      reintenta en segundo plano: lo publica una vez como ``error`` y espera.
      Solo un turno pedido por el usuario vuelve a intentarlo (visible).
-  3. Con la sesión viva, escucha ``status`` (→ bus) y descarta lo demás; y
+  3. Con la sesión viva, escucha ``status`` y ``pipeline_event`` (→ bus) y
+     descarta lo demás; y
      manda un keepalive de aplicación si el cliente lleva
      ``keepalive_interval_s`` sin enviar nada, para que el gateway no cierre
      por IDLE_TIMEOUT_S.
@@ -45,6 +46,7 @@ from config import GatewayConfig
 from core.aio import cancel_and_wait
 
 from .event_bus import EventBus, VoiceEvent
+from .pipeline_stats import publish_pipeline_stage
 
 log = logging.getLogger(__name__)
 
@@ -87,6 +89,8 @@ async def gateway_idle_listener(bus: EventBus, gateway: GatewayClient) -> str:
             if ev.type == "status":
                 bus.publish(VoiceEvent(type="gateway_status", data=ev.data))
                 log.info("IDLE: gateway status → %r", ev.data)
+            elif ev.type == "pipeline_event":
+                publish_pipeline_stage(bus, ev.data, "IDLE")
             elif ev.type in ("interrupted", "turn_start", "tool_call"):
                 # Los push del agente durante IDLE no se reproducen todavía
                 # (fuera del alcance de #24/#118) — log y descartar.

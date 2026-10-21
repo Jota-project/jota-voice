@@ -198,6 +198,31 @@ def _closed_info(exc: BaseException) -> tuple[int, str]:
 _ABORT_CLOSE_S = 0.5
 
 
+def _parse_pipeline_event(data: dict) -> dict | None:
+    """Normaliza un ``pipeline_event`` del gateway.
+
+    No está en client-protocol.md; lo manda ``PipelineTracker.record()``
+    (jota-gateway, src/services/pipeline_tracker.py) cuando el handshake pide
+    ``status`` en output_mode: ``{"type": "pipeline_event", "stage",
+    "elapsed_ms", "turn"}``. ``elapsed_ms`` es el tiempo desde el evento
+    ANTERIOR del tracker (de cualquier etapa), no desde el inicio del turno,
+    y ``turn`` es un contador de turnos del tracker, distinto de
+    ``turn_id``/``turn_seq``. Devuelve None si falta un ``stage`` de texto;
+    los campos numéricos ausentes o inválidos quedan en None.
+    """
+    stage = data.get("stage")
+    if not isinstance(stage, str) or not stage:
+        return None
+    elapsed = data.get("elapsed_ms")
+    turn = data.get("turn")
+    return {
+        "stage": stage,
+        "elapsed_ms": float(elapsed)
+        if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool) else None,
+        "turn": turn if isinstance(turn, int) and not isinstance(turn, bool) else None,
+    }
+
+
 async def _close_quickly(ws: Any) -> None:
     try:
         await asyncio.wait_for(ws.close(), timeout=_ABORT_CLOSE_S)
@@ -435,6 +460,11 @@ class GatewayClient:
                 log.info("Gateway: status antes de 'ready' → %r", msg)
                 self._publish("gateway_status", msg)
                 continue
+            if msg_type == "pipeline_event":
+                # Telemetría del pipeline (pipeline_tracker.py del gateway);
+                # antes de `ready` no hay turno al que asociarla.
+                log.debug("Gateway: pipeline_event antes de 'ready' ignorado: %r", msg)
+                continue
             if msg_type == "error":
                 # El `code` del gateway (AUTH_FAILED…) va en el reason: el
                 # atributo .code es el close code WS (issue #113).
@@ -601,6 +631,13 @@ class GatewayClient:
                 # terminaba el generador). Con sesión persistente puede ser el
                 # fin de un push ajeno, y tras el nuestro aún llega audio
                 # (client-protocol §5): decide _responding, que conoce su turno.
+                if event_type == "pipeline_event":
+                    pipeline = _parse_pipeline_event(data)
+                    if pipeline is None:
+                        log.debug("Gateway: pipeline_event sin stage válido: %r", data)
+                        continue
+                    yield GatewayEvent(type="pipeline_event", data=pipeline)
+                    continue
                 if event_type == "token":
                     event_type = "llm_token"
                     # El protocolo actual manda el texto en `text`

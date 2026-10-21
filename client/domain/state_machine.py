@@ -50,6 +50,7 @@ from config import Config, GatewayConfig
 from core.aio import cancel_and_wait
 
 from .event_bus import EventBus, VoiceEvent
+from .pipeline_stats import TURN_ACTIVITY_STAGES, TurnLatency, publish_pipeline_stage
 
 log = logging.getLogger(__name__)
 
@@ -485,6 +486,12 @@ async def _responding(
         clock = asyncio.get_running_loop().time
     grace_s = gateway_cfg.turn_end_grace_s
     playback_started = False
+    latency = TurnLatency()
+
+    def _log_latency(outcome: str) -> None:
+        line = latency.summary(now=clock())
+        if line is not None:
+            log.info("RESPONDING: %s [%s]", line, outcome)
 
     async def _receive_loop() -> None:
         nonlocal playback_started
@@ -645,6 +652,25 @@ async def _responding(
                 bus.publish(VoiceEvent(type="gateway_status", data=gw_event.data))
                 log.info("RESPONDING: status de gateway → %r", gw_event.data)
 
+            elif gw_event.type == "pipeline_event":
+                # Telemetría del gateway (domain/pipeline_stats.py). Su
+                # `turn` es un contador del tracker, no el turn_id: no se
+                # usa para decidir de quién es el evento.
+                stage = gw_event.data.get("stage", "")
+                publish_pipeline_stage(bus, gw_event.data, "RESPONDING")
+                latency.feed(stage, gw_event.data.get("elapsed_ms"), now=clock())
+                # Las etapas de LLM/TTS cuentan como actividad SOLO con
+                # nuestro turno empezado: el gateway manda turn_start antes
+                # de llm_start/tts_start del mismo turno (bridge.py
+                # _call_orchestrator), así que en la fase "start" solo pueden
+                # ser de un push ajeno y alargarían sin límite el plazo de
+                # inicio. Dentro del turno prueban que el gateway trabaja en
+                # él (p. ej. el LLM pensando antes del primer token). No
+                # tocan la gracia tras turn_end: esa solo la alarga el audio.
+                if stage in TURN_ACTIVITY_STAGES and deadline.phase == "turn" \
+                        and grace_deadline is None:
+                    deadline.progress()
+
             elif gw_event.type == "tool_call":
                 # jota-gateway client-protocol §5 (opt-in tool_calls_enabled):
                 # phase start/result, name, tool_call_id, args, result,
@@ -733,6 +759,10 @@ async def _responding(
             exc = receive_task.exception()
             if exc is not None:
                 raise exc
+    except BaseException as exc:
+        # Turno cancelado o fallido: también deja su línea de latencias.
+        _log_latency("cancelado" if isinstance(exc, _TurnCancelled) else "interrumpido")
+        raise
     finally:
         # Issue #21: si la tarea externa fue cancelada durante el wait
         # (SIGTERM durante shutdown), el código de arriba no se ejecuta
@@ -742,6 +772,7 @@ async def _responding(
     await playback.drain()
     bus.publish(VoiceEvent(type="playback_ended", data={}))
     log.debug("RESPONDING: reproducción completada")
+    _log_latency("ok")
 
 
 # ---------------------------------------------------------------------------

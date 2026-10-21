@@ -26,7 +26,7 @@ from tests.fakes.waiting import wait_until
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_engine() -> tuple[PlaybackEngine, EventBus, list[VoiceEvent]]:
+def _make_engine(**kwargs) -> tuple[PlaybackEngine, EventBus, list[VoiceEvent]]:
     """Devuelve (engine, bus, captured_events, audio_mock)."""
     bus = EventBus()
     captured: list[VoiceEvent] = []
@@ -44,7 +44,7 @@ def _make_engine() -> tuple[PlaybackEngine, EventBus, list[VoiceEvent]]:
     # y una llamada fuera de la interfaz hace fallar el test.
     audio = create_autospec(AudioBackend, instance=True)
 
-    engine = PlaybackEngine(bus=bus, audio=audio)
+    engine = PlaybackEngine(bus=bus, audio=audio, **kwargs)
     return engine, bus, captured
 
 
@@ -89,15 +89,13 @@ class TestPlayChunk(unittest.IsolatedAsyncioTestCase):
 
     async def test_un_evento_por_chunk_con_su_duracion(self) -> None:
         engine, _, captured = _make_engine()
-        engine.push_token("Hola mundo, esto es una prueba de texto largo.")
-        await engine.play_chunk(_make_audio(0.5))
+        engine.push_token("Hola mundo, esto es una prueba.")
+        await engine.play_chunk(_make_audio(3.0))
         events = self._display(captured)
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].data["chunk_text"],
-                         "Hola mundo, esto es una prueba de texto largo.")
-        self.assertEqual(events[0].data["cumulative_text"],
-                         "Hola mundo, esto es una prueba de texto largo.")
-        self.assertAlmostEqual(events[0].data["duration_s"], 0.5, places=3)
+        self.assertEqual(events[0].data["chunk_text"], "Hola mundo, esto es una prueba.")
+        self.assertEqual(events[0].data["cumulative_text"], "Hola mundo, esto es una prueba.")
+        self.assertAlmostEqual(events[0].data["duration_s"], 3.0, places=3)
 
     async def test_texto_crece_entre_chunks(self) -> None:
         engine, _, captured = _make_engine()
@@ -247,10 +245,12 @@ class TestTextoIncremental(unittest.IsolatedAsyncioTestCase):
     tokens nuevos desde el chunk anterior y acumula el texto completo."""
 
     async def test_cada_chunk_solo_procesa_tokens_pendientes(self) -> None:
+        # Chunks de 0,5 s (≈7 caracteres a 15 car/s): cada token de 4
+        # caracteres cabe entero en su chunk (streaming más lento que la voz).
         engine, _, captured = _make_engine()
         for i in range(50):
             engine.push_token(f"t{i} ")
-            await engine.play_chunk(_make_audio(0.01))
+            await engine.play_chunk(_make_audio(0.5))
             # Los tokens ya publicados no se vuelven a recorrer.
             self.assertEqual(engine._text_buffer, [])
         events = [e for e in captured if e.type == "display_text_update"]
@@ -262,10 +262,166 @@ class TestTextoIncremental(unittest.IsolatedAsyncioTestCase):
         engine, _, captured = _make_engine()
         engine.push_token("a")
         engine.push_token("b")
-        await engine.play_chunk(_make_audio(0.01))
+        await engine.play_chunk(_make_audio(0.5))
         engine.push_token("c")
         engine.push_token("d")
-        await engine.play_chunk(_make_audio(0.01))
+        await engine.play_chunk(_make_audio(0.5))
         events = [e for e in captured if e.type == "display_text_update"]
         self.assertEqual([e.data["chunk_text"] for e in events], ["ab", "cd"])
         self.assertEqual([e.data["cumulative_text"] for e in events], ["ab", "abcd"])
+
+
+# Texto de ~600 caracteres como el del log real del 2026-10-21: el gateway
+# (con OpenClaw) entrega TODO el texto antes que el primer chunk de audio.
+_RESPUESTA_LARGA = (
+    "Claro, te pongo la lista de reproducción que me pides en Spotify. "
+    "Mientras empieza, te cuento que esta mañana hará algo de frío en "
+    "Madrid, con máximas de catorce grados y algunas nubes por la tarde, "
+    "así que conviene llevar una chaqueta ligera si vas a salir. Para el "
+    "fin de semana se esperan lluvias débiles el sábado y un domingo más "
+    "despejado, ideal para dar un paseo por el Retiro o acercarte a la "
+    "sierra. Si quieres, puedo recordarte mañana a primera hora que mires "
+    "el tiempo antes de salir de casa, o añadir un aviso al calendario "
+    "para la excursión del domingo. Dime qué prefieres y lo dejo listo."
+)
+
+
+class TestRitmoDelTexto(unittest.IsolatedAsyncioTestCase):
+    """Prueba real 2026-10-21: con todo el texto delante del audio, el primer
+    chunk (0,5 s) se llevaba los 600 caracteres y los 25 siguientes salían
+    con chunk_text vacío. Ahora el texto pendiente se reparte al ritmo de
+    habla estimado (chars_per_second), sin cortar palabras."""
+
+    def _display(self, captured: list[VoiceEvent]) -> list[VoiceEvent]:
+        return [e for e in captured if e.type == "display_text_update"]
+
+    def _assert_invariante(self, events: list[VoiceEvent]) -> None:
+        # cumulative_N == cumulative_{N-1} + chunk_text_N: display_http
+        # calcula la base del reveal con len(cumulative) - len(chunk).
+        previo = ""
+        for e in events:
+            self.assertEqual(e.data["cumulative_text"], previo + e.data["chunk_text"])
+            previo = e.data["cumulative_text"]
+
+    async def test_caso_real_todo_el_texto_antes_que_el_audio(self) -> None:
+        engine, _, captured = _make_engine()
+        palabras = _RESPUESTA_LARGA.split(" ")
+        for palabra in palabras:
+            engine.push_token(palabra + " ")
+        texto = "".join(p + " " for p in palabras)
+        for _ in range(26):
+            await engine.play_chunk(_make_audio(0.5))
+        await engine.drain()
+
+        events = self._display(captured)
+        self._assert_invariante(events)
+        # Primer chunk: como mucho 0,5 s de habla más una palabra.
+        cps = engine.chars_per_second
+        palabra_max = max(len(p) for p in palabras) + 1
+        self.assertGreater(len(events[0].data["chunk_text"]), 0)
+        self.assertLessEqual(len(events[0].data["chunk_text"]), 0.5 * cps + palabra_max)
+        # El texto se reparte entre los chunks de audio (antes: 25 de 26
+        # vacíos). Alguno puede quedar vacío si el anterior terminó una
+        # palabra larga y gastó su crédito.
+        con_texto = sum(1 for e in events[:26] if e.data["chunk_text"])
+        self.assertGreaterEqual(con_texto, 22)
+        # Cortes siempre tras un espacio (sin partir palabras).
+        for e in events:
+            if e.data["chunk_text"]:
+                self.assertTrue(e.data["chunk_text"].endswith(" "), repr(e.data["chunk_text"]))
+        # Tras drain() el display tiene el texto completo.
+        self.assertEqual(len(events), 27)
+        self.assertEqual(events[-1].data["cumulative_text"], texto)
+        self.assertEqual("".join(e.data["chunk_text"] for e in events), texto)
+
+    async def test_ritmo_aproximado_a_chars_per_second(self) -> None:
+        engine, _, captured = _make_engine()
+        engine.push_token(_RESPUESTA_LARGA)
+        for _ in range(20):  # 10 s de audio
+            await engine.play_chunk(_make_audio(0.5))
+        revelado = self._display(captured)[-1].data["cumulative_text"]
+        esperado = 10 * engine.chars_per_second
+        # El exceso por terminar palabra se descuenta (crédito): no se acumula.
+        self.assertLess(abs(len(revelado) - esperado), 15)
+
+    async def test_streaming_mas_lento_que_el_audio_se_comporta_como_antes(self) -> None:
+        engine, _, captured = _make_engine()
+        tokens = ["Mañana", " hará", " sol", " en", " Madrid."]
+        for t in tokens:
+            engine.push_token(t)
+            await engine.play_chunk(_make_audio(0.6))
+        await engine.drain()
+        events = self._display(captured)
+        self.assertEqual([e.data["chunk_text"] for e in events], tokens)
+        self._assert_invariante(events)
+
+    async def test_credito_sin_usar_no_se_acumula(self) -> None:
+        """Audio sin texto al principio: no adelanta el texto que llegue luego."""
+        engine, _, captured = _make_engine()
+        for _ in range(10):  # 5 s de audio sin texto
+            await engine.play_chunk(_make_audio(0.5))
+        engine.push_token(_RESPUESTA_LARGA)
+        await engine.play_chunk(_make_audio(0.5))
+        ultimo = self._display(captured)[-1].data["chunk_text"]
+        self.assertLessEqual(len(ultimo), 0.5 * engine.chars_per_second + 15)
+
+    async def test_palabra_mas_larga_que_el_presupuesto_sale_entera(self) -> None:
+        engine, _, captured = _make_engine(chars_per_second=2.0)
+        engine.push_token("electroencefalografista dice hola")
+        await engine.play_chunk(_make_audio(0.5))  # presupuesto: 1 carácter
+        self.assertEqual(self._display(captured)[0].data["chunk_text"],
+                         "electroencefalografista ")
+        # El exceso se descuenta de los chunks siguientes.
+        await engine.play_chunk(_make_audio(0.5))
+        self.assertEqual(self._display(captured)[-1].data["chunk_text"], "")
+
+    async def test_drain_vacia_el_resto_en_un_ultimo_text_update(self) -> None:
+        engine, _, captured = _make_engine()
+        engine.push_token(_RESPUESTA_LARGA)
+        await engine.play_chunk(_make_audio(0.5))
+        await engine.drain()
+        events = self._display(captured)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[-1].data["cumulative_text"], _RESPUESTA_LARGA)
+        self.assertEqual(events[-1].data["duration_s"], 0.0)
+        self._assert_invariante(events)
+
+    async def test_drain_publica_antes_de_esperar_al_backend(self) -> None:
+        engine, _, captured = _make_engine()
+        engine.push_token(_RESPUESTA_LARGA)
+        await engine.play_chunk(_make_audio(0.5))
+        vistos: list[int] = []
+
+        async def _drain() -> None:
+            vistos.append(len(self._display(captured)))
+
+        engine._audio.drain.side_effect = _drain
+        await engine.drain()
+        self.assertEqual(vistos, [2])
+
+    async def test_drain_sin_texto_pendiente_no_publica(self) -> None:
+        engine, _, captured = _make_engine()
+        engine.push_token("Hola")
+        await engine.play_chunk(_make_audio(1.0))
+        await engine.drain()
+        self.assertEqual(len(self._display(captured)), 1)
+
+    async def test_drain_publica_tokens_que_llegaron_sin_audio(self) -> None:
+        """Turno que acaba solo en texto (el gateway descartó el TTS)."""
+        engine, _, captured = _make_engine()
+        engine.push_token("Solo texto")
+        await engine.drain()
+        events = self._display(captured)
+        self.assertEqual([e.data["cumulative_text"] for e in events], ["Solo texto"])
+
+    async def test_reset_descarta_texto_pendiente_y_credito(self) -> None:
+        engine, _, captured = _make_engine(chars_per_second=2.0)
+        engine.push_token("electroencefalografista anterior")
+        await engine.play_chunk(_make_audio(0.5))  # deja crédito negativo
+        engine.reset()
+        captured.clear()
+        engine.push_token("Nuevo")
+        await engine.play_chunk(_make_audio(3.0))
+        await engine.drain()
+        events = self._display(captured)
+        self.assertEqual([e.data["cumulative_text"] for e in events], ["Nuevo"])
