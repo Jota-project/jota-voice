@@ -1,5 +1,7 @@
 # jota-voice — Arquitectura del sistema
 
+> ⚠️ **Documento legado.** Describe la arquitectura antigua (jota-orchestrator, jota-inference, jota_db, wyoming-satellite), ya sustituida. La arquitectura actual de Jota (cliente → jota-gateway → STT → OpenClaw → TTS) está en https://github.com/jota-project/.github/blob/main/ARCHITECTURE.md.
+
 ## Objetivo
 
 Huawei P8 Lite (LineageOS 18.1) como satélite de voz en Home Assistant, usando **OpenClaw** como cerebro del asistente, **jota-transcriber** como STT y **jota-speaker** como TTS.
