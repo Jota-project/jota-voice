@@ -45,7 +45,9 @@ Los modelos pre-entrenados están **optimizados para inglés americano**.
 Con español o acentos distintos, los scores bajan drásticamente. En
 nuestras pruebas (voces en español, Razer Seiren Mini, threshold 0.15):
 - `hey_jarvis`: scores típicos 0.05-0.45, con picos > 0.15 cada 2-3 intentos.
-- `ok_jota` (custom sub-entrenado): scores < 0.05 siempre.
+- `ok_jota` (versión anterior de 207 KB, sub-entrenada): scores < 0.05 siempre.
+  La versión actual (861 KB, reentrenada el 2026-07-10) es una primera versión
+  usable que se sigue entrenando.
 
 **Conclusión**: si tu voz no es inglés americano, planifica re-entrenar
 un modelo custom. Ver `custom-model-training.md`.

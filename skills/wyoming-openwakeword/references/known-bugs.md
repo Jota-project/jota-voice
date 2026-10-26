@@ -77,7 +77,7 @@ Configurable por env `OWW_THRESHOLD=0.10 sh install/macos/04-oww.sh`.
 **Riesgo**: threshold muy bajo (< 0.05) genera falsos positivos (detección
 sin wake word dicha, e.g. con ruido de TV).
 
-## 5. Modelos custom sub-entrenados (caso `ok_jota`)
+## 5. Modelos custom sub-entrenados
 
 **Síntoma**: scores < 0.05 con voz clara, no se detecta nunca.
 
@@ -86,9 +86,12 @@ sin wake word dicha, e.g. con ruido de TV).
 - Pocas iteraciones de entrenamiento.
 - Arquitectura de red pequeña.
 
-`ok_jota` actual: 207 KB. Modelos bien entrenados pesan **1-4 MB** (e.g.
-`hey_jarvis` = 1.2 MB). El ratio 207 KB vs 1.2 MB es señal clara de
-sub-entrenamiento.
+Modelos bien entrenados pesan **1-4 MB** (e.g. `hey_jarvis` = 1.2 MB). La
+versión anterior de `ok_jota` (207 KB) era un caso así: el ratio 207 KB vs
+1.2 MB es señal clara de sub-entrenamiento. El `ok_jota` actual
+(`jota-wake-trainer/projects/ok_jota/models/ok_jota.tflite`, 861 KB,
+reentrenado el 2026-07-10) es una primera versión usable que se sigue
+entrenando.
 
 **Workaround**: re-entrenar con `notebooks/automatic_model_training.ipynb`
 del repo openWakeWord. Ver `custom-model-training.md`.
