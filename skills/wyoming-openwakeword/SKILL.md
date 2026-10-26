@@ -78,7 +78,8 @@ Resumen, ver `references/known-bugs.md` para detalle:
 4. **Bug regex `_NAME_VERSION`** en `wyoming_openwakeword/__main__.py`:
    trunca `hey_jarvis_v0.1` a `hey`. Workaround: renombrar el fichero sin
    el sufijo `_v<n>`.
-5. **Modelos custom sub-entrenados** (`ok_jota` 207 KB vs `hey_jarvis` 1.2 MB).
+5. **Modelos custom sub-entrenados** (p. ej. la versión anterior de `ok_jota`,
+   207 KB, vs `hey_jarvis` 1.2 MB).
    El modelo no aprendió la wake word; no es bug del runtime, es del
    entrenamiento.
 

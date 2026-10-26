@@ -3,8 +3,8 @@
 ## Visión
 
 jota-voice es la capa de dispositivo del ecosistema jota. Corre en un satélite físico
-(teléfono Android, tablet, ESP32...) y convierte cualquier hardware con micrófono y
-altavoz en un nodo de voz de primera clase.
+(teléfono Android, tablet...; un cliente ESP32 está pendiente) y convierte cualquier
+hardware con micrófono y altavoz en un nodo de voz de primera clase.
 
 Su diferencia frente a un asistente de voz convencional es que **todo es observable en
 tiempo real**: el usuario ve cada fase del pipeline — lo que dijo, cómo se transcribió,
@@ -30,7 +30,8 @@ pantalla muestre las palabras exactamente cuando se están pronunciando.
 
 3. **Independencia de hardware.** jota-voice en Android es la implementación de
    referencia. Los módulos de audio son la única parte hardware-específica; el resto es
-   agnóstico. Un ESP32 puede implementar el mismo contrato con firmware propio.
+   agnóstico. Un ESP32 podría implementar el mismo contrato con firmware propio
+   (pendiente: hoy no existe cliente ESP32).
 
 4. **Fallo ruidoso, recuperación silenciosa.** Los errores se loguean siempre. La
    máquina de estados vuelve a IDLE en cualquier error sin necesitar reinicio del

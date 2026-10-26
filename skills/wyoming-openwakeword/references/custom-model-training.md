@@ -58,8 +58,10 @@ iteraciones. Permite ajustar:
 - Modelo bien entrenado: **1-4 MB** (similar a `hey_jarvis` que pesa 1.2 MB).
 - Modelo sub-entrenado: <500 KB, no detecta con voz real.
 
-`ok_jota` actual: **207 KB** → claramente sub-entrenado. Hay que re-entrenarlo
-desde cero con más datos y/o más iteraciones.
+La versión anterior de `ok_jota` (**207 KB**) estaba claramente sub-entrenada.
+El `ok_jota` actual (`jota-wake-trainer/projects/ok_jota/models/ok_jota.tflite`,
+**861 KB**, reentrenado el 2026-07-10) es una primera versión usable que se
+sigue entrenando.
 
 ## Output
 
