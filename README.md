@@ -168,3 +168,7 @@ jota-voice      CLI de gestión de teléfonos desde el Mac
 ```
 
 Documentación técnica adicional (parte legacy): [`install/docs/`](install/docs/) (spec, arquitectura, kiosk, nginx, bootstrap del teléfono, parches).
+
+## Licencia
+
+MIT. Ver [LICENSE](LICENSE).
